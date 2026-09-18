@@ -15,7 +15,7 @@ except ImportError:  # 插件以顶层模块方式加载时
 
 KARMA_MIN = -50
 KARMA_MAX = 100
-# 好感度记录软上限，超出时按 updated 淘汰最旧的
+# 好感度记录软上限，超出时淘汰（已无时间戳可排序，见 evict_oldest）
 KARMA_MAX_RECORDS = 500
 
 
