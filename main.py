@@ -189,6 +189,8 @@ class NetherLinkPlugin(Star):
             )
         except (TypeError, ValueError, OverflowError):
             self.karma_death_penalty = 2
+        # 对话触发的好感变化是否记一条日志（供运维观察 AI 的增减行为）
+        self.log_karma_changes: bool = bool(config.get("log_karma_changes", True))
 
         self.templates = {
             "chat": config.get("template_chat", "[{server}] {player}: {text}"),
@@ -359,10 +361,15 @@ class NetherLinkPlugin(Star):
         async with self._karma_lock:
             return self._karma.get(key, self.karma_initial)
 
-    async def _karma_add(self, key: str, delta: int) -> tuple:
+    async def _karma_add(self, key: str, delta: int, origin: str = "") -> tuple:
         """增减好感并落盘 + 写回配置项，返回 (旧值, 新值)。
 
         delta=0 时只读不写，避免 AI 每次对话的查询触发写盘。
+
+        origin 非空表示这是**对话触发**的变化（AI 依 karma_rules 自主增减，
+        而非指令消耗 / 死亡惩罚 / 回滚补偿），在 log_karma_changes 开启时记一条
+        info 日志——对话触发的变化没有别的痕迹，运维只能从这里观察 AI 的增减行为。
+        传「游戏内对话」或「QQ 对话」标明来源侧。
         """
         async with self._karma_lock:
             # 先取一次旧值：add 在落盘失败时已经改过内存，只有提前取过才能报出真正的旧值
@@ -387,6 +394,11 @@ class NetherLinkPlugin(Star):
                         f"按 updated 淘汰最旧的 {len(dropped)} 条: {dropped}"
                     )
                 self._sync_karma_to_config()
+                if origin and self.log_karma_changes:
+                    logger.info(
+                        f"NetherLink: [{origin}] {key} 好感 {old} → {new}"
+                        f"（{delta:+d}，范围 -50~100）"
+                    )
             return old, new
 
     def _sync_karma_to_config(self) -> None:
@@ -796,7 +808,7 @@ class NetherLinkPlugin(Star):
             key = identity_key("qq", str(event.get_sender_name() or qq), qq)
             if not int(delta or 0):
                 return f"当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
-            old, new = await self._karma_add(key, int(delta))
+            old, new = await self._karma_add(key, int(delta), origin="QQ 对话")
             return f"好感值 {old} → {new}（本次 {int(delta):+d}）。"
         except Exception as e:
             logger.error(f"NetherLink: 内层 mc_karma 执行失败: {e}")
@@ -938,7 +950,7 @@ class NetherLinkPlugin(Star):
                 key = identity_key("game", player, "")
                 if not delta:
                     return f"当前好感值：{await plugin._karma_get(key)}（范围 -50~100）。"
-                old, new = await plugin._karma_add(key, delta)
+                old, new = await plugin._karma_add(key, delta, origin="游戏内对话")
                 return f"好感值 {old} → {new}（本次 {delta:+d}）。"
 
         # mc_karma 无条件在列（好感度是强制机制，没有能摘掉它的配置）
@@ -1288,7 +1300,7 @@ class NetherLinkPlugin(Star):
             key = identity_key("qq", str(event.get_sender_name() or qq), qq)
             if not int(delta or 0):
                 return f"当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
-            old, new = await self._karma_add(key, int(delta))
+            old, new = await self._karma_add(key, int(delta), origin="QQ 对话")
             return f"好感值 {old} → {new}（本次 {int(delta):+d}）。"
         except Exception as e:
             logger.error(f"NetherLink: mc_karma 执行失败: {e}")

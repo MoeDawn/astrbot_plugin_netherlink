@@ -110,6 +110,12 @@
     "default": 2,
     "hint": "玩家死亡时由插件主动扣除（死亡不走对话，AI 无法参与）。0 表示不扣；受 `enable_death` 门控——关掉它等于同时关闭死亡播报与本次扣减"
   },
+  "log_karma_changes": {
+    "description": "记录对话触发的好感度变化",
+    "type": "bool",
+    "default": true,
+    "hint": "AI 因对话内容自主增减好感时，在日志里记一条（标明来源侧与变化量），便于观察 AI 的增减行为。只记对话触发的；指令消耗、死亡惩罚另有各自的日志"
+  },
   "karma_records": {
     "description": "好感度记录（JSON，供查看与修改）",
     "type": "text",

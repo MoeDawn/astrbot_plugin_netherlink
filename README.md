@@ -106,6 +106,7 @@ QQ 侧发起的指令**没有单独的游戏内简报**：内层 agent 的文本
 | `max_command_cost` | 单次指令好感消耗上限（默认 100，AI 报价超出会被裁剪；负值夹到 0 = 指令全免费） |
 | `karma_death_penalty` | 玩家死亡扣减（默认 2，0 为不扣，负值夹到 0；只需 `enable_death` 开启） |
 | `karma_records` | 好感度记录 JSON，WebUI 可查看与手改（插件自动更新，**查询不写盘**） |
+| `log_karma_changes` | 对话触发的好感变化是否记日志（默认开）。AI 因对话自主增减好感时记一条 info，标明来源侧（`QQ 对话` / `游戏内对话`）与变化量 |
 | `mc_command_tool_desc` | `mc_command` 工具描述（默认不含好感度内容；**留空回退默认值**） |
 | `karma_tool_desc` | `mc_karma` 工具描述（**始终生效、无开关**；**留空回退默认值**） |
 | `enable_death` | 死亡播报开关，**同时**门控死亡扣好感——它是死亡惩罚**唯一**的门槛 |
