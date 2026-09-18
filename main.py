@@ -18,6 +18,7 @@
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +51,26 @@ except ImportError:  # 插件以顶层模块方式加载时
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
+
+
+@dataclass(frozen=True)
+class CmdResult:
+    """一次控制台指令执行的结局。
+
+    `ok=False` 表示**服务器明确回了失败**（Paper 侧捕获到异常，或 dispatchCommand
+    返回 false），与 ok=True 但输出为空是两回事：
+
+      ok=True  + output=""   -> 执行成功，只是没输出（照常收费）
+      ok=True  + output=文本 -> 执行成功（照常收费）
+      ok=False               -> 明确失败，**必须退费**
+      （没有回执）            -> 超时，由 _run_console_cmd 返回 None 表示，同样退费
+
+    早先 `_run_console_cmd` 只返回 Optional[str]，把「明确失败」和「执行成功」一起
+    塞进带输出的字符串里，调用点无从分辨，于是失败也照扣好感。
+    """
+
+    ok: bool
+    output: str
 
 # 好感度规则提示词默认值（AI 据此自主决定好感增减与指令消耗）
 DEFAULT_KARMA_RULES = """\
@@ -505,7 +526,18 @@ class NetherLinkPlugin(Star):
                 elif mtype == "command_result":
                     fut = self._pending_cmds.pop(data.get("id"), None)
                     if fut and not fut.done():
-                        fut.set_result(str(data.get("output", "")))
+                        # ok 是**必需**契约：Paper 端执行异常时回 ok=false。
+                        # 早先 Java 端无条件写 ok=true、这里也只取 output，两边
+                        # 一起把「显式失败」伪装成了成功——玩家被扣费且被告知
+                        # 「指令已执行」，与「执行失败则退费」的承诺直接冲突。
+                        # 缺字段一律当失败处理（fail-closed）：宁可退费，也不
+                        # 让一次可疑的执行白扣好感。
+                        fut.set_result(
+                            CmdResult(
+                                ok=bool(data.get("ok", False)),
+                                output=str(data.get("output", "")),
+                            )
+                        )
                 elif mtype == "heartbeat":
                     pass
                 elif mtype == "bot_chat":
@@ -1065,8 +1097,12 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # 指令执行核心（QQ llm_tool 与游戏内 tool_loop_agent 共用）
     # ------------------------------------------------------------------
-    async def _run_console_cmd(self, cmd: str, timeout: float = 8.0) -> Optional[str]:
-        """以控制台身份执行一条指令并返回服务器输出文本；失败/超时返回 None。
+    async def _run_console_cmd(self, cmd: str, timeout: float = 8.0) -> Optional[CmdResult]:
+        """以控制台身份执行一条指令。
+
+        返回 None 表示**没有拿到回执**（未连接 / 发送失败 / 超时）；
+        拿到回执则返回 CmdResult，其 ok 区分成功与明确失败。
+        两种结局都要退费，但报给 AI 的话术不同。
 
         不做权限校验（仅供内部工具使用）；扣费与回滚由 exec_command_for 负责。
         """
@@ -1189,23 +1225,35 @@ class NetherLinkPlugin(Star):
                         )
                     return "MC 服务器当前不在线，无法执行指令。"
 
-                output = await self._run_console_cmd(cmd)
-                # None 与 "" 是两种不同的结局，绝不能折叠：
-                #   None -> 8 秒内没有回执（执行失败）-> 回滚
-                #   ""   -> 服务器执行了但无输出（成功）-> 照常收费
-                if output is None:
-                    if spend:
-                        reason = "指令超时无回执"
-                        if not await self._rollback_karma(key, spend, cur, reason, cmd):
-                            return (
-                                f"指令已发送，但 8 秒内未收到服务器回执；"
-                                f"好感回滚亦失败，已扣的 {spend} 点未退回。"
-                            )
-                        logger.error(
-                            f"NetherLink: 指令执行失败已回滚好感 {spend} [{key}]: {cmd}"
+                result = await self._run_console_cmd(cmd)
+                # 三种结局绝不能折叠：
+                #   None            -> 没有回执（未连接/发送失败/超时）-> 退费
+                #   CmdResult(ok=F) -> 服务器**明确回了失败**          -> 退费
+                #   CmdResult(ok=T) -> 执行成功（output 可为空串）      -> 照常收费
+                # 早先只有 None 这一路退费，显式失败被当成成功照扣——
+                # 与「执行失败则退费」的承诺冲突，玩家白付钱还被误导。
+                failure = None
+                if result is None:
+                    failure = (
+                        "指令已发送，但 8 秒内未收到服务器回执（可能仍在执行）"
+                    )
+                    reason = "指令超时无回执"
+                elif not result.ok:
+                    failure = f"指令执行失败。服务器输出：\n{result.output}"
+                    reason = "服务器回报执行失败"
+                if failure is not None:
+                    if not spend:
+                        return failure
+                    if not await self._rollback_karma(key, spend, cur, reason, cmd):
+                        return (
+                            f"{failure}；好感回滚亦失败，已扣的 {spend} 点未退回。"
                         )
-                    return "指令已发送，但 8 秒内未收到服务器回执（可能仍在执行），好感未扣除。"
+                    logger.error(
+                        f"NetherLink: 指令执行失败（{reason}）已回滚好感 {spend} [{key}]: {cmd}"
+                    )
+                    return f"{failure}\n（好感未扣除）"
 
+                output = result.output
                 if spend:
                     if output:
                         return f"指令已执行（消耗好感 {spend}）。服务器输出：\n{output}"
