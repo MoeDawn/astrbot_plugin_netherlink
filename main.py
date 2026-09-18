@@ -484,6 +484,7 @@ class NetherLinkPlugin(Star):
                         await ws.close(code=4001, message=b"auth failed")
                         return ws
                     server_name = data.get("server_name") or "mc"
+                    # 仅作标识：记下 MC 端自报的名字（显示名统一用 mc_server_name）
                     self._mc_server_reported = server_name
                     # 单服务器设计：新连接握手成功时踢掉残留的旧连接（如 MC 端
                     # 断线重连后旧 socket 才超时），避免消息发进死管道
@@ -564,8 +565,14 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 处理 MC 事件 {mtype} 失败: {e}")
 
     def _mc_server_display(self) -> str:
-        """LLM 上下文用的服务器名：优先 MC 端 hello 上报的真实名字，回退显示名配置。"""
-        return self._mc_server_reported or self.mc_server_name
+        """对外展示与 LLM 上下文统一使用的服务器名 = `mc_server_name` 显示名配置。
+
+        **不用 `_mc_server_reported`**：Paper 侧 `server-name` 的职责是**标识**
+        （握手告知"我是哪台服务器"），显示名统一由本插件配置控制。这样 QQ 群消息
+        前缀、模板 {server}、LLM 上下文三处看到的名字必然一致，不会出现
+        「群里显示 [MC]、AI 却被告知服务器叫 mc」这种割裂。
+        """
+        return self.mc_server_name
 
     # ------------------------------------------------------------------
     # 提示词拼装（游戏侧与 QQ 内层共用）

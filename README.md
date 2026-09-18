@@ -96,7 +96,7 @@ QQ 侧发起的指令**没有单独的游戏内简报**：内层 agent 的文本
 | `group_names` | 群号与群名映射（`123456:水群,987654:生存服`），用于 `{group}` 占位符 |
 | `admin_qq` | 管理员 QQ 号（逗号分隔，仅作参考信息注入提示词） |
 | `admin_mc` | 管理员游戏 ID（逗号分隔，游戏侧唯一来源） |
-| `mc_server_name` | 服务器名，用于 `{server}` 占位符 |
+| `mc_server_name` | **显示名**：用于 `{server}` 占位符、QQ 群消息前缀、LLM 上下文。Paper 端只负责上报标识，显示名统一由这里控制 |
 | `mc_bot_name` | 机器人游戏内名字，用于 `{bot}` 占位符 |
 | `mc_wake_prefixes` | 游戏内唤醒词（逗号分隔，默认 `ai,助手`；**须与 Paper 端 `wake-prefixes` 一致**） |
 | `sync_bot_msgs` | 机器人 QQ 消息也同步进游戏（默认关，防刷屏；开启后 QQ→MC 转发不再忽略机器人消息） |
