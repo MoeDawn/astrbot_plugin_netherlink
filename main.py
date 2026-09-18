@@ -808,6 +808,26 @@ class NetherLinkPlugin(Star):
         if not prompt:
             prompt = "你好"
 
+        # 玩家那句唤醒消息本身也要推群。Paper 侧发完 bot_chat 就 return 了，
+        # 不会再发一条 chat 事件；若不在这里补，群里就只看到 AI 的回答、
+        # 看不到玩家问了什么（2026-09-19 用户要求改掉）。
+        # 放在起 LLM 之前：这是已经发生的游戏事实，不该因为 LLM 失败而丢失。
+        # 用 text（玩家原话，含唤醒词）而不是 prompt（剥掉唤醒词），忠实反映他打了什么。
+        # 与普通聊天走同一个模板与开关，避免出现"两套聊天格式"。
+        if self.config.get("enable_chat", True):
+            try:
+                await self._broadcast(
+                    self._fmt(
+                        self.templates["chat"],
+                        server=self._mc_server_display(),
+                        bot=self.mc_bot_name,
+                        player=player,
+                        text=text,
+                    )
+                )
+            except Exception as e:
+                logger.error(f"NetherLink: 推送游戏内唤醒消息到群失败: {e}")
+
         lock = self._player_llm_locks.setdefault(player, asyncio.Lock())
         if lock.locked():
             await self._send_bot_reply("（上一条还在思考中，稍等一下…）", sync_qq=False)
@@ -829,13 +849,22 @@ class NetherLinkPlugin(Star):
                 # _admin_context 交代（那里有服务器名、适用名单、发起者身份），
                 # 这里只补它没说的——这条消息该怎么用工具。
                 # mc_karma 永远在工具集里（好感度是强制机制），所以这句是无条件的。
+                #
+                # ⚠️ 这里**绝不能**再用 `<netherlink_context>` 这个标签名。
+                # 该标签在 system_prompt 里已有一份**完整**的（含管理员名单与
+                # 「是否管理员」的判定），而 mc_command 的工具描述明确让 AI
+                # 「以对话中提供的 <netherlink_context> 为准」。本节内容在**用户
+                # 消息**里（比 system_prompt 更靠后、更像"对话"），若同名，AI 会
+                # 采信这份**没有管理员信息**的，把管理员当成普通玩家拒绝执行
+                # （2026-09-19 实测到的正是这个现象）。故改用一个不相干的名字，
+                # 身份信息只由 system_prompt 那份承载。
                 karma_hint = "调用前先用 mc_karma 查询好感以决定本次 cost。"
                 context_hint = (
-                    f"<netherlink_context>\n"
-                    f"发送者是游戏内的玩家 {player}。\n"
+                    "<netherlink_request>\n"
+                    f"本节说明该如何使用工具，玩家身份见系统提示词中的 netherlink_context。\n"
                     "如果玩家想执行 MC 指令（改模式/传送/查名单等），调用 mc_command 工具。"
                     f"{karma_hint}\n"
-                    "</netherlink_context>"
+                    "</netherlink_request>"
                 )
 
                 # 会话历史：按玩家挂会话，同一玩家连续对话有记忆
