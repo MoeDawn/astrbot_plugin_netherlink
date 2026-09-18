@@ -225,6 +225,11 @@ class NetherLinkPlugin(Star):
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
         self._player_llm_locks: dict[str, asyncio.Lock] = {}
+        # 最近一条**真实**进站群消息的 unified_msg_origin。_broadcast 需要主动
+        # 发消息时必须自己拼 umo，而只有真实事件上的 umo 才一定正确（首段是
+        # 平台标识、会话号是平台自己的写法）。学到它之后优先复用，见
+        # _resolve_qq_platform_id。
+        self._qq_umo_seen: str = ""
 
         # ---- 好感度（本地文件 + 配置项双写，供 WebUI 查看与手改） ----
         # 身份空间见 karma.identity_key：游戏内玩家 "mc:<游戏ID>"，QQ 群友 "qq:<QQ号>"，
@@ -1249,12 +1254,85 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 指令取消后退费失败 [{key}] 涉及 {spend} 点: {cmd} — {e}")
 
+    def _platform_inst_is_alive(self, platform_id: str) -> bool:
+        """该平台标识此刻是否真的有对应实例（用户可能改名或删掉适配器）。"""
+        try:
+            for platform in self.context.platform_manager.platform_insts:
+                if platform.meta().id == platform_id:
+                    return True
+        except Exception as e:
+            logger.error(f"NetherLink: 校验平台实例失败: {e}")
+        return False
+
+    def _resolve_qq_platform_id(self) -> str:
+        """解析发群消息要用的**平台标识**（umo 首段）。
+
+        AstrBot 的 umo 形如 <平台标识>:<消息类型>:<会话号>，首段是
+        PlatformMetadata.id —— 它是 WebUI 里用户可填的「机器人名称」
+        （默认 default），**不是适配器类型名**。send_message 拿首段与各
+        平台实例的 meta().id 做严格字符串相等匹配，匹配不上就记一条
+        cannot find platform for session ... 并**丢弃消息**（返回 False，
+        不抛异常，所以外层 try 接不到）。原实现写死
+        f"aiocqhttp:GroupMessage:{群号}"，只在用户恰好把机器人命名为
+        aiocqhttp 时成立，其余部署下**所有**主动推送都静默失效。
+
+        取值顺序，与官方 API 的约定一致（Context.get_platform_inst 的
+        docstring 说「可以通过 event.get_platform_id() 获取平台 ID」，
+        而 AstrBot 内建的 message 工具在 umo 不完整时也是从**真实会话**
+        取前两段补全，从不按适配器类型名猜）：
+
+        1. **真实会话优先**：任何一条进站的绑定群消息都带着权威 umo
+           （见 on_group_message 记录）。同类型开了多个适配器时，只有它
+           能保证选中的是真正在服务这些群的那个。
+        2. **按适配器类型反查**：还没收到过任何群消息时（如插件刚启动、
+           或只发不收），退化为按 meta().name == "aiocqhttp" 找实例，
+           再取用户配置的 meta().id。aiocqhttp 适配器的 meta().name 是
+           字面量 "aiocqhttp"（见 aiocqhttp_platform_adapter.py），稳定。
+
+        第 1 步学到的标识会先校验实例是否还在：用户在 WebUI 里改了机器人
+        名称后它立即失效，自动落回第 2 步，不会卡在旧值上。
+
+        不做缓存（第 2 步每次重查）：实例可热重载，遍历这个通常只有一两个
+        元素的列表远比维护缓存失效便宜。
+
+        返回空串表示当前没有可用实例（如 OneBot 适配器未启用）——调用方据此
+        跳过推送并记日志，而不是发一条注定被丢弃的消息。
+        """
+        learned = self._qq_umo_seen.split(":", 1)[0] if self._qq_umo_seen else ""
+        if learned:
+            if self._platform_inst_is_alive(learned):
+                return learned
+            # 学到的标识已失效（适配器被改名/删除），丢弃后走下面的反查
+            self._qq_umo_seen = ""
+        try:
+            for platform in self.context.platform_manager.platform_insts:
+                meta = platform.meta()
+                if meta.name == "aiocqhttp" and meta.id:
+                    return str(meta.id)
+        except Exception as e:
+            logger.error(f"NetherLink: 解析 aiocqhttp 平台标识失败: {e}")
+        return ""
+
     async def _broadcast(self, text: str):
         """向所有绑定群推送文本。"""
+        if not self.target_groups:
+            return
+        platform_id = self._resolve_qq_platform_id()
+        if not platform_id:
+            logger.warning(
+                "NetherLink: 未找到 aiocqhttp 平台实例，消息无法推送到 QQ 群"
+                "（请确认 OneBot/aiocqhttp 适配器已启用）"
+            )
+            return
         for group in self.target_groups:
-            umo = f"aiocqhttp:GroupMessage:{group}"
+            umo = f"{platform_id}:GroupMessage:{group}"
             try:
-                await self.context.send_message(umo, MessageChain().message(text))
+                # send_message 在找不到平台时**返回 False 而不抛异常**，
+                # 只由 AstrBot 自己记一条 warning。这里显式接住返回值，
+                # 把「哪个群被丢掉了」补进本插件的日志，避免再次静默。
+                ok = await self.context.send_message(umo, MessageChain().message(text))
+                if not ok:
+                    logger.warning(f"NetherLink: 推送到群 {group} 未被接受，消息已丢弃")
             except Exception as e:
                 logger.error(f"NetherLink: 推送到群 {group} 失败: {e}")
 
@@ -1276,10 +1354,13 @@ class NetherLinkPlugin(Star):
     async def on_group_message(self, event):
         """绑定群的普通消息转发进游戏公屏。"""
         try:
-            if not self.config.get("enable_qq_to_mc", True):
-                return
             group_id = str(event.get_group_id() or "")
             if group_id not in self.target_groups:
+                return
+            # 记下这条真实会话的 umo，供 _broadcast 主动推送时取首段（平台标识）。
+            # 放在开关校验之前：即便 QQ->MC 转发关着，这条信息依然有效且有用。
+            self._qq_umo_seen = event.unified_msg_origin
+            if not self.config.get("enable_qq_to_mc", True):
                 return
             # 机器人自身消息（OneBot self_id == user_id）默认不回传 MC（防循环），
             # 开启 sync_bot_msgs 后机器人消息也按模板转发进游戏
