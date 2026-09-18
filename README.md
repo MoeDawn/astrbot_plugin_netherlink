@@ -86,11 +86,11 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 工作方式——AI 每次对话先查好感，再决定说话方式；请求指令时按 `karma_rules` 决定消耗：
 
 ```text
-玩家: 妹，带我去附近的村庄
+玩家: ai，带我去附近的村庄
 AI:  （查好感 → 10；按规则村庄传送要 20，付不起 → 拒绝，不执行）
      呜…带着你跑那么远要消耗 20 点好感，你现在只有 10 点，人家心有余而力不足啦
 
-玩家: 妹，给我三个铁锭
+玩家: ai，给我三个铁锭
 AI:  （查好感 → 10；按规则报价 3，付得起 → 执行并扣 3）
      拿好啦～不过人家小小地记了一笔账哦
 ```
@@ -126,6 +126,10 @@ AI:  （查好感 → 10；按规则报价 3，付得起 → 执行并扣 3）
 - 已安装并运行 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper) 的 Minecraft 服务端
 - AstrBot 只需配置，无需额外依赖
 
+## 许可
+
+[MIT License](LICENSE)
+
 ## 目录结构
 
 ```text
@@ -137,5 +141,6 @@ astrbot_plugin_netherlink/
 ├── _conf_schema.json    # WebUI 配置项定义
 ├── requirements.txt     # 依赖
 ├── logo.png
+├── LICENSE
 └── README.md
 ```
