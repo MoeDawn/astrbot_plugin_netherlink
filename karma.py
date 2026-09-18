@@ -86,46 +86,54 @@ def identity_key(source: str, initiator: str, qq: str) -> str:
 
 
 def merge_records(file_records: dict, config_records: dict) -> dict:
-    """合并文件与配置里的好感记录，同键取 updated 较新者。
+    """合并文件与配置里的好感记录。
 
-    文件是运行时真相，配置是管理员手改入口，两边的改动都可能有更新的。
-    格式非法的条目直接丢弃。
+    **配置优先**：`config_records`（WebUI 里 `karma_records` 的值）是管理员手改入口，
+    优先级与可信度都最高，同键一律覆盖文件里的旧值。文件只在配置没有该键时兜底
+    （插件每次改动都写回配置，正常情况下两边一致；文件里多出来的条目＝配置被清过）。
 
-    value 必须是数字（bool 除外）：clamp_value 现在是全函数，任何输入都返回
-    合法值，若只靠它兜底，手改笔误（如 "abc"）会被"归一化"成权威的 0 并被
-    写回文件，把玩家直接打到最低好感。损坏条目一律丢弃，让 get() 回退到
-    initial——与非 dict 条目的处理口径一致。
+    记录形态是「键 -> 好感值」，值为纯数字。非数字条目（含 bool、字符串、None、
+    缺失）按损坏丢弃，让 get() 回退到 initial——与历史上非 dict 条目的口径一致。
+    早期版本是 {"value": N, "updated": T}，此处兼容读取旧形态的 value。
     """
     merged: dict = {}
-    for src in (file_records, config_records):
+
+    def _extract(rec):
+        """从条目里取出好感值；旧形态（dict）取 value，新形态直接用。"""
+        if isinstance(rec, dict):
+            rec = rec.get("value")
+        if isinstance(rec, bool) or not isinstance(rec, (int, float)):
+            return None
+        try:
+            return clamp_value(rec)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    # 先放文件（兜底），再用配置覆盖（管理员手改优先）
+    for src, override in ((file_records, False), (config_records, True)):
         if not isinstance(src, dict):
             continue
         for key, rec in src.items():
-            if not isinstance(rec, dict):
+            value = _extract(rec)
+            if value is None:
                 continue
-            value = rec.get("value")
-            # 非数字（含 value 缺失、字符串、None、bool）按损坏条目丢弃；
-            # inf/nan 是数字，保留并交给 clamp_value 夹到范围内。
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not override and key in merged:
                 continue
-            try:
-                rec = {"value": clamp_value(value),
-                       "updated": str(rec.get("updated", ""))}
-            except (TypeError, ValueError, OverflowError):
-                continue
-            prev = merged.get(key)
-            if prev is None or rec["updated"] > prev["updated"]:
-                merged[key] = rec
+            merged[key] = value
     return merged
 
 
 def evict_oldest(records: dict, limit: int) -> tuple:
-    """超过 limit 条时按 updated 淘汰最旧的，返回 (保留, 被淘汰的键列表)。"""
+    """超过 limit 条时淘汰超额部分，返回 (保留, 被淘汰的键列表)。
+
+    记录里已不再存时间戳（配置项只显示「QQ 号: 好感值」），因此无法按新旧排序。
+    改为按**值降序**保留——好感高的留下，避免管理员手改过的条目被默默清掉；
+    值是 int 之间的稳定比较，无平局歧义（Python 的 sorted 稳定，同值保持插入序）。
+    """
     if len(records) <= limit:
         return records, []
-    ordered = sorted(records.items(), key=lambda kv: kv[1].get("updated", ""))
-    drop_count = len(records) - limit
-    dropped = [k for k, _ in ordered[:drop_count]]
+    ordered = sorted(records.items(), key=lambda kv: kv[1], reverse=True)
+    dropped = [k for k, _ in ordered[limit:]]
     return {k: v for k, v in records.items() if k not in set(dropped)}, dropped
 
 
@@ -152,35 +160,44 @@ class KarmaStore:
         return cls(merge_records(read_json(Path(path), {}), {}), path)
 
     def get(self, key: str, initial: int) -> int:
-        """读取好感值；无记录返回 initial。不写盘。"""
+        """读取好感值；无记录返回 initial。不写盘。
+
+        兼容旧形态（{"value": N}）：读到 dict 时取 value，避免升级时把
+        存量记录当成损坏条目丢掉。
+        """
         rec = self._records.get(key)
-        if not isinstance(rec, dict):
+        if isinstance(rec, dict):
+            rec = rec.get("value")
+        if isinstance(rec, bool) or not isinstance(rec, (int, float)):
             return initial
         try:
-            return clamp_value(rec.get("value", initial))
+            return clamp_value(rec)
         except (TypeError, ValueError, OverflowError):
             return initial
 
-    def add(self, key: str, delta: int, initial: int, now: str) -> tuple:
+    def add(self, key: str, delta: int, initial: int) -> tuple:
         """增减好感并落盘，返回 (旧值, 新值)。delta=0 时只读不写。"""
         old = self.get(key, initial)
         if not delta:
             return old, old
         new = clamp_value(old + int(delta))
-        self._records[key] = {"value": new, "updated": now}
+        self._records[key] = new
         self._records, dropped = evict_oldest(self._records, KARMA_MAX_RECORDS)
         self.last_dropped = dropped
         self._save()
         return old, new
 
     def snapshot(self) -> dict:
-        """返回记录的副本，供写回配置项。
+        """返回记录的副本，供写回配置项与落盘。
 
-        逐条浅拷贝（记录的值是 int/str，不可变，故对外部等价于深拷贝）；
-        改副本不影响内部状态。非 dict 条目直接跳过，保证本方法在任何输入下
-        都不抛异常——Task 5 在插件初始化路径上正是调用它（无 try/except）。
+        形态是「键 -> 好感值」（纯数字），与 `_save` 写进磁盘的形状一致——
+        管理员在 WebUI 看到的 `karma_records` 与 `karma.json` 内容完全相同，
+        只显示 QQ 号（或游戏 ID）与好感值，不带时间戳。
+
+        不做过滤：非数字条目早已被 merge_records 挡在门外，内存里只有合法值。
+        本方法在任何输入下都不抛异常（插件初始化路径会调用它，没有 try/except）。
         """
-        return {k: dict(v) for k, v in self._records.items() if isinstance(v, dict)}
+        return dict(self._records)
 
     def _save(self) -> None:
         if self._path is None:

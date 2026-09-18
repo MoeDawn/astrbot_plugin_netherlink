@@ -28,6 +28,7 @@ MC 端作为客户端主动连入 AstrBot（AstrBot 换机器不用改 MC 配置
 | AI 判断 | **插件不做权限判断、不持有任何指令名单**——高危识别、管理员判定、好感消耗全部由 AI 依提示词决定 |
 | 好感度系统 | 存本地 `data/plugin_data/netherlink/karma.json`，双身份空间（`mc:游戏ID` / `qq:QQ号`），并同步写回 `karma_records` 配置供 WebUI 查看 |
 | 死亡惩罚 | 玩家死亡由插件自动扣 `karma_death_penalty`（默认 2），不经 AI；`enable_death` 关闭则**同时**停用死亡播报与死亡惩罚（它是唯一门槛） |
+| 成就加成 | 玩家获得成就（不含配方解锁/根成就）→ 配置的提示词发给 AI，由它更新好感并回话；回复广播回游戏并同步 QQ。`enable_advancement` 开关 |
 
 ### 消息效果示例
 
@@ -105,7 +106,9 @@ QQ 侧发起的指令**没有单独的游戏内简报**：内层 agent 的文本
 | `karma_initial` | 新玩家初始好感（默认 10） |
 | `max_command_cost` | 单次指令好感消耗上限（默认 100，AI 报价超出会被裁剪；负值夹到 0 = 指令全免费） |
 | `karma_death_penalty` | 玩家死亡扣减（默认 2，0 为不扣，负值夹到 0；只需 `enable_death` 开启） |
-| `karma_records` | 好感度记录 JSON，WebUI 可查看与手改（插件自动更新，**查询不写盘**） |
+| `karma_records` | 好感度记录 JSON，格式 `{"qq:12345": 12}`（只有键与好感值，**不带时间**）。**手改优先级最高** |
+| `enable_advancement` | 玩家获得成就时通知 AI（默认开） |
+| `advancement_prompt` | 成就提示词，占位符 `{player}`/`{server}`/`{advancement}` |
 | `log_karma_changes` | 对话触发的好感变化是否记日志（默认开）。AI 因对话自主增减好感时记一条 info，标明来源侧（`QQ 对话` / `游戏内对话`）与变化量 |
 | `mc_command_tool_desc` | `mc_command` 工具描述（默认不含好感度内容；**留空回退默认值**） |
 | `karma_tool_desc` | `mc_karma` 工具描述（**始终生效、无开关**；**留空回退默认值**） |
@@ -210,6 +213,11 @@ AI:  （mc_karma(delta=0) → 10；按规则报价 cost=3，付得起 →
 QQ 侧的实际消耗**永远**由**内层 agent** 决定：外层 agent 看不到好感度规则，它的
 `cost` 参数只作为「初步报价」被带进内层提示词，内层可以采纳、调整或推翻——用户被告知
 的价格与插件实际扣的价格因此出自同一次决策，不会各算各的。
+
+**成就加成**：玩家获得成就时（不含配方解锁与根成就），插件把 `advancement_prompt`
+（[玩家 id]、[服务器名]、[成就名] 已替换成实际值）发给 AI，由它自行决定加减多少好感
+并回话，回复广播到游戏公屏并同步 QQ 群。这与死亡惩罚相反：死亡是代码扣减（AI 不在场），
+成就是 AI 在场自行判断。可用 `enable_advancement` 关闭。
 
 **死亡惩罚**：玩家死亡时插件主动扣 `karma_death_penalty`（默认 2），因为死亡不走对话，
 AI 无法参与。它的门槛**只有一道**：`enable_death`。关掉它等于同时关闭死亡播报与死亡

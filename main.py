@@ -18,7 +18,6 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -90,6 +89,12 @@ delta 为 0 时只查询，为正数时增加好感，为负数时扣除好感�
 当玩家请求你执行 Minecraft 指令时，同样先查看好感，判断其剩余好感是否足以支付
 该指令的消耗；不足以支付的，你会拒绝执行并隐晦的透露原因。
 好感度的增减由对话内容本身决定（友善互动、不友好言论等），对照好感度规则执行。"""
+
+# 玩家获得成就时发给 AI 的提示词默认值
+DEFAULT_ADVANCEMENT_PROMPT = (
+    "玩家[{player}]在服务器[{server}]里获得了[{advancement}]，"
+    "请你以此更新对该玩家的好感值，并在游戏里发表自己的看法"
+)
 
 # 游戏内对话附加提示词默认值，{server} 会替换为服务器名
 DEFAULT_EXTRA_SYSTEM_PROMPT = "你当前处于一个我的世界服务器内,服务器名称为{server}"
@@ -191,6 +196,14 @@ class NetherLinkPlugin(Star):
             self.karma_death_penalty = 2
         # 对话触发的好感变化是否记一条日志（供运维观察 AI 的增减行为）
         self.log_karma_changes: bool = bool(config.get("log_karma_changes", True))
+        # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
+        # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
+        # 留空则用默认提示词（与其他提示词字段一致：空串不表示"关闭"，用开关关）。
+        self.enable_advancement: bool = bool(config.get("enable_advancement", True))
+        self.advancement_prompt: str = str(
+            config.get("advancement_prompt", DEFAULT_ADVANCEMENT_PROMPT)
+            or DEFAULT_ADVANCEMENT_PROMPT
+        )
 
         self.templates = {
             "chat": config.get("template_chat", "[{server}] {player}: {text}"),
@@ -219,7 +232,7 @@ class NetherLinkPlugin(Star):
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
         self._karma_lock = asyncio.Lock()
-        # 优先文件、其次配置项，同键取 updated 较新者（管理员可在 WebUI 手改配置）。
+        # 配置优先、文件兜底（管理员在 WebUI 手改的 karma_records 优先级最高）。
         # 加载失败必须让插件照常加载——好感度是软约束。各分支的实际保证：
         #   正常分支：store 绑定磁盘路径，改动落盘 + 写回配置项。
         #   降级分支：store 的 path=None，**磁盘文件绝不会被写**（读失败的文件原样
@@ -351,11 +364,6 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.warning(f"NetherLink: 覆盖工具描述失败（使用默认描述）: {e}")
 
-    @staticmethod
-    def _now_iso() -> str:
-        """好感记录的 updated 时间戳（本地时间，秒级 ISO）。"""
-        return datetime.now().isoformat(timespec="seconds")
-
     async def _karma_get(self, key: str) -> int:
         """读取好感值（不写盘）。AI 每次对话都会查询，必须无副作用。"""
         async with self._karma_lock:
@@ -375,9 +383,7 @@ class NetherLinkPlugin(Star):
             # 先取一次旧值：add 在落盘失败时已经改过内存，只有提前取过才能报出真正的旧值
             before = self._karma.get(key, self.karma_initial)
             try:
-                old, new = self._karma.add(
-                    key, delta, self.karma_initial, self._now_iso()
-                )
+                old, new = self._karma.add(key, delta, self.karma_initial)
             except Exception as e:
                 # 落盘失败（磁盘满/权限）或 delta 不是数字时不能让对话崩掉。
                 # 旧值取改动前的快照，新值取内存当前真实值，与随后的 _karma_get 口径一致。
@@ -391,7 +397,7 @@ class NetherLinkPlugin(Star):
                 if dropped:
                     logger.warning(
                         f"NetherLink: 好感度记录已达上限 {KARMA_MAX_RECORDS} 条，"
-                        f"按 updated 淘汰最旧的 {len(dropped)} 条: {dropped}"
+                        f"按好感值从低到高淘汰 {len(dropped)} 条: {dropped}"
                     )
                 self._sync_karma_to_config()
                 if origin and self.log_karma_changes:
@@ -545,6 +551,12 @@ class NetherLinkPlugin(Star):
                     )
                 text = self._fmt(self.templates["death"], server=srv, bot=self.mc_bot_name,
                                  player=player, message=data.get("message", ""))
+            elif mtype == "advancement":
+                # 成就走**独立管线**：要起 AI 让它更新好感并回话，不是套模板广播。
+                # 单独 create_task，避免把 LLM 往返（可能数秒）压在这条 WS 事件
+                # 处理路径上、连累后续事件。
+                asyncio.create_task(self._handle_advancement(data))
+                return
             else:
                 return
             await self._broadcast(text)
@@ -649,6 +661,88 @@ class NetherLinkPlugin(Star):
 
         parts.append(self._admin_context(identity, is_admin, source))
         return parts
+
+    async def _handle_advancement(self, data: dict):
+        """玩家获得成就：把配置的提示词交给 AI，由它更新好感并回话。
+
+        与死亡扣减的差别：死亡是 AI 不在场的**代码**扣减；成就是**AI 在场**的
+        判断——提示词（`advancement_prompt`）说明获得了什么成就，AI 自己决定
+        加减多少好感（走 mc_karma 工具）并给出评论。因此这里要起一次完整的
+        LLM 对话，回复广播回游戏公屏并同步 QQ 群。
+
+        玩家可能已离线（成就事件与在线状态无关），所以不取 per-player 锁：
+        离线时 `_make_synthetic_event` 仍可用，回复只会进群与公屏。
+        """
+        player = str(data.get("player") or "")
+        advancement = str(data.get("advancement") or "")
+        if not player or not advancement:
+            return  # 缺字段就当没这回事，别拿 "?" 去建 mc:? 假记录
+        if not self.enable_advancement:
+            return
+
+        NL = chr(10) + chr(10)   # 段间空行；用 chr 拼装以免源码里出现转义序列
+        try:
+            event = self._make_synthetic_event(player)
+            umo = event.unified_msg_origin
+            prov_id = await self.context.get_current_chat_provider_id(umo)
+            if not prov_id:
+                logger.warning("NetherLink: 未配置 LLM 提供商，成就事件不处理")
+                return
+
+            system_parts = await self._build_system_parts(
+                umo, player, self._game_is_admin(player), source="game"
+            )
+            # 提示词里的 {player}/{server}/{advancement} 由插件替换——成就是
+            # 客观事实，不该让 AI 去猜谁拿到了什么
+            prompt = (
+                self.advancement_prompt
+                .replace("{player}", player)
+                .replace("{server}", self._mc_server_display())
+                .replace("{advancement}", advancement)
+            )
+
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
+            if not curr_cid:
+                curr_cid = await conv_mgr.new_conversation(umo)
+            conversation = await conv_mgr.get_conversation(
+                umo, curr_cid, create_if_not_exists=True
+            )
+            try:
+                history = json.loads(conversation.history) if conversation.history else []
+            except (json.JSONDecodeError, TypeError):
+                history = []
+
+            resp = await self.context.tool_loop_agent(
+                event=event,
+                chat_provider_id=prov_id,
+                system_prompt=NL.join(system_parts),
+                prompt=prompt,
+                tools=self._build_mc_toolset(player),
+                contexts=history,
+                max_steps=4,
+            )
+            text = getattr(resp, "completion_text", None)
+            if text is None:
+                logger.warning("NetherLink: 成就响应缺少 completion_text 字段")
+                text = ""
+            reply = (text or "").strip()[:MC_REPLY_MAX_LEN] or "（恭喜！）"
+
+            from astrbot.core.agent.message import (
+                AssistantMessageSegment, TextPart, UserMessageSegment,
+            )
+            await conv_mgr.add_message_pair(
+                cid=curr_cid,
+                user_message=UserMessageSegment(content=[TextPart(text=prompt)]),
+                assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
+            )
+
+            await self._send_bot_reply(reply, sync_qq=True)
+            logger.info(
+                f"NetherLink: 成就事件已处理 [{player}] {advancement}"
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 处理成就事件失败: {e}")
 
     async def _handle_bot_chat(self, data: dict):
         """游戏内玩家用唤醒词跟机器人说话：转交给 AstrBot 的 LLM 管线处理。
