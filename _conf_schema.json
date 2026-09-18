@@ -1,0 +1,179 @@
+{
+  "ws_host": {
+    "description": "WebSocket 监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "MC 端插件作为客户端主动连入本地址"
+  },
+  "ws_port": {
+    "description": "WebSocket 监听端口",
+    "type": "int",
+    "default": 8765
+  },
+  "auth_token": {
+    "description": "连接鉴权 Token",
+    "type": "string",
+    "default": "change-me",
+    "obvious_hint": true,
+    "hint": "必须与 MC 端插件配置一致，握手时校验"
+  },
+  "target_groups": {
+    "description": "绑定的 QQ 群号（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true,
+    "hint": "这些群的消息会转发进 MC，MC 事件会推送到这些群"
+  },
+  "admin_qq": {
+    "description": "管理员 QQ 白名单（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true,
+    "hint": "这些 QQ 会被告知 AI 为管理员，其高危指令请求会被放行"
+  },
+  "admin_mc": {
+    "description": "管理员游戏 ID（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true,
+    "hint": "这些游戏 ID 会被告知 AI 为管理员。AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效，游戏内管理员必须在此逐个填写"
+  },
+  "mc_wake_prefixes": {
+    "description": "游戏内机器人唤醒词（逗号分隔）",
+    "type": "string",
+    "default": "ai,助手",
+    "hint": "玩家在游戏里发送以这些词开头的消息会触发机器人 LLM 对话，回复在游戏内显示并同步到群聊。**必须与 Paper 端 config.yml 的 wake-prefixes 保持一致**"
+  },
+  "mc_server_name": {
+    "description": "服务器名称",
+    "type": "string",
+    "default": "MC",
+    "hint": "用于模板里的 {server} 占位符（如推送 QQ 的 [MC] 前缀）"
+  },
+  "mc_bot_name": {
+    "description": "机器人游戏内名字",
+    "type": "string",
+    "default": "ai",
+    "hint": "用于模板里的 {bot} 占位符（游戏内回复的开头名字等）"
+  },
+  "group_names": {
+    "description": "群号与群名映射（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true,
+    "hint": "格式：群号:群名，如 123456:水群,987654:生存服。用于模板里的 {group} 占位符；未配置的群用群号代替"
+  },
+  "enable_webui_persona": {
+    "description": "游戏内对话启用 WebUI 配置的人格提示词",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后游戏内机器人对话使用 AstrBot 人格管理里配置的默认人格；关闭则无人格"
+  },
+  "extra_system_prompt": {
+    "description": "游戏内对话自定义提示词",
+    "type": "text",
+    "default": "你当前处于一个我的世界服务器内,服务器名称为{server}",
+    "hint": "支持 {server} 占位符（自动替换为服务器名）。会拼在 WebUI 人格之后、好感度规则之前。**留空则不附加任何内容**（可用它彻底关闭这段提示词）"
+  },
+  "karma_rules": {
+    "description": "karma 好感规则提示词",
+    "type": "text",
+    "default": "[好感度规则]\n你和玩家之间存在一个好感值，初始值 10，最低 -50，最高 100。\n玩家获得成就、和你进行友善的让心情变好的对话，你可以增加此数值；\n玩家发表不友好言论，你可以扣除好感。以上行为造成的好感变化每次不超过 ±2。\n你和玩家对话时，根据此数值来改变说话方式和态度；如果因为对话导致好感度变化，你会隐晦地暗示。\n当玩家请求你使用指令时，你调用 mc_command 工具时传入的 cost 参数就是本次消耗的好感，\n插件会自动完成扣除，你不需要自己再扣一次。\n请求的指令越 OP 消耗的好感越多（参考：tp 到其他玩家附近一次扣 1；\ntp 到附近村庄这类需要定位+传送+有价值的地点一次扣 20；要 3 个铁锭扣 3；\n要钻石或金苹果一次扣 10；纯查询类如 list/time/weather 不消耗）。\n如果请求的指令消耗大于玩家剩余好感，你会拒绝执行并隐晦的透露原因。",
+    "hint": "好感度是强制机制，没有开关，本规则始终注入（空串回退默认值）。可自行修改规则细节（消耗表、初始值等）；想实现「不依赖好感度/不限制指令」，把消耗表全部改成 0 即可"
+  },
+  "mc_command_tool_desc": {
+    "description": "mc_command 工具描述（交给 AI 的说明）",
+    "type": "text",
+    "default": "在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。\n执行前请自行判断这条指令是否属于高危操作（如改游戏模式、传送他人、给予物品、\n封禁、op、清空区域等）。高危操作应审慎处理。\n调用本工具后，系统可能要求你进一步确认消耗与权限；如需判断发起者身份，\n以对话中提供的 <netherlink_context> 为准（若未提供，则按普通玩家对待）。",
+    "hint": "决定 AI 如何判断一条指令该不该执行。默认不含好感度内容——AI 调用本工具前已用 mc_karma 查过好感。注意 QQ 外层 agent 看不到 <netherlink_context>，描述里不得假定名单一定在场"
+  },
+  "karma_tool_desc": {
+    "description": "mc_karma 工具描述（交给 AI 的说明）",
+    "type": "text",
+    "default": "查询或增减玩家好感度。目标是当前对话的发起者，无法指定其他玩家。\ndelta 为 0 时只查询，为正数时增加好感，为负数时扣除好感。\n每次与玩家对话时，先调用本工具（delta=0）查看当前好感值，再据此调整你的说话方式和态度。\n当玩家请求你执行 Minecraft 指令时，同样先查看好感，判断其剩余好感是否足以支付\n该指令的消耗；不足以支付的，你会拒绝执行并隐晦的透露原因。\n好感度的增减由对话内容本身决定（友善互动、不友好言论等），对照好感度规则执行。",
+    "hint": "决定 AI 何时查询与增减好感。此工具会被高频调用，查询不写盘"
+  },
+  "karma_initial": {
+    "description": "新玩家初始好感值",
+    "type": "int",
+    "default": 10
+  },
+  "max_command_cost": {
+    "description": "单次指令消耗好感上限",
+    "type": "int",
+    "default": 100,
+    "hint": "AI 报价超过此值时会被裁剪，防止报价失控"
+  },
+  "karma_death_penalty": {
+    "description": "玩家死亡扣除的好感",
+    "type": "int",
+    "default": 2,
+    "hint": "玩家死亡时由插件主动扣除（死亡不走对话，AI 无法参与）。0 表示不扣；受 `enable_death` 门控——关掉它等于同时关闭死亡播报与本次扣减"
+  },
+  "karma_records": {
+    "description": "好感度记录（JSON，供查看与修改）",
+    "type": "text",
+    "default": "{}",
+    "hint": "键格式 mc:游戏ID 或 qq:QQ号。插件会在好感变化时自动更新此配置，也可手动修改后重启生效"
+  },
+  "enable_chat": {
+    "description": "同步游戏聊天 MC→QQ",
+    "type": "bool",
+    "default": true
+  },
+  "enable_join_leave": {
+    "description": "同步进服/退服提示",
+    "type": "bool",
+    "default": true
+  },
+  "enable_death": {
+    "description": "同步死亡消息",
+    "type": "bool",
+    "default": true,
+    "hint": "同时门控「死亡扣好感」：关闭后死亡消息不再同步、karma_death_penalty 也不再生效（玩家死亡由插件静默扣好感，本开关是它唯一的入口——好感度本身是强制机制，没有别的开关）"
+  },
+  "enable_qq_to_mc": {
+    "description": "QQ 群消息转发进游戏公屏",
+    "type": "bool",
+    "default": true
+  },
+  "sync_bot_msgs": {
+    "description": "机器人消息也同步到游戏内",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，机器人在 QQ 群里的回复（LLM 对话、指令结果）也会按 QQ→MC 模板转发进游戏；关闭则机器人消息不进游戏（防刷屏默认关）"
+  },
+  "template_chat": {
+    "description": "MC 聊天推送模板",
+    "type": "string",
+    "default": "[{server}] {player}: {text}",
+    "hint": "可用占位符：{server} 服务器名、{bot} 机器人名、{player} 玩家、{text} 内容"
+  },
+  "template_join": {
+    "description": "进服推送模板",
+    "type": "string",
+    "default": "[{server}] {player} 进入了服务器"
+  },
+  "template_leave": {
+    "description": "退服推送模板",
+    "type": "string",
+    "default": "[{server}] {player} 离开了服务器"
+  },
+  "template_death": {
+    "description": "死亡推送模板",
+    "type": "string",
+    "default": "[{server}] {message}"
+  },
+  "template_qq_to_mc": {
+    "description": "QQ 消息转发进游戏的广播格式（支持 § 染色码）",
+    "type": "string",
+    "default": "⌜§a{group}§f⌟ <§b{sender}§f> §5{text}§f",
+    "hint": "占位符：{group} 群名、{sender} 群友、{text} 内容。§a/§b/§5/§f 为 MC 颜色码，由 MC 端渲染"
+  },
+  "template_bot_reply_game": {
+    "description": "机器人在游戏内的回复格式（支持 § 染色码）",
+    "type": "string",
+    "default": "⌜§c{bot}§f⌟ : §d{text}§f",
+    "hint": "占位符：{bot} 机器人名字、{text} 回复内容。开头的名字与回复内容的颜色均可在此配置"
+  }
+}

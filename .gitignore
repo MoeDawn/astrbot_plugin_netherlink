@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 测试（不随仓库分发；本机开发用）
+tests/
+
+# 含明文 NapCat 反连 Token 与服务器 IP，绝不入库
+roubot_config.md
+
+# 打好的插件包
+*.zip
