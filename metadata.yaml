@@ -2,7 +2,7 @@ name: astrbot_plugin_netherlink
 display_name: NetherLink MC×QQ互通
 desc: Minecraft(Paper) 服务器与 QQ 群双向消息互通，支持自然语言执行 MC 指令与游戏内机器人对话
 short_desc: MC 服务器与 QQ 群双向消息互通
-version: 0.0.1
+version: 0.0.2
 author: MoeDawn
 main: main.py
 repo: https://github.com/MoeDawn/astrbot_plugin_netherlink
