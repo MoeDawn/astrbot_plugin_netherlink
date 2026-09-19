@@ -230,6 +230,10 @@ class NetherLinkPlugin(Star):
         )
         # 管理员游戏 ID（AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效）
         self.admin_mc: set[str] = self._parse_csv(config.get("admin_mc", ""))
+        # 匹配用的小写副本：MC 登录名不区分大小写，而 getName() 返回**规范拼写**。
+        # 用户填 moedawn、游戏里是 MoeDawn 时，区分大小写的比对永远匹配不上，
+        # 且完全静默。admin_mc 本身保留原样，用于提示词里展示名单。
+        self._admin_mc_lower: set[str] = {k.lower() for k in self.admin_mc}
         # 好感度参数
         # karma_initial 必须过 clamp_value：KarmaStore.get 在"无记录"路径上把
         # initial 原样返回（只有已存的值才走 clamp_value），配置里填 500 会让所有
@@ -347,6 +351,16 @@ class NetherLinkPlugin(Star):
         except OSError as e:
             logger.warning(f"NetherLink: 检查遗留 bindings.json 失败（忽略）: {e}")
 
+        # 配置解析全是**静默**的：admin_mc 打错一个字、分隔符用了全角逗号，
+        # 插件都不会报错，只会安静地把管理员当普通玩家。这条日志是唯一能立刻
+        # 看出「我配的东西到底被解析成了什么」的地方——排查时先看它。
+        logger.info(
+            f"NetherLink: 配置解析结果 —— 管理员(游戏)={sorted(self.admin_mc) or '未配置'} "
+            f"管理员(QQ)={sorted(self.admin_qq) or '未配置'} "
+            f"绑定群={sorted(self.target_groups) or '未配置'} "
+            f"端口绑定={self.ws_bindings}"
+        )
+
         asyncio.create_task(self._start_ws_server())
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
         # 扫描过），因此放在 __init__ 末尾；失败不影响工具可用性
@@ -356,16 +370,35 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # 工具函数
     # ------------------------------------------------------------------
+    # 中文输入法下极易打出的分隔符——它们不是半角逗号，直接 split(",") 会把
+    # 整串当成一个元素（如 admin_mc 变成 {"MoeDawn，Steve"}，永远匹配不上）。
+    # 统一归一化成半角逗号再切分。
+    _SEPARATORS = str.maketrans({"，": ",", "、": ",", "；": ",", ";": ",", "\u3000": ","})
+
     @staticmethod
     def _parse_csv(raw: str) -> set[str]:
-        """把 '111, 222' 形式的配置解析成无重复集合。"""
-        return {s.strip() for s in (raw or "").split(",") if s.strip()}
+        """把 '111, 222' 形式的配置解析成无重复集合。
+
+        容错中文分隔符（全角逗号 / 顿号 / 分号 / 全角空格）——见 _SEPARATORS。
+        """
+        text = str(raw or "").translate(NetherLinkPlugin._SEPARATORS)
+        return {s.strip() for s in text.split(",") if s.strip()}
 
     @staticmethod
     def _parse_group_names(raw: str) -> dict[str, str]:
-        """把 '群号:群名, 987654:生存服' 形式的配置解析成 {群号: 群名}。"""
+        """把 '群号:群名, 987654:生存服' 形式的配置解析成 {群号: 群名}。
+
+        同样容错中文分隔符（全角逗号 / 顿号），并把全角冒号也归一化——
+        `server_display_names` 与 `group_names` 都走这里，写错一个字符就会
+        静默失效。
+        """
+        text = (
+            str(raw or "")
+            .translate(NetherLinkPlugin._SEPARATORS)
+            .replace("：", ":")
+        )
         result: dict[str, str] = {}
-        for part in (raw or "").split(","):
+        for part in text.split(","):
             part = part.strip()
             if not part:
                 continue
@@ -390,10 +423,12 @@ class NetherLinkPlugin(Star):
         """
         out: list = []
         seen: set = set()
-        for part in str(raw or "").split(","):
+        text = str(raw or "").translate(NetherLinkPlugin._SEPARATORS)
+        for part in text.split(","):
             part = part.strip()
             if not part:
                 continue
+            part = part.replace("：", ":")
             name, _, port_s = part.rpartition(":")
             if not port_s:
                 name, port_s = "", part
@@ -888,8 +923,11 @@ class NetherLinkPlugin(Star):
 
         AstrBot 全局管理员的 admins_id 与 admin_qq 都是 QQ 号，对游戏内身份无效，
         所以游戏侧没有"全局管理员"这回事。
+
+        **大小写不敏感**：MC 登录名本身不区分大小写，但 `getName()` 返回规范拼写
+        （MoeDawn），而 set 成员判断区分大小写。填 `moedawn` 会静默失效。
         """
-        return str(mc_id) in self.admin_mc
+        return str(mc_id).strip().lower() in self._admin_mc_lower
 
     async def _build_system_parts(
         self, umo: str, identity: str, is_admin: bool, source: str, server_id: str = ""
@@ -960,7 +998,8 @@ class NetherLinkPlugin(Star):
                 return
 
             system_parts = await self._build_system_parts(
-                umo, player, self._game_is_admin(player), source="game"
+                umo, player, self._game_is_admin(player), source="game",
+                server_id=server_id,
             )
             # 提示词里的 {player}/{server}/{advancement} 由插件替换——成就是
             # 客观事实，不该让 AI 去猜谁拿到了什么
