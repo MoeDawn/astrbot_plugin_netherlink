@@ -148,14 +148,6 @@ DEFAULT_ADVANCEMENT_PROMPT = (
 # 游戏内对话附加提示词默认值，{server} 会替换为服务器名
 DEFAULT_EXTRA_SYSTEM_PROMPT = "你当前处于一个我的世界服务器内,服务器名称为{server}"
 
-# 旧版（计分板时代）karma_rules 默认值的特征串。
-# AstrBot 会把 schema 的 default 落盘进 cmd_config.json，已保存过配置的部署会一直
-# 返回落盘的那份，改 schema 也追不回来——旧文案里让 AI「先用 mc_karma 判断并扣除
-# 好感度」，与 v3.0 的 cost 机制冲突，会让重构在存量部署上静默失效。因此启动时检测
-# 该特征串并覆盖为当前默认值。
-LEGACY_KARMA_RULES_MARKER = "dummy 型计分板"
-
-
 class NetherLinkPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -207,19 +199,6 @@ class NetherLinkPlugin(Star):
         self.karma_rules: str = str(
             config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES
         )
-        # 存量部署迁移：落盘的旧版规则与 cost 机制冲突，检测到就覆盖并告警
-        if LEGACY_KARMA_RULES_MARKER in self.karma_rules:
-            logger.warning(
-                "NetherLink: 检测到落盘的旧版 karma_rules（计分板时代），"
-                "已覆盖为当前默认规则——旧规则要求 AI 手动扣好感，与 mc_command 的 "
-                "cost 机制冲突。如你曾自定义过该字段，请到 WebUI 重新确认。"
-            )
-            self.karma_rules = DEFAULT_KARMA_RULES
-            try:
-                self.config["karma_rules"] = DEFAULT_KARMA_RULES
-                self.config.save_config()
-            except Exception as e:
-                logger.error(f"NetherLink: 迁移 karma_rules 写回配置失败: {e}")
         self.mc_command_tool_desc: str = str(
             config.get("mc_command_tool_desc", DEFAULT_MC_COMMAND_TOOL_DESC)
             or DEFAULT_MC_COMMAND_TOOL_DESC
