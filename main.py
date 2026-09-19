@@ -1768,6 +1768,31 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 发送到 MC [{target}] 失败: {e}")
             return False
 
+    async def _broadcast_to_mc(self, payload: dict) -> int:
+        """把一条下行消息发给**所有**在线的 MC 服务器，返回发成功的台数。
+
+        与 `_send_to_mc` 的分工：
+          · `_send_to_mc` 是**定向**发送（指令、机器人回复）——目标不明确就拒发，
+            因为把指令发到错误的服务器比丢掉更糟
+          · 本方法用于**天然属于全体**的消息（QQ 群友的聊天），广播是它的语义本身
+
+        以前这里直接调 `_send_to_mc` 且不带 server_id，多台在线时会被那条
+        「未指定目标」的保护整条拒掉——**QQ 消息完全进不了游戏**，而单服下
+        看不出来（只有一台，照发）。这是多服务器改造的回归，2026-09-19 修。
+        """
+        sent = 0
+        for sid, conn in list(self._mc_conns.items()):
+            if conn.closed:
+                continue
+            try:
+                await conn.ws.send_str(json.dumps(payload, ensure_ascii=False))
+                sent += 1
+            except Exception as e:
+                logger.error(f"NetherLink: 广播到 MC [{sid}] 失败: {e}")
+        if not sent:
+            logger.warning("NetherLink: MC 服务器未连接，消息丢弃")
+        return sent
+
     # ------------------------------------------------------------------
     # QQ 群消息 -> MC
     # ------------------------------------------------------------------
@@ -1800,8 +1825,15 @@ class NetherLinkPlugin(Star):
             if "<netherlink_context>" in (req.system_prompt or ""):
                 return  # 幂等：已经注入过
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
-            ctx = self._admin_context(identity, self._qq_is_admin(event), "qq")
+            is_admin = self._qq_is_admin(event)
+            ctx = self._admin_context(identity, is_admin, "qq")
             req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
+            # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
+            # 排查「AI 认不出管理员」时先看这行有没有出现。
+            logger.info(
+                f"NetherLink: 已为 QQ 侧对话注入身份 —— 发起者 {identity}，"
+                f"{'是' if is_admin else '不是'}管理员"
+            )
         except Exception as e:
             # 注入失败不能连累对话本身
             logger.error(f"NetherLink: 注入 QQ 侧身份上下文失败: {e}")
@@ -1837,7 +1869,8 @@ class NetherLinkPlugin(Star):
                 .replace("{sender}", str(event.get_sender_name() or "?"))
                 .replace("{text}", clean_text)
             )
-            await self._send_to_mc({"type": "chat", "line": line})
+            # 群消息天然属于全体：广播给所有在线服务器（见 _broadcast_to_mc）
+            await self._broadcast_to_mc({"type": "chat", "line": line})
         except Exception as e:
             logger.error(f"NetherLink: QQ->MC 转发失败: {e}")
 
