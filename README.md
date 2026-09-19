@@ -53,6 +53,7 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 | `admin_qq` | 管理员 QQ 号（逗号分隔） |
 | `admin_mc` | 管理员游戏 ID（逗号分隔）。**游戏内管理员只能在这里填**（AstrBot 的全局管理员是 QQ 号，对游戏内无效） |
 | `mc_server_name` | 服务器**显示名**，用于 `{server}` 占位符、群消息前缀、AI 上下文 |
+| `server_display_names` | **多服务器**时按服务器区分显示名，如 `survival:生存服,creative:创造服`。留空则一律用 `mc_server_name` |
 | `mc_bot_name` | 机器人游戏内名字，用于 `{bot}` 占位符 |
 | `mc_wake_prefixes` | 游戏内唤醒词（默认 `ai,助手`），**须与 MC 端 `wake-prefixes` 一致** |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏（默认关，防刷屏） |

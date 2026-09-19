@@ -99,12 +99,14 @@ DEFAULT_KARMA_RULES = """\
 你和玩家之间存在一个好感值，初始值 10，最低 -50，最高 100。
 玩家获得成就、和你进行友善的让心情变好的对话，你可以增加此数值；
 玩家发表不友好言论，你可以扣除好感。以上行为造成的好感变化每次不超过 ±2。
-你和玩家对话时，根据此数值来改变说话方式和态度；如果因为对话导致好感度变化，你会隐晦地暗示。
-当玩家请求你使用指令时，你调用 mc_command 工具时传入的 cost 参数就是本次消耗的好感，
-插件会自动完成扣除，你不需要自己再扣一次。
+你和玩家对话时，根据此数值来改变说话方式和态度；如果因为对话导致好感度变化，你会隐晦地暗示
+当玩家请求你使用指令时，先判断其剩余好感是否足以支付该指令的消耗；
+不足以支付的，你会拒绝执行并隐晦的透露原因,不能透露具体的好感值
+你调用 mc_command 工具时传入的 cost 参数就是本次消耗的好感，
+插件会自动完成扣除，你不需要自己再扣一次
 请求的指令越 OP 消耗的好感越多（参考：tp 到其他玩家附近一次扣 1；
 tp 到附近村庄这类需要定位+传送+有价值的地点一次扣 20；要 3 个铁锭扣 3；
-要钻石或金苹果一次扣 10；纯查询类如 list/time/weather 不消耗）。
+要钻石或金苹果一次扣 10；纯查询类如 list/time/weather 不消耗）
 如果请求的指令消耗大于玩家剩余好感，你会拒绝执行并隐晦的透露原因。"""
 
 # mc_command 工具描述默认值。刻意不含好感度内容——AI 调用本工具前
@@ -118,7 +120,7 @@ tp 到附近村庄这类需要定位+传送+有价值的地点一次扣 20；要
 # 只描述**场景**，把名单的来源写成条件式，三个面读起来才都是真的。
 DEFAULT_MC_COMMAND_TOOL_DESC = """\
 在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。
-执行前请自行判断这条指令是否属于高危操作（如改游戏模式、传送他人、给予物品、
+执行前请自行判断这条指令是否属于高危操作（如改游戏模式、给予危害游戏的物品、
 封禁、op、清空区域等）。高危操作应审慎处理。
 调用本工具后，系统可能要求你进一步确认消耗与权限；如需判断发起者身份，
 以对话中提供的 <netherlink_context> 为准（若未提供，则按普通玩家对待）。"""
@@ -174,6 +176,12 @@ class NetherLinkPlugin(Star):
         # 名称与占位符：模板里可用 {server}/{group}/{bot} 分别替换为
         # 服务器名/群名/机器人游戏内名字
         self.mc_server_name: str = str(config.get("mc_server_name", "MC") or "MC")
+        # 按服务器区分显示名：server_id -> 显示名。留空则一律用 mc_server_name
+        # （**单服部署行为与以前逐字相同**）。
+        # 显示名始终由本插件决定——MC 端只上报身份（server_id），不决定显示成什么。
+        self.server_display_names: dict = self._parse_group_names(
+            str(config.get("server_display_names", "") or "")
+        )
         self.mc_bot_name: str = str(config.get("mc_bot_name", "ai") or "ai")
         self.group_names: dict[str, str] = self._parse_group_names(
             str(config.get("group_names", "") or "")
@@ -574,6 +582,49 @@ class NetherLinkPlugin(Star):
             except OSError as e:
                 logger.error(f"NetherLink WS 端口 {port} 启动失败: {e}")
 
+    def _online_servers(self) -> list:
+        """在线服务器的 (server_id, 显示名) 列表，供 QQ 侧 AI 选择指令目标。"""
+        return [
+            (sid, self._mc_server_display(sid))
+            for sid, conn in sorted(self._mc_conns.items())
+            if not conn.closed
+        ]
+
+    def _build_online_servers_hint(self) -> str:
+        """把在线服务器列给 AI，供它决定指令发往哪台。
+
+        只有一台时也给（写明"仅一台"），否则 AI 会以为需要自己挑。没有在线
+        服务器时明确说没有——别让 AI 以为可以执行。
+        """
+        online = self._online_servers()
+        if not online:
+            return "当前没有 MC 服务器在线，无法执行任何服务器指令。"
+        if len(online) == 1:
+            sid, disp = online[0]
+            return f"当前只有一台 MC 服务器在线：{disp}（server_id: {sid}）。指令将发往它。"
+        listed = "、".join(f"{disp}（server_id: {sid}）" for sid, disp in online)
+        return (
+            f"当前有 {len(online)} 台 MC 服务器在线：{listed}。"
+            "请用 server 参数指明指令发往哪一台（填 server_id 或显示名都可）；"
+            "不填会被拒绝发送。"
+        )
+
+    def _resolve_target_server(self, name: str) -> str:
+        """把 AI 给的 `server` 参数（server_id 或显示名）解析成 server_id。
+
+        支持两种写法：**server_id**（如 survival）与**显示名**（如 生存服）——
+        AI 在上下文里看到的是显示名，但工具参数更可能照抄 id，两者都认。
+        解析不出返回空串（调用方据此报错或退回唯一在线的那台）。
+        """
+        want = str(name or "").strip()
+        if not want:
+            return ""
+        online = self._online_servers()
+        for sid, disp in online:
+            if want == sid or want == disp:
+                return sid
+        return ""
+
     def _bound_server_id(self, port: int) -> str:
         """该端口在配置里绑定的 server_id；未绑定则返回空串（由 MC 端上报名决定）。"""
         for label, p in self.ws_bindings:
@@ -691,9 +742,9 @@ class NetherLinkPlugin(Star):
                     pass
                 elif mtype == "bot_chat":
                     # 游戏内唤醒词消息：走 LLM，回复只发回游戏，QQ 不可见
-                    asyncio.create_task(self._handle_bot_chat(data))
+                    asyncio.create_task(self._handle_bot_chat(data, server_id))
                 else:
-                    await self._dispatch_mc_event(mtype, data)
+                    await self._dispatch_mc_event(mtype, data, server_id)
 
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
@@ -711,10 +762,13 @@ class NetherLinkPlugin(Star):
         conn = self._mc_conns.get(server_id)
         return conn is None or conn.closed
 
-    async def _dispatch_mc_event(self, mtype: str, data: dict):
-        """把 MC 事件按模板渲染后推送到所有绑定群。"""
+    async def _dispatch_mc_event(self, mtype: str, data: dict, server_id: str = ""):
+        """把 MC 事件按模板渲染后推送到所有绑定群。
+
+        `server_id` 来自连接（端口绑定或握手上报），决定 `{server}` 显示成什么。
+        """
         try:
-            srv = self.mc_server_name
+            srv = self._mc_server_display(server_id)
             if mtype == "chat" and self.config.get("enable_chat", True):
                 text = self._fmt(self.templates["chat"], server=srv, bot=self.mc_bot_name,
                                  player=data.get("player", "?"), text=data.get("text", ""))
@@ -750,7 +804,7 @@ class NetherLinkPlugin(Star):
                 # 成就走**独立管线**：要起 AI 让它更新好感并回话，不是套模板广播。
                 # 单独 create_task，避免把 LLM 往返（可能数秒）压在这条 WS 事件
                 # 处理路径上、连累后续事件。
-                asyncio.create_task(self._handle_advancement(data))
+                asyncio.create_task(self._handle_advancement(data, server_id))
                 return
             else:
                 return
@@ -758,20 +812,30 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 处理 MC 事件 {mtype} 失败: {e}")
 
-    def _mc_server_display(self) -> str:
-        """对外展示与 LLM 上下文统一使用的服务器名 = `mc_server_name` 显示名配置。
+    def _mc_server_display(self, server_id: str = "") -> str:
+        """对外展示与 LLM 上下文统一使用的服务器名。
+
+        取值顺序：
+          1. `server_display_names` 里该 `server_id` 的映射（多服部署用）
+          2. `mc_server_name`（默认 "MC"）——单服、或该 id 没配映射时
 
         **不用 `_mc_server_reported`**：Paper 侧 `server-name` 的职责是**标识**
         （握手告知"我是哪台服务器"），显示名统一由本插件配置控制。这样 QQ 群消息
         前缀、模板 {server}、LLM 上下文三处看到的名字必然一致，不会出现
         「群里显示 [MC]、AI 却被告知服务器叫 mc」这种割裂。
         """
+        if server_id:
+            name = self.server_display_names.get(str(server_id))
+            if name:
+                return name
         return self.mc_server_name
 
     # ------------------------------------------------------------------
     # 提示词拼装（游戏侧与 QQ 内层共用）
     # ------------------------------------------------------------------
-    def _admin_context(self, identity: str, is_admin: bool, source: str) -> str:
+    def _admin_context(
+        self, identity: str, is_admin: bool, source: str, server_id: str = ""
+    ) -> str:
         """管理员名单 + 当前发起者身份，供 AI 判断是否放行高危操作。
 
         名单只是参考信息，插件不做任何拦截——是否放行由 AI 决定。
@@ -793,7 +857,7 @@ class NetherLinkPlugin(Star):
         who = "是管理员。" if is_admin else "不是管理员。"
         return (
             "<netherlink_context>\n"
-            f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display()}」。\n"
+            f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」。\n"
             f"{roster_line}"
             f"当前发起者：{identity}，{who}\n"
             "</netherlink_context>"
@@ -823,7 +887,7 @@ class NetherLinkPlugin(Star):
         return str(mc_id) in self.admin_mc
 
     async def _build_system_parts(
-        self, umo: str, identity: str, is_admin: bool, source: str
+        self, umo: str, identity: str, is_admin: bool, source: str, server_id: str = ""
     ) -> list:
         """拼装 LLM 对话的 system_prompt 各段（游戏侧与 QQ 内层共用），顺序即最终顺序。
 
@@ -852,7 +916,7 @@ class NetherLinkPlugin(Star):
         # （见 __init__ 里的口径说明），此时好感规则仍独立贡献，且不留前导换行。
         blocks: list[str] = []
         extra = str(self.extra_system_prompt or "")
-        extra = extra.replace("{server}", self._mc_server_display())  # 唯一支持的占位符
+        extra = extra.replace("{server}", self._mc_server_display(server_id))  # 唯一支持的占位符
         if extra.strip():
             blocks.append(extra)
         if self.karma_rules:
@@ -860,10 +924,10 @@ class NetherLinkPlugin(Star):
         if blocks:
             parts.append("\n".join(blocks))
 
-        parts.append(self._admin_context(identity, is_admin, source))
+        parts.append(self._admin_context(identity, is_admin, source, server_id))
         return parts
 
-    async def _handle_advancement(self, data: dict):
+    async def _handle_advancement(self, data: dict, server_id: str = ""):
         """玩家获得成就：把配置的提示词交给 AI，由它更新好感并回话。
 
         与死亡扣减的差别：死亡是 AI 不在场的**代码**扣减；成就是**AI 在场**的
@@ -883,7 +947,7 @@ class NetherLinkPlugin(Star):
 
         NL = chr(10) + chr(10)   # 段间空行；用 chr 拼装以免源码里出现转义序列
         try:
-            event = self._make_synthetic_event(player)
+            event = self._make_synthetic_event(player, server_id)
             umo = event.unified_msg_origin
             prov_id = await self.context.get_current_chat_provider_id(umo)
             if not prov_id:
@@ -898,7 +962,7 @@ class NetherLinkPlugin(Star):
             prompt = (
                 self.advancement_prompt
                 .replace("{player}", player)
-                .replace("{server}", self._mc_server_display())
+                .replace("{server}", self._mc_server_display(server_id))
                 .replace("{advancement}", advancement)
             )
 
@@ -934,18 +998,20 @@ class NetherLinkPlugin(Star):
             )
             await conv_mgr.add_message_pair(
                 cid=curr_cid,
-                user_message=UserMessageSegment(content=[TextPart(text=prompt)]),
+                user_message=UserMessageSegment(
+                    content=[TextPart(text=f"[{player}] {prompt}")]
+                ),
                 assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
             )
 
-            await self._send_bot_reply(reply, sync_qq=True)
+            await self._send_bot_reply(reply, sync_qq=True, server_id=server_id)
             logger.info(
                 f"NetherLink: 成就事件已处理 [{player}] {advancement}"
             )
         except Exception as e:
             logger.error(f"NetherLink: 处理成就事件失败: {e}")
 
-    async def _handle_bot_chat(self, data: dict):
+    async def _handle_bot_chat(self, data: dict, server_id: str = ""):
         """游戏内玩家用唤醒词跟机器人说话：转交给 AstrBot 的 LLM 管线处理。
 
         设计对齐 AstrBot 理念：插件不自建人设，而是把玩家消息作为 prompt 转交
@@ -985,21 +1051,27 @@ class NetherLinkPlugin(Star):
             except Exception as e:
                 logger.error(f"NetherLink: 推送游戏内唤醒消息到群失败: {e}")
 
-        lock = self._player_llm_locks.setdefault(player, asyncio.Lock())
+        # 锁的粒度：会话是按**服务器**建的，所以并发也必须按服务器串行——
+        # 否则同一个会话会被两条请求同时追加，历史交错。
+        lock_key = server_id or player
+        lock = self._player_llm_locks.setdefault(lock_key, asyncio.Lock())
         if lock.locked():
-            await self._send_bot_reply("（上一条还在思考中，稍等一下…）", sync_qq=False)
+            await self._send_bot_reply(
+                "（上一条还在思考中，稍等一下…）", sync_qq=False, server_id=server_id
+            )
             return
 
         async with lock:
             try:
-                event = self._make_synthetic_event(player)
+                event = self._make_synthetic_event(player, server_id)
                 umo = event.unified_msg_origin
                 prov_id = await self.context.get_current_chat_provider_id(umo)
 
                 # 系统提示词拼装（顺序见 _build_system_parts）：
                 # [WebUI 人格（可开关）] + [自定义提示词 + karma 规则] + [管理员上下文]
                 system_parts = await self._build_system_parts(
-                    umo, player, self._game_is_admin(player), source="game"
+                    umo, player, self._game_is_admin(player), source="game",
+                    server_id=server_id,
                 )
 
                 # 附加提示词：来源与管理员名单已由 system_prompt 里的
@@ -1024,7 +1096,10 @@ class NetherLinkPlugin(Star):
                     "</netherlink_request>"
                 )
 
-                # 会话历史：按玩家挂会话，同一玩家连续对话有记忆
+                # 会话历史：**按服务器挂会话**（见 _make_synthetic_event），
+                # 所以同一会话里会有多个玩家的话——写入时必须带上说话人，
+                # 否则 AI 看到一串没有主语的发言，分不清谁在说什么，
+                # 甚至会把这轮别人的话当成自己的上下文。
                 conv_mgr = self.context.conversation_manager
                 curr_cid = await conv_mgr.get_curr_conversation_id(umo)
                 if not curr_cid:
@@ -1040,43 +1115,59 @@ class NetherLinkPlugin(Star):
                     chat_provider_id=prov_id,
                     system_prompt="\n\n".join(system_parts) if system_parts else None,
                     prompt=f"{context_hint}\n\n玩家消息：{prompt}",
-                    tools=self._build_mc_toolset(player),
+                    tools=self._build_mc_toolset(player, server_id),
                     contexts=history,
                     max_steps=6,
                 )
                 reply = (llm_resp.completion_text or "……").strip()[:MC_REPLY_MAX_LEN]
 
-                # 把本轮对话写回会话历史（下次对话带上）
+                # 把本轮对话写回会话历史（下次对话带上）。
+                # 用户消息前缀说话人，让共享会话里的发言有归属。
                 from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
                 await conv_mgr.add_message_pair(
                     cid=curr_cid,
-                    user_message=UserMessageSegment(content=[TextPart(text=prompt)]),
+                    user_message=UserMessageSegment(
+                        content=[TextPart(text=f"[{player}] {prompt}")]
+                    ),
                     assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
                 )
 
                 # 游戏内按模板渲染（含 § 染色），QQ 群同步纯文本回复
-                await self._send_bot_reply(reply, sync_qq=True)
+                await self._send_bot_reply(reply, sync_qq=True, server_id=server_id)
             except Exception as e:
                 logger.error(f"NetherLink: 游戏内 LLM 对话失败: {e}")
-                await self._send_bot_reply("（机器人暂时无法思考，请稍后再试）", sync_qq=False)
+                await self._send_bot_reply(
+                    "（机器人暂时无法思考，请稍后再试）", sync_qq=False, server_id=server_id
+                )
             finally:
-                self._player_llm_locks.pop(player, None)
+                self._player_llm_locks.pop(lock_key, None)
 
-    async def _send_bot_reply(self, text: str, sync_qq: bool):
-        """向游戏公屏广播机器人回复（MC 端按模板渲染 § 染色），可选同步到 QQ 群。"""
+    async def _send_bot_reply(self, text: str, sync_qq: bool, server_id: str = ""):
+        """向**来源那台**服务器广播机器人回复，可选同步到 QQ 群。
+
+        必须定向：多台在线时不指定目标，`_send_to_mc` 会拒发（宁丢不发错），
+        玩家就永远等不到回复。
+        """
         line = self.templates["bot_reply_game"].replace("{bot}", self.mc_bot_name).replace(
             "{text}", text.replace("§", "&")
         )
-        await self._send_to_mc({"type": "bot_reply", "line": line})
+        await self._send_to_mc({"type": "bot_reply", "line": line}, server_id)
         if sync_qq:
             # QQ 端正常输出回复文本（§ 染色码只属于游戏渲染，不同步）
-            await self._broadcast(f"[{self.mc_server_name}] {self.mc_bot_name}: {text}")
+            await self._broadcast(
+                f"[{self._mc_server_display(server_id)}] {self.mc_bot_name}: {text}"
+            )
 
-    def _make_synthetic_event(self, player: str) -> AstrMessageEvent:
+    def _make_synthetic_event(self, player: str, server_id: str = "") -> AstrMessageEvent:
         """为游戏内玩家构造一个合成的消息事件（不走消息平台，仅用于 LLM 上下文）。
 
         sender.user_id 存游戏 ID，使工具闭包能从 event 拿到发起人身份。
         AstrMessageEvent 是抽象基类但无抽象方法，可直接实例化。
+
+        **会话按服务器建**（session_id = server_id，不是玩家名）——2026-09-19
+        用户决定：这样一个会话里能看到该服所有玩家的消息，AI 更容易掌握服务器上
+        的整体情况。代价是并发语义从「同一玩家串行」变成「同一服务器串行」，
+        且写入历史的用户消息必须带说话人（否则分不清谁说的，见 _handle_bot_chat）。
         """
         from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
         from astrbot.core.platform.message_type import MessageType
@@ -1090,15 +1181,19 @@ class NetherLinkPlugin(Star):
         platform_meta = PlatformMetadata(
             name="netherlink_mc", description="NetherLink MC 端合成事件", id="netherlink_mc"
         )
+        # session_id 用 server_id：**按服务器建会话**。server_id 为空（未握手
+        # 的极端情形）时退回玩家名，保证总能落到一个会话上。
         return AstrMessageEvent(
             message_str="", message_obj=msg_obj,
-            platform_meta=platform_meta, session_id=player,
+            platform_meta=platform_meta, session_id=(server_id or player),
         )
 
     # ------------------------------------------------------------------
     # QQ 侧内层 agent 的工具（handler 模式）
     # ------------------------------------------------------------------
-    async def _inner_mc_command(self, event, cmd: str, cost: int) -> str:
+    async def _inner_mc_command(
+        self, event, cmd: str, cost: int, server: str = ""
+    ) -> str:
         """QQ 侧内层 agent 用的 mc_command handler。
 
         不能复用 self.mc_command——那是被 @filter.llm_tool 装饰过的版本：
@@ -1110,12 +1205,21 @@ class NetherLinkPlugin(Star):
         """
         try:
             qq = str(event.get_sender_id() or "")
+            target = self._resolve_target_server(server)
+            # 解析不出目标时**不猜**：交给 exec_command_for → _send_to_mc 判定，
+            # 只有恰好一台在线才发送，多台会拒发（宁可丢一条也不发错服务器）。
+            # 但若 AI 明确填了一个不存在的名字，那就是它的判断错了，如实告知。
+            if server and not target:
+                online = self._online_servers()
+                names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
+                return f"没有名为「{server}」的服务器在线。在线的是：{names}"
             return await self.exec_command_for(
                 initiator=str(event.get_sender_name() or qq),
                 cmd=cmd,
                 source="qq",
                 qq=qq,
                 cost=cost,
+                server_id=target,
             )
         except Exception as e:
             logger.error(f"NetherLink: 内层 mc_command 执行失败: {e}")
@@ -1170,6 +1274,13 @@ class NetherLinkPlugin(Star):
                         "type": "number",
                         "description": "本次执行消耗的好感值，由你按好感度规则决定；纯查询类传 0",
                     },
+                    "server": {
+                        "type": "string",
+                        "description": (
+                            "指令发往哪台 MC 服务器（填 server_id 或显示名）。"
+                            "只有一台在线时可省略；多台在线时不填会被拒绝发送。"
+                        ),
+                    },
                 },
                 "required": ["cmd", "cost"],
             },
@@ -1193,7 +1304,7 @@ class NetherLinkPlugin(Star):
         )
         return ToolSet([inner_cmd, inner_karma])
 
-    def _build_mc_toolset(self, player: str):
+    def _build_mc_toolset(self, player: str, server_id: str = ""):
         """构造游戏内会话用的 mc_command 工具集合。
 
         只有游戏侧这一个调用面，发起人固定为 player（游戏 ID）——QQ 侧走的是
@@ -1235,12 +1346,15 @@ class NetherLinkPlugin(Star):
 
             async def call(self, context, **kwargs) -> str:
                 cmd = str(kwargs.get("cmd", "")).strip().lstrip("/")
-                # cost 原样透传：裁剪与扣费都在 exec_command_for 里做（唯一入口）
+                # cost 原样透传：裁剪与扣费都在 exec_command_for 里做（唯一入口）。
+                # server_id 由**连接**得出（端口绑定或握手），不经过 AI——
+                # 玩家在 A 服说话，指令就该发到 A 服，没有让 AI 判断的余地。
                 return await plugin.exec_command_for(
                     initiator=player,
                     cmd=cmd,
                     source="game",
                     cost=kwargs.get("cost", 0),
+                    server_id=server_id,
                 )
 
         @dataclass
@@ -1283,7 +1397,9 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # 指令执行核心（QQ llm_tool 与游戏内 tool_loop_agent 共用）
     # ------------------------------------------------------------------
-    async def _run_console_cmd(self, cmd: str, timeout: float = 8.0) -> Optional[CmdResult]:
+    async def _run_console_cmd(
+        self, cmd: str, timeout: float = 8.0, server_id: str = ""
+    ) -> Optional[CmdResult]:
         """以控制台身份执行一条指令。
 
         返回 None 表示**没有拿到回执**（未连接 / 发送失败 / 超时）；
@@ -1292,12 +1408,14 @@ class NetherLinkPlugin(Star):
 
         不做权限校验（仅供内部工具使用）；扣费与回滚由 exec_command_for 负责。
         """
-        if not self._mc_connected():
+        if not self._mc_connected(server_id):
             return None
         cmd_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         self._pending_cmds[cmd_id] = fut
-        if not await self._send_to_mc({"type": "command", "id": cmd_id, "cmd": cmd.lstrip("/")}):
+        if not await self._send_to_mc(
+            {"type": "command", "id": cmd_id, "cmd": cmd.lstrip("/")}, server_id
+        ):
             # 发送失败必须把登记撤掉，否则这里就是一份永不回执的僵尸 Future——
             # 只有 terminate() 才清得掉，其间 _pending_cmds 一直虚高。
             # 注意 _send_to_mc 返回 False 有两个来源：真的没连上/发送抛异常，
@@ -1358,7 +1476,13 @@ class NetherLinkPlugin(Star):
             return False
 
     async def exec_command_for(
-        self, initiator: str, cmd: str, source: str, qq: str = "", cost: int = 0
+        self,
+        initiator: str,
+        cmd: str,
+        source: str,
+        qq: str = "",
+        cost: int = 0,
+        server_id: str = "",
     ) -> str:
         """执行指令并返回给 LLM 的结果文本。
 
@@ -1371,6 +1495,9 @@ class NetherLinkPlugin(Star):
 
         source="qq"  : initiator 为发起人显示名（QQ 群昵称），qq 为发起人 QQ
         source="game": initiator 为游戏内玩家名
+        server_id    : 指令发往哪台 MC 服务器。游戏侧由连接直接得出（连接即身份）；
+                       QQ 侧由 AI 依上下文选定。为空时交由 _send_to_mc 判定：
+                       只有恰好一台在线才发送，多台则拒发（宁丢不发错）。
         cost         : AI 为本次执行报出的好感消耗。报价是外部输入，必经
                        clamp_cost 裁剪（非数字/负数归 0，超过 max_command_cost 按上限）。
                        好感度是强制机制，本方法**永远**按报价计价，没有开关能跳过。
@@ -1411,7 +1538,7 @@ class NetherLinkPlugin(Star):
                         )
                     return "MC 服务器当前不在线，无法执行指令。"
 
-                result = await self._run_console_cmd(cmd)
+                result = await self._run_console_cmd(cmd, server_id=server_id)
                 # 三种结局绝不能折叠：
                 #   None            -> 没有回执（未连接/发送失败/超时）-> 退费
                 #   CmdResult(ok=F) -> 服务器**明确回了失败**          -> 退费
@@ -1645,7 +1772,7 @@ class NetherLinkPlugin(Star):
     @filter.llm_tool(name="mc_command")
     async def mc_command(self, event, cmd: str, cost: int) -> str:
         """在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。
-        执行前请自行判断这条指令是否属于高危操作（如改游戏模式、传送他人、给予物品、
+        执行前请自行判断这条指令是否属于高危操作（如改游戏模式、给予危害游戏的物品、
         封禁、op、清空区域等）。高危操作应审慎处理。
         调用本工具后，系统可能要求你进一步确认消耗与权限；如需判断发起者身份，
         以对话中提供的 <netherlink_context> 为准（若未提供，则按普通玩家对待）。
@@ -1691,6 +1818,7 @@ class NetherLinkPlugin(Star):
                 prompt=(
                     f"QQ 群友「{identity}」请求在 Minecraft 服务器上执行这条指令：\n"
                     f"{cmd}\n"
+                    f"{self._build_online_servers_hint()}\n"
                     f"外层决策给出的初步报价是 {quoted} 点好感。外层看不到好感度规则，"
                     "这个数字只是它的猜测，仅供参考。\n"
                     "请按好感度规则自行判断这条指令该不该执行、要消耗对方多少好感"
