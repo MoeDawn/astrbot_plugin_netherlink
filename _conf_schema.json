@@ -10,6 +10,12 @@
     "type": "int",
     "default": 8765
   },
+  "ws_ports": {
+    "description": "多服务器端口绑定（逗号分隔，可留空）",
+    "type": "string",
+    "default": "",
+    "hint": "一台 MC 服务器占一个端口。每项写「服务器ID:端口」或只写「端口」。例：survival:8765,creative:8766。留空则只用上面的 ws_port（单服保持原行为）。⚠️ 两台服务器连同一个端口会互相踢下线、消息随机丢失，务必各占一个端口。"
+  },
   "auth_token": {
     "description": "连接鉴权 Token",
     "type": "string",

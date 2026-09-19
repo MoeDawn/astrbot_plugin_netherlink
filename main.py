@@ -72,6 +72,27 @@ class CmdResult:
     ok: bool
     output: str
 
+
+@dataclass
+class McConn:
+    """一台已握手 MC 服务器的连接。
+
+    多服并存的核心数据结构：以前只有一个 `self._mc_ws` 字段，第二台服务器
+    一连入就会把第一台踢掉（且两端各自重连，形成永久互踢）。现在按 server_id
+    分别保存，同 id 才是「重连替换」，不同 id 并存。
+    """
+
+    ws: object          # aiohttp.web.WebSocketResponse
+    port: int           # 它连入的本地端口（路线 A 里端口即身份来源）
+    reported_name: str  # 握手上报的 server-name（仅作标识，不作显示名）
+
+    @property
+    def closed(self) -> bool:
+        try:
+            return bool(getattr(self.ws, "closed", True))
+        except Exception:
+            return True
+
 # 好感度规则提示词默认值（AI 据此自主决定好感增减与指令消耗）
 DEFAULT_KARMA_RULES = """\
 [好感度规则]
@@ -136,6 +157,13 @@ class NetherLinkPlugin(Star):
         # ---- 配置解析 ----
         self.ws_host: str = config.get("ws_host", "0.0.0.0")
         self.ws_port: int = int(config.get("ws_port", 8765))
+        # 多端口监听（路线 A）：一台服务器占一个端口。
+        # 留空 = 只用 ws_port 单端口，**单服部署行为与以前逐字相同**。
+        # 形如 "8765,8766"（id 取 MC 端上报的 server-name）
+        # 或   "survival:8765,creative:8766"（显式指定 id，推荐——不依赖 MC 端填对名字）。
+        self.ws_bindings: list = self._parse_ws_ports(
+            config.get("ws_ports", ""), self.ws_port
+        )
         self.auth_token: str = config.get("auth_token", "")
         self.target_groups: set[str] = self._parse_csv(config.get("target_groups", ""))
         self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", ""))
@@ -239,9 +267,13 @@ class NetherLinkPlugin(Star):
 
         # ---- 运行时状态 ----
         self._runner: Optional[web.AppRunner] = None
-        self._mc_ws: Optional[aiohttp.web.WebSocketResponse] = None  # 当前 MC 连接（单服务器）
-        # MC 端 hello 握手上报的真实服务器名（区别于 mc_server_name 显示名）
-        self._mc_server_reported: str = ""
+        # 已握手的 MC 连接：server_id -> McConn（多服并存）。
+        # 早先这里是单个 `_mc_ws` 字段，第二台服务器连入会踢掉第一台，
+        # 而两端都会重连，于是形成**永不停止的互踢**（见 docs/multi-server-plan.md）。
+        self._mc_conns: dict = {}
+        # 端口 -> 当前占用的 server_id。一个端口同一时刻只服务一台服务器：
+        # 同 id 再连 = 断线重连（正常，替换旧的）；不同 id = 配置冲突（阶段 0：报错拒绝）。
+        self._port_owner: dict = {}
         # 等待执行结果的指令：id -> asyncio.Future
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
@@ -332,6 +364,42 @@ class NetherLinkPlugin(Star):
             else:
                 result[part] = part  # 只填群号时群名用群号代替
         return result
+
+    @staticmethod
+    def _parse_ws_ports(raw, fallback_port: int) -> list:
+        """解析 ws_ports 配置 → [(server_id, port), ...]。
+
+        - 留空/全非法 → [("", fallback_port)]，即退回单端口（单服行为不变）
+        - "8765,8766" → [("", 8765), ("", 8766)]，id 待握手时用 server_name 补
+        - "survival:8765" → [("survival", 8765)]
+
+        server_id 为空串表示「由 MC 端上报的 server-name 决定」。
+        """
+        out: list = []
+        seen: set = set()
+        for part in str(raw or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            name, _, port_s = part.rpartition(":")
+            if not port_s:
+                name, port_s = "", part
+            try:
+                port = int(port_s)
+            except (TypeError, ValueError):
+                logger.warning(f"NetherLink: ws_ports 里的端口非法，已跳过: {part!r}")
+                continue
+            if not (0 < port < 65536):
+                logger.warning(f"NetherLink: ws_ports 里的端口越界，已跳过: {part!r}")
+                continue
+            if port in seen:
+                logger.warning(f"NetherLink: ws_ports 里的端口重复，已跳过: {part!r}")
+                continue
+            seen.add(port)
+            out.append((name.strip(), port))
+        if not out:
+            return [("", fallback_port)]
+        return out
 
     # ------------------------------------------------------------------
     # 好感度存取（本地文件 + 配置项双写）
@@ -463,8 +531,17 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 写回 karma_records 配置失败: {e}")
 
-    def _mc_connected(self) -> bool:
-        return self._mc_ws is not None and not self._mc_ws.closed
+    def _mc_connected(self, server_id: str = "") -> bool:
+        """是否有可用的 MC 连接。
+
+        不传 server_id 时表示「**至少有一台**在线」——保留这个语义是为了让
+        既有的单服调用点（离线判定、指令执行前的检查）不用改。
+        传了则只认那一台。
+        """
+        if server_id:
+            conn = self._mc_conns.get(server_id)
+            return conn is not None and not conn.closed
+        return any(not c.closed for c in self._mc_conns.values())
 
     def _fmt(self, tpl: str, **kw) -> str:
         try:
@@ -476,24 +553,51 @@ class NetherLinkPlugin(Star):
     # WebSocket 服务端
     # ------------------------------------------------------------------
     async def _start_ws_server(self):
-        """启动 WS 服务端，监听 MC 端连入。"""
+        """启动 WS 服务端，监听 MC 端连入。
+
+        **可监听多个端口**（见 ws_ports）：一台 MC 服务器占一个端口。
+        共用同一个 `app` 与 `_ws_handler`，用本地端口区分来源（路线 A「端口即身份」）。
+        单服部署只配 ws_port 时，这里的行为与以前逐字相同。
+        """
         app = web.Application()
         app.router.add_get("/ws", self._ws_handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.ws_host, self.ws_port)
-        try:
-            await site.start()
-            logger.info(f"NetherLink WS 服务端已启动 ws://{self.ws_host}:{self.ws_port}/ws")
-        except OSError as e:
-            logger.error(f"NetherLink WS 端口 {self.ws_port} 启动失败: {e}")
+        for label, port in self.ws_bindings:
+            tag = f"[{label}] " if label else ""
+            try:
+                site = web.TCPSite(self._runner, self.ws_host, port)
+                await site.start()
+                logger.info(
+                    f"NetherLink WS 服务端已启动 {tag}ws://{self.ws_host}:{port}/ws"
+                )
+            except OSError as e:
+                logger.error(f"NetherLink WS 端口 {port} 启动失败: {e}")
+
+    def _bound_server_id(self, port: int) -> str:
+        """该端口在配置里绑定的 server_id；未绑定则返回空串（由 MC 端上报名决定）。"""
+        for label, p in self.ws_bindings:
+            if p == port:
+                return label
+        return ""
+
+    def _is_current_conn(self, server_id: str, ws) -> bool:
+        """这条 ws 是否仍是该 server_id 的当前连接（未被重连替换掉）。"""
+        conn = self._mc_conns.get(server_id)
+        return conn is not None and conn.ws is ws
 
     async def _ws_handler(self, request):
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
-        logger.info("NetherLink: MC 端已连入，等待握手")
+        # 本连接的本地端口——路线 A 里它就是身份的来源
+        try:
+            port = int(request.transport.get_extra_info("sockname")[1])
+        except Exception:
+            port = 0
+        bound_id = self._bound_server_id(port)
+        logger.info(f"NetherLink: MC 端已连入（本地端口 {port}），等待握手")
 
-        server_name = "mc"
+        server_id = ""
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
@@ -509,19 +613,64 @@ class NetherLinkPlugin(Star):
                         logger.warning("NetherLink: MC 端 token 校验失败，断开连接")
                         await ws.close(code=4001, message=b"auth failed")
                         return ws
-                    server_name = data.get("server_name") or "mc"
-                    # 仅作标识：记下 MC 端自报的名字（显示名统一用 mc_server_name）
-                    self._mc_server_reported = server_name
-                    # 单服务器设计：新连接握手成功时踢掉残留的旧连接（如 MC 端
-                    # 断线重连后旧 socket 才超时），避免消息发进死管道
-                    old = self._mc_ws
-                    if old is not None and old is not ws and not old.closed:
-                        logger.warning("NetherLink: 检测到旧 MC 连接，主动关闭")
-                        await old.close(code=4002, message=b"replaced by new connection")
-                    self._mc_ws = ws
-                    logger.info(f"NetherLink: MC 服务器 [{server_name}] 握手成功")
-                elif self._mc_ws is not ws:
-                    continue  # 未通过握手的连接不发事件
+                    reported = str(data.get("server_name") or "mc")
+                    # 身份取值顺序：**配置里为该端口绑定的 id** 优先，其次 MC 端上报的
+                    # server-name。前者更可靠（不依赖对方填对名字），推荐使用。
+                    server_id = bound_id or reported
+
+                    # ---- 阶段 0：同端口不同服务器的冲突，必须报错而不是静默踢掉 ----
+                    # 以前是「新连接一律踢掉旧连接」，于是两台服务器互相踢、各自重连，
+                    # 形成永不停止的抖动（两端退避都会重置回 3 秒），且日志里看不出。
+                    owner = self._port_owner.get(port)
+                    if owner and owner != server_id and not self._conn_closed(owner):
+                        logger.error(
+                            f"NetherLink: 端口 {port} 已被服务器 [{owner}] 占用，"
+                            f"拒绝新连接 [{server_id}]。"
+                            f"若这是另一台服务器，请在 ws_ports 里为它单独指定一个端口——"
+                            f"两台服务器连同一个端口会互相踢下线，消息会随机丢失。"
+                        )
+                        try:
+                            await ws.close(
+                                code=4003, message=b"port in use by another server"
+                            )
+                        except Exception:
+                            pass
+                        return ws
+
+                    # 同 id 再连 = 断线重连，关掉**这台服务器自己**的旧连接；
+                    # 绝不能动别的服务器（以前那个「一律踢掉」正是多服抖动的根源）
+                    old = self._mc_conns.get(server_id)
+                    if old is not None and old.ws is not ws and not old.closed:
+                        if bound_id:
+                            # 端口已绑定 id，新连接必然被判为「同一台」，无法用 id 区分。
+                            # 但旧连接**仍然活着**却来了新连接，是互踢的典型征兆：
+                            # 真的重连时旧 socket 早已断开。两台服务器都指向同一个
+                            # 已绑定端口时，各自都自称该 id，就会一直互相顶掉。
+                            logger.warning(
+                                f"NetherLink: 端口 {port}（绑定 [{bound_id}]）上的连接"
+                                f"被【仍然在线】的新连接替换——上报名 "
+                                f"[{old.reported_name}] -> [{reported}]。"
+                                f"若这其实是两台不同的服务器，请为它们各配一个端口，"
+                                f"否则会互相踢下线、消息随机丢失。"
+                            )
+                        else:
+                            logger.warning(
+                                f"NetherLink: 服务器 [{server_id}] 重复连入，关闭其旧连接"
+                            )
+                        try:
+                            await old.ws.close(code=4002, message=b"replaced by new connection")
+                        except Exception:
+                            pass
+                    self._mc_conns[server_id] = McConn(
+                        ws=ws, port=port, reported_name=reported
+                    )
+                    self._port_owner[port] = server_id
+                    logger.info(
+                        f"NetherLink: MC 服务器 [{server_id}] 握手成功"
+                        f"（端口 {port}，上报名 {reported}）"
+                    )
+                elif not self._is_current_conn(server_id, ws):
+                    continue  # 未握手、或已被重连替换的连接不发事件
 
                 elif mtype == "command_result":
                     fut = self._pending_cmds.pop(data.get("id"), None)
@@ -549,10 +698,18 @@ class NetherLinkPlugin(Star):
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
 
-        if self._mc_ws is ws:
-            self._mc_ws = None
-            logger.warning("NetherLink: MC 服务器连接断开")
+        # 只摘掉属于这条连接的登记。绝不能整个清空——多服并存时那会误伤别人，
+        # 而且 _port_owner 也会跟着丢，后续重连会被误判成端口冲突。
+        if server_id and self._is_current_conn(server_id, ws):
+            self._mc_conns.pop(server_id, None)
+            if self._port_owner.get(port) == server_id:
+                self._port_owner.pop(port, None)
+            logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
         return ws
+
+    def _conn_closed(self, server_id: str) -> bool:
+        conn = self._mc_conns.get(server_id)
+        return conn is None or conn.closed
 
     async def _dispatch_mc_event(self, mtype: str, data: dict):
         """把 MC 事件按模板渲染后推送到所有绑定群。"""
@@ -1413,15 +1570,35 @@ class NetherLinkPlugin(Star):
             except Exception as e:
                 logger.error(f"NetherLink: 推送到群 {group} 失败: {e}")
 
-    async def _send_to_mc(self, payload: dict) -> bool:
-        if not self._mc_connected():
-            logger.warning("NetherLink: MC 服务器未连接，消息丢弃")
+    async def _send_to_mc(self, payload: dict, server_id: str = "") -> bool:
+        """向 MC 端发送一条下行消息。
+
+        `server_id` 为空时：**只有恰好一台在线**才发送。0 台按「未连接」处理；
+        多台则**拒绝发送并记 ERROR**——宁可丢一条也不要把指令发到错误的服务器上
+        （多服并存时「随便挑一台」正是先前指令落到另一台服的原因）。
+        """
+        target = server_id
+        if not target:
+            alive = [sid for sid, c in self._mc_conns.items() if not c.closed]
+            if not alive:
+                logger.warning("NetherLink: MC 服务器未连接，消息丢弃")
+                return False
+            if len(alive) > 1:
+                logger.error(
+                    f"NetherLink: 有 {len(alive)} 台 MC 服务器在线"
+                    f"（{'、'.join(sorted(alive))}），但本条消息未指定目标，已丢弃"
+                )
+                return False
+            target = alive[0]
+        conn = self._mc_conns.get(target)
+        if conn is None or conn.closed:
+            logger.warning(f"NetherLink: MC 服务器 [{target}] 未连接，消息丢弃")
             return False
         try:
-            await self._mc_ws.send_str(json.dumps(payload, ensure_ascii=False))
+            await conn.ws.send_str(json.dumps(payload, ensure_ascii=False))
             return True
         except Exception as e:
-            logger.error(f"NetherLink: 发送到 MC 失败: {e}")
+            logger.error(f"NetherLink: 发送到 MC [{target}] 失败: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -1572,8 +1749,14 @@ class NetherLinkPlugin(Star):
         """插件卸载/停用时清理：关闭 WS、取消挂起的指令、好感度落盘。"""
         if self._runner:
             await self._runner.cleanup()
-        if self._mc_ws and not self._mc_ws.closed:
-            await self._mc_ws.close()
+        for conn in list(self._mc_conns.values()):
+            if not conn.closed:
+                try:
+                    await conn.ws.close()
+                except Exception as e:
+                    logger.warning(f"NetherLink: 关闭 MC 连接失败（忽略）: {e}")
+        self._mc_conns.clear()
+        self._port_owner.clear()
         for fut in self._pending_cmds.values():
             if not fut.done():
                 fut.cancel()
