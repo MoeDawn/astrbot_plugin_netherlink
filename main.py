@@ -148,6 +148,11 @@ DEFAULT_ADVANCEMENT_PROMPT = (
 )
 
 # 游戏内对话附加提示词默认值，{server} 会替换为服务器名
+# 没有为某台服务器配 `server_display_names` 时的兜底显示名。
+# 以前这一项是可配置的（mc_server_name），但它只能填一个值，多服下没有意义——
+# 现在固定为 "MC"，与 schema 的 hint 一致（「留空则显示为 [MC]」）。
+DEFAULT_SERVER_DISPLAY = "MC"
+
 DEFAULT_EXTRA_SYSTEM_PROMPT = "你当前处于一个我的世界服务器内,服务器名称为{server}"
 
 class NetherLinkPlugin(Star):
@@ -157,14 +162,12 @@ class NetherLinkPlugin(Star):
 
         # ---- 配置解析 ----
         self.ws_host: str = config.get("ws_host", "0.0.0.0")
-        self.ws_port: int = int(config.get("ws_port", 8765))
-        # 多端口监听（路线 A）：一台服务器占一个端口。
-        # 留空 = 只用 ws_port 单端口，**单服部署行为与以前逐字相同**。
-        # 形如 "8765,8766"（id 取 MC 端上报的 server-name）
-        # 或   "survival:8765,creative:8766"（显式指定 id，推荐——不依赖 MC 端填对名字）。
-        self.ws_bindings: list = self._parse_ws_ports(
-            config.get("ws_ports", ""), self.ws_port
-        )
+        # 多端口监听：**一台服务器占一个端口**，单服就只填一个。
+        # 以前还有一个只能填单个端口的 `ws_port`，它是本项的子集，
+        # 多服务器功能落地后已删除（用户 2026-09-19 确认）。
+        # 形如 "8765,8766"（server-name 取 MC 端上报值）
+        # 或   "survival:8765,creative:8766"（显式指定 server-name，推荐）
+        self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", ""))
         self.auth_token: str = config.get("auth_token", "")
         self.target_groups: set[str] = self._parse_csv(config.get("target_groups", ""))
         self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", ""))
@@ -173,10 +176,10 @@ class NetherLinkPlugin(Star):
             p.strip() for p in str(config.get("mc_wake_prefixes", "ai,助手")).split(",") if p.strip()
         ]
         # 名称与占位符：模板里可用 {server}/{group}/{bot} 分别替换为
-        # 服务器名/群名/机器人游戏内名字
-        self.mc_server_name: str = str(config.get("mc_server_name", "MC") or "MC")
-        # 按服务器区分显示名：server_id -> 显示名。留空则一律用 mc_server_name
-        # （**单服部署行为与以前逐字相同**）。
+        # 服务器名/群名/机器人游戏内名字。
+        # 按服务器区分显示名：server_id -> 显示名；没配的服务器回退
+        # DEFAULT_SERVER_DISPLAY（"MC"）。以前这里还有一个只能填一个值的
+        # `mc_server_name`，多服务器功能落地后已删除（用户 2026-09-19 确认）。
         # 显示名始终由本插件决定——MC 端只上报身份（server_id），不决定显示成什么。
         self.server_display_names: dict = self._parse_group_names(
             str(config.get("server_display_names", "") or "")
@@ -393,14 +396,17 @@ class NetherLinkPlugin(Star):
         return result
 
     @staticmethod
-    def _parse_ws_ports(raw, fallback_port: int) -> list:
-        """解析 ws_ports 配置 → [(server_id, port), ...]。
+    def _parse_ws_ports(raw) -> list:
+        """解析 ws_ports 配置 → [(server_name, port), ...]。
 
-        - 留空/全非法 → [("", fallback_port)]，即退回单端口（单服行为不变）
-        - "8765,8766" → [("", 8765), ("", 8766)]，id 待握手时用 server_name 补
+        - 留空/全非法 → []，插件**不监听任何端口**（启动时会明确告警）
+        - "8765,8766" → [("", 8765), ("", 8766)]，server_name 待握手时用上报名补
         - "survival:8765" → [("survival", 8765)]
 
-        server_id 为空串表示「由 MC 端上报的 server-name 决定」。
+        server_name 为空串表示「由 MC 端上报的 server-name 决定」。
+
+        ⚠️ 以前留空会退回那个单值配置 `ws_port`，现在它已删除——留空即不监听，
+        这是刻意的失败方式（宁可明确不启动，也不要静默用一个陈旧的默认端口）。
         """
         out: list = []
         seen: set = set()
@@ -426,8 +432,6 @@ class NetherLinkPlugin(Star):
                 continue
             seen.add(port)
             out.append((name.strip(), port))
-        if not out:
-            return [("", fallback_port)]
         return out
 
     # ------------------------------------------------------------------
@@ -584,10 +588,21 @@ class NetherLinkPlugin(Star):
     async def _start_ws_server(self):
         """启动 WS 服务端，监听 MC 端连入。
 
-        **可监听多个端口**（见 ws_ports）：一台 MC 服务器占一个端口。
+        **可监听多个端口**（见 ws_ports）：一台 MC 服务器占一个端口，单服就配一个。
         共用同一个 `app` 与 `_ws_handler`，用本地端口区分来源（路线 A「端口即身份」）。
-        单服部署只配 ws_port 时，这里的行为与以前逐字相同。
+
+        `ws_bindings` 为空（ws_ports 留空或全非法）时**不监听任何端口**——
+        以前会退回那个单值配置 `ws_port`（已删除），现在刻意选择响亮地失败：
+        配错端口却不自知的代价，比启动时看到一条 ERROR 大得多。
         """
+        if not self.ws_bindings:
+            logger.error(
+                "NetherLink: 未配置任何监听端口，WS 服务端没有启动——"
+                "请在 ws_ports 里填写，格式「server-name:端口」或只写「端口」，"
+                "单台服务器也只需填一个。"
+            )
+            return
+
         app = web.Application()
         app.router.add_get("/ws", self._ws_handler)
         self._runner = web.AppRunner(app)
@@ -837,10 +852,10 @@ class NetherLinkPlugin(Star):
         """对外展示与 LLM 上下文统一使用的服务器名。
 
         取值顺序：
-          1. `server_display_names` 里该 `server_id` 的映射（多服部署用）
-          2. `mc_server_name`（默认 "MC"）——单服、或该 id 没配映射时
+          1. `server_display_names` 里该 `server_id` 的映射
+          2. `DEFAULT_SERVER_DISPLAY`（"MC"）——单服、或该 id 没配映射时
 
-        **不用 `_mc_server_reported`**：Paper 侧 `server-name` 的职责是**标识**
+        这里刻意**不用** MC 端上报的 `server-name`：Paper 侧那个值只作**标识**
         （握手告知"我是哪台服务器"），显示名统一由本插件配置控制。这样 QQ 群消息
         前缀、模板 {server}、LLM 上下文三处看到的名字必然一致，不会出现
         「群里显示 [MC]、AI 却被告知服务器叫 mc」这种割裂。
@@ -849,7 +864,7 @@ class NetherLinkPlugin(Star):
             name = self.server_display_names.get(str(server_id))
             if name:
                 return name
-        return self.mc_server_name
+        return DEFAULT_SERVER_DISPLAY
 
     # ------------------------------------------------------------------
     # 提示词拼装（游戏侧与 QQ 内层共用）

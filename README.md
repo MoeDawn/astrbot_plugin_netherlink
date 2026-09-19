@@ -45,15 +45,14 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 
 | 配置项 | 说明 |
 |---|---|
-| `ws_host` / `ws_port` | 本插件监听的地址/端口（默认 `0.0.0.0:8765`），MC 端主动连入 |
-| `ws_ports` | **多服务器**端口绑定（逗号分隔）。一台 MC 服占一个端口，如 `survival:8765,creative:8766`。留空则只用 `ws_port`。⚠️ 两台服连同一个端口会互相踢下线，务必各占一个 |
+| `ws_host` | 本插件监听的地址（默认 `0.0.0.0`），MC 端主动连入 |
+| `ws_ports` | **端口绑定**（逗号分隔）。一台 MC 服占一个端口，如 `survival:8765,creative:8766`；**单服只填一个**。⚠️ 留空则不监听（启动报错）；两台服连同一个端口会互相踢下线，务必各占一个 |
 | `auth_token` | 握手鉴权密钥，两侧必须一致 |
 | `target_groups` | 绑定的 QQ 群号（逗号分隔） |
 | `group_names` | 群号与群名映射，如 `123456:水群,987654:生存服`，用于 `{group}` 占位符 |
 | `admin_qq` | 管理员 QQ 号（逗号分隔） |
 | `admin_mc` | 管理员游戏 ID（逗号分隔）。**游戏内管理员只能在这里填**（AstrBot 的全局管理员是 QQ 号，对游戏内无效） |
-| `mc_server_name` | 服务器**显示名**，用于 `{server}` 占位符、群消息前缀、AI 上下文 |
-| `server_display_names` | **多服务器**时按服务器区分显示名，如 `survival:生存服,creative:创造服`。留空则一律用 `mc_server_name` |
+| `server_display_names` | 按服务器区分显示名，如 `survival:生存服,creative:创造服`（`server-name` 取 MC 端配置里的值）。用于 `{server}` 占位符、群消息前缀、AI 上下文；留空则显示为 `MC` |
 | `mc_bot_name` | 机器人游戏内名字，用于 `{bot}` 占位符 |
 | `mc_wake_prefixes` | 游戏内唤醒词（默认 `ai,助手`），**须与 MC 端 `wake-prefixes` 一致** |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏（默认关，防刷屏） |

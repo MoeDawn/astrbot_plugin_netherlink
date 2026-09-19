@@ -5,16 +5,11 @@
     "default": "0.0.0.0",
     "hint": "MC 端插件作为客户端主动连入本地址"
   },
-  "ws_port": {
-    "description": "WebSocket 监听端口",
-    "type": "int",
-    "default": 8765
-  },
   "ws_ports": {
     "description": "多服务器端口绑定（逗号分隔，可留空）",
     "type": "string",
     "default": "",
-    "hint": "一台 MC 服务器占一个端口。每项写「服务器ID:端口」或只写「端口」。例：survival:8765,creative:8766。留空则只用上面的 ws_port（单服保持原行为）。⚠️ 两台服务器连同一个端口会互相踢下线、消息随机丢失，务必各占一个端口。"
+    "hint": "一台 MC 服务器占一个端口。格式「server-name:端口」或只写「端口」,server-name 为MC端配置文件里的 server-name 的值。"
   },
   "auth_token": {
     "description": "连接鉴权 Token",
@@ -48,19 +43,13 @@
     "description": "游戏内机器人唤醒词（逗号分隔）",
     "type": "string",
     "default": "ai,助手",
-    "hint": "玩家在游戏里发送以这些词开头的消息会触发机器人 LLM 对话，回复在游戏内显示并同步到群聊。**必须与 Paper 端 config.yml 的 wake-prefixes 保持一致**"
-  },
-  "mc_server_name": {
-    "description": "服务器名称",
-    "type": "string",
-    "default": "MC",
-    "hint": "用于模板里的 {server} 占位符（如推送 QQ 的 [MC] 前缀）"
+    "hint": "玩家在游戏里发送以这些词开头的消息会触发机器人 LLM 对话，回复在游戏内显示并同步到群聊。必须与 Paper 端 config.yml 的 wake-prefixes 保持一致"
   },
   "server_display_names": {
     "description": "按服务器区分的显示名（逗号分隔，可留空）",
     "type": "string",
     "default": "",
-    "hint": "格式「服务器ID:显示名」，如 survival:生存服,creative:创造服。服务器ID 由 ws_ports 的端口绑定或 MC 端 server-name 决定。留空则一律用上面的服务器显示名（单服保持原行为）。"
+    "hint": "用于模板里的 {server} 占位符,格式「server-name:显示名」，如 survival:生存服,creative:创造服。server-name 为MC端配置文件里的 server-name 的值。留空则显示为[MC]。"
   },
   "mc_bot_name": {
     "description": "机器人游戏内名字",
