@@ -119,11 +119,13 @@ tp附近村庄/樱花树林这类需要定位+传送+有价值的地点根据地
 # 已用 mc_karma 查过好感，不达标自然不会调用。
 #
 # ⚠️ 本描述同时挂给三个面：QQ 外层 agent（`@filter.llm_tool` 注册的那份）、
-# QQ 内层 agent、游戏侧 agent。其中**只有外层 agent 拿不到 `<netherlink_context>`**
-# （它读的是框架内建的 system_prompt，插件注入不进去）。所以这里绝不能断言
-# 「名单见 netherlink_context」——外层 agent 找不到名单，会把管理员的合法请求
-# 当成"非管理员"直接拒掉，连内层 agent（那份名单就在它手里）都不会被启动。
-# 只描述**场景**，把名单的来源写成条件式，三个面读起来才都是真的。
+# QQ 内层 agent、游戏侧 agent。其中**外层 agent 看不到 `<netherlink_context>`**
+# ——它读的是框架内建的 system_prompt，`tool_loop_agent` 不经过 pipeline，
+# 注入钩子（inject_qq_identity）够不着它。（QQ 侧**普通对话**不在此列：
+# 那走 pipeline，钩子会注入身份。）
+# 所以这里绝不能断言「名单见 netherlink_context」——外层 agent 找不到名单，会把
+# 管理员的合法请求当成"非管理员"直接拒掉，连内层 agent（那份名单就在它手里）
+# 都不会被启动。只描述**场景**，把名单的来源写成条件式，三个面读起来才都是真的。
 DEFAULT_MC_COMMAND_TOOL_DESC = """\
 在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。
 执行前请自行判断这条指令是否属于高危操作（如改游戏模式、给予危害游戏的物品、
@@ -1754,6 +1756,41 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # QQ 群消息 -> MC
     # ------------------------------------------------------------------
+    @filter.on_llm_request()
+    async def inject_qq_identity(self, event, req) -> None:
+        """给 QQ 侧的 LLM 请求补上发起者身份。
+
+        为什么需要它：QQ 侧**普通对话**走的是 AstrBot 主 agent，其 system_prompt
+        由框架内建、插件注入不进去（见 claude.md 的权限模型一节）。于是群友只是
+        跟 AI 聊天时，AI 完全不知道对方是谁——只有当他请求执行指令、插件另起内层
+        agent 时，那份 system_prompt 才归插件管。本钩子是 AstrBot 给出的唯一注入点
+        （`astrbot/api/event/filter/__init__.py` 导出，`register_on_llm_request` 定义）。
+
+        ⚠️ **这个钩子是全局的**：对**每一个** LLM 请求都会触发（包括其他插件的
+        请求，如用户画像分析、AstrBot 自身的定时任务）。因此必须严格认准来源，
+        绝不污染别人的提示词——只处理**绑定群**的群消息。
+
+        幂等：system_prompt 里已有 `<netherlink_context>` 就不再追加。
+
+        `tool_loop_agent` **不经过 pipeline**（源码里既无 `pipeline` 也无
+        `call_event_hook`），所以本钩子不会对我们自己的内层 agent / 游戏侧 agent
+        触发——那两条路径的名单由 `_build_system_parts` 直接给。
+        """
+        try:
+            if not self.target_groups:
+                return
+            group_id = str(event.get_group_id() or "")
+            if group_id not in self.target_groups:
+                return  # 不是绑定的群（含私聊、其他插件构造的请求），一律不碰
+            if "<netherlink_context>" in (req.system_prompt or ""):
+                return  # 幂等：已经注入过
+            identity = str(event.get_sender_name() or event.get_sender_id() or "?")
+            ctx = self._admin_context(identity, self._qq_is_admin(event), "qq")
+            req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
+        except Exception as e:
+            # 注入失败不能连累对话本身
+            logger.error(f"NetherLink: 注入 QQ 侧身份上下文失败: {e}")
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event):
         """绑定群的普通消息转发进游戏公屏。"""
