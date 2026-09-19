@@ -31,13 +31,18 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 
 把 `astrbot_plugin_netherlink.zip` 放进 AstrBot 的 `data/plugins/` 下解压，重启或热重载插件。
 
-安装后需要在配置里填三样东西：
+安装后需要在配置里填这几样：
 
 | 配置项 | 填什么 |
 |---|---|
+| `ws_ports` | **必填**。本插件监听的端口，如 `8765`；多台服务器时每台占一个，如 `survival:8765,creative:8766`。⚠️ **留空则不监听任何端口**（启动时会报错） |
 | `auth_token` | 自定义一串密钥，**必须与 MC 端 `config.yml` 的 `token` 一模一样** |
 | `target_groups` | 要绑定的 QQ 群号，多个用英文逗号分隔 |
+| `server_display_names` | 服务器显示名（可选，默认 `MC`），如 `survival:生存服` |
 | `admin_qq` / `admin_mc` | 管理员名单（可选，见下） |
+
+> `ws_ports` 里写的 `server-name` 要与 MC 端 `config.yml` 的 `server-name` 对应；
+> 只写端口时则直接采用 MC 端上报的那个名字。
 
 还需要：AstrBot 已配好可用的 **LLM 提供商**（对话与指令解析都依赖它），以及 MC 端已装 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)。
 
@@ -137,6 +142,7 @@ astrbot_plugin_netherlink/
 ├── metadata.yaml        # 插件元数据
 ├── _conf_schema.json    # WebUI 配置项定义
 ├── requirements.txt     # 依赖
+├── CHANGELOG.md         # 更新日志（插件市场详情页显示它）
 ├── logo.png
 ├── LICENSE
 └── README.md
