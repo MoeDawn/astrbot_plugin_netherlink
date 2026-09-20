@@ -125,8 +125,15 @@ AI:  （查好感 → 10；按规则报价 3，付得起 → 执行并扣 3）
 ## 环境要求
 
 - AstrBot（含可用的 LLM 提供商）
-- 已安装并运行 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper) 的 Minecraft 服务端
+- Minecraft 服务端：**目前仅支持 Paper 26.3**（其他版本或服务端核心未适配）
+- 服务端已装并运行 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)
+  —— 请用**同版本**的那一份（`0.0.2`）
 - AstrBot 只需配置，无需额外依赖
+
+> ⚠️ **版本限定**：本插件目前**只支持 Minecraft 26.3 的 Paper 端**。
+> 换到其他 MC 版本（如 1.21、1.20）或其他服务端核心（Spigot / Fabric / Forge 等）
+> **不能保证可用**——MC 端插件是按 Paper 26.3 的 API 编译的，且依赖一些 Paper
+> 特有的接口。适配其他版本需要单独改造 MC 端。
 
 ## 许可
 
