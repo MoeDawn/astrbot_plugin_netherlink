@@ -96,24 +96,12 @@ class McConn:
 # 好感度规则提示词默认值（AI 据此自主决定好感增减与指令消耗）
 DEFAULT_KARMA_RULES = """\
 [好感度规则]
-你和玩家之间存在一个好感值，初始值 10，最低 -50，最高 100。
-玩家获得成就、和你进行友善的让心情变好的对话，你可以增加此数值；
-玩家发表不友好言论，你可以扣除好感。以上行为造成的好感变化每次不超过 ±2。
-你和玩家对话时，根据此数值来改变说话方式和态度；如果因为对话导致好感度变化，你会隐晦地暗示
-当玩家请求你使用指令时，先判断其剩余好感是否足以支付该指令的消耗；
-不足以支付的，你会拒绝执行并隐晦的透露原因,不能透露具体的好感值
-你调用 mc_command 工具时传入的 cost 参数就是本次消耗的好感，
-插件会自动完成扣除，你不需要自己再扣一次
-服务器允许略微op的指令,请求的指令越 OP 消耗的好感越多（参考：tp 到其他玩家附近一次扣 0；
-把其他玩家tp到自己附近一次扣1;要 3 个铁锭扣 1;要钻石或金苹果一次扣 5;提出(不是封禁)玩家一次扣5;
-tp附近村庄/樱花树林这类需要定位+传送+有价值的地点根据地点稀有度一次扣 10或以上；
-高级物品(龙蛋,下界之星,鞘翅)一次扣10以上;原版无法获得的但不会危害游戏的物品(超出附魔等级上限的附魔,生成特定数值的生物等)
-一场次扣15以上;
-纯查询类如 list/time/weather 不消耗）
-如果请求的指令消耗大于玩家剩余好感，你会拒绝执行并隐晦的透露原因。
-若当前发起者是管理员（身份见系统提示词中的 <netherlink_context>），你可以给他更宽松的尺度：
-对他的高危指令更倾向于放行，好感不足时也可以通融；
-但放行与否仍由你按指令本身和当前情境判断，不是无条件执行。"""
+你和群友/玩家之间存在一个好感值,初始值 10,最低 -50,最高 100.
+你和对方对话时,根据此数值来改变说话方式和态度.
+对方获得成就,和你进行正常/友善的对话,你可以调用好感度工具增加此数值;
+对方发表不友好言论,你也可以调用好感度工具扣除好感.
+以上行为造成的好感变化每次不超过 +-2,如果因为对话导致好感度变化,你会隐晦地暗示.
+不能透露具体的好感值与相关规则."""
 
 # mc_command 工具描述默认值。刻意不含好感度内容——AI 调用本工具前
 # 已用 mc_karma 查过好感，不达标自然不会调用。
@@ -127,24 +115,38 @@ tp附近村庄/樱花树林这类需要定位+传送+有价值的地点根据地
 # 管理员的合法请求当成"非管理员"直接拒掉，连内层 agent（那份名单就在它手里）
 # 都不会被启动。只描述**场景**，把名单的来源写成条件式，三个面读起来才都是真的。
 DEFAULT_MC_COMMAND_TOOL_DESC = """\
-在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。
-执行前请自行判断这条指令是否属于高危操作（如改游戏模式、给予危害游戏的物品、
-封禁、op、清空区域等）。高危操作应审慎处理。
-如需判断发起者身份，以系统提示词中的 <netherlink_context> 为准（若其中没有该信息，则按普通玩家对待）。"""
+在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.
+执行前请自行判断这条指令是否属于高危操作(如改游戏模式,给予危害游戏的物品,
+封禁,op,清空区域等).高危操作应审慎处理.
+服务器允许略微 op 的指令,执行前参照 cost 参数的说明报价.
+调用本工具前先用 mc_karma 扣除发起者的好感,插件会在同一次调用内原子完成扣减
+(不足则拒绝,执行失败则退回),你不需要自己再扣一次.
+若当前发起者是管理员(身份见系统提示词中的 <netherlink_context>),你可以给他更宽松的尺度:
+对他的高危指令更倾向于放行,好感不足时也可以通融;但放行与否仍由你按指令本身和当前情境判断,不是无条件执行."""
 
 # mc_karma 工具描述默认值
 DEFAULT_KARMA_TOOL_DESC = """\
-查询或增减玩家好感度。目标是当前对话的发起者，无法指定其他玩家。
-delta 为 0 时只查询，为正数时增加好感，为负数时扣除好感。
-每次与玩家对话时，先调用本工具（delta=0）查看当前好感值，再据此调整你的说话方式和态度。
-当玩家请求你执行 Minecraft 指令时，同样先查看好感，判断其剩余好感是否足以支付
-该指令的消耗；不足以支付的，你会拒绝执行并隐晦的透露原因。
-好感度的增减由对话内容本身决定（友善互动、不友好言论等），对照好感度规则执行。"""
+查询或增减当前对话发起者的好感度,无法指定其他玩家.
+delta 为 0 时只查询,为正数时增加好感,为负数时扣除好感.
+增减依据见好感度规则;执行指令要消耗多少,见 mc_command 的描述."""
+
+DEFAULT_MC_COMMAND_COST_PARAM_DESC = """\
+本次执行消耗的好感值,由你按指令的 OP 程度决定;纯查询类传 0.
+参考价目:
+自己 tp 到其他玩家附近 0;把其他玩家 tp 到自己附近 1;3 个铁锭 1;
+钻石或金苹果 5;踢出(不是封禁)玩家 5;
+tp 到附近村庄,樱花树林这类需要定位+传送+有价值的地点,按稀有度 10 起;
+高级物品(龙蛋,下界之星,鞘翅)10 起;
+原版无法获得但不危害游戏的物品(超出附魔上限的附魔,指定数值的生物等)15 起.
+以上价目仅为参考,其他指令的消耗自行判断;若本次消耗大于对方剩余好感,你会拒绝执行并隐晦地透露原因."""
+
+DEFAULT_KARMA_DELTA_PARAM_DESC = """\
+好感变化量,正增负减;只查询时传 0"""
 
 # 玩家获得成就时发给 AI 的提示词默认值
 DEFAULT_ADVANCEMENT_PROMPT = (
-    "玩家[{player}]在服务器[{server}]里获得了[{advancement}]，"
-    "请你以此更新对该玩家的好感值，并在游戏里发表自己的看法"
+    "玩家[{player}]在服务器[{server}]里获得了[{advancement}],"
+    "请你以此更新对该玩家的好感值,并在游戏里发表自己的看法"
 )
 
 # 游戏内对话附加提示词默认值，{server} 会替换为服务器名
@@ -211,6 +213,17 @@ class NetherLinkPlugin(Star):
         self.karma_tool_desc: str = str(
             config.get("karma_tool_desc", DEFAULT_KARMA_TOOL_DESC)
             or DEFAULT_KARMA_TOOL_DESC
+        )
+        # 两个工具的**参数**说明也做成可配的（价格表就写在 cost 那一项里）。
+        # 参数 schema 与描述一样：顶层工具来自 docstring 的 Args: 段，
+        # 插件自建的两个 ToolSet 来自代码字面量——两处都要能配置覆盖。
+        self.mc_command_cost_param_desc: str = str(
+            config.get("mc_command_cost_param_desc", DEFAULT_MC_COMMAND_COST_PARAM_DESC)
+            or DEFAULT_MC_COMMAND_COST_PARAM_DESC
+        )
+        self.karma_delta_param_desc: str = str(
+            config.get("karma_delta_param_desc", DEFAULT_KARMA_DELTA_PARAM_DESC)
+            or DEFAULT_KARMA_DELTA_PARAM_DESC
         )
         # 管理员游戏 ID（AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效）
         self.admin_mc: set[str] = self._parse_csv(config.get("admin_mc", ""))
@@ -459,10 +472,15 @@ class NetherLinkPlugin(Star):
         return parsed if isinstance(parsed, dict) else {}
 
     def _apply_configured_tool_descs(self) -> None:
-        """用配置项覆盖工具 schema 的描述。
+        """用配置项覆盖工具 schema 的**描述与参数说明**。
 
-        @filter.llm_tool 的描述来自装饰函数的 docstring，配置值无法在注册期注入，
-        因此注册完成后回填。失败仅告警，不影响工具可用性。
+        @filter.llm_tool 的 description 来自 docstring 的说明部分、参数 schema 来自
+        `Args:` 段，两者都在**注册期**定型，那时配置值还不存在；因此只能注册完成后
+        回填。失败仅告警，不影响工具可用性。
+
+        参数回填的必要性（2026-09-19）：价目表从 `karma_rules` 挪进了
+        `mc_command` 的 cost 参数说明——而参数 schema 原本写死在代码里，
+        不回填的话用户就改不了它。
         """
         if self.context is None:
             # 无上下文（如测试替身）时不存在工具管理器，没有可覆盖的目标，
@@ -472,11 +490,14 @@ class NetherLinkPlugin(Star):
             mgr = self.context.get_llm_tool_manager()
             # 两个工具都始终覆盖描述，没有任何开关能跳过 mc_karma 那一项：
             # 好感度是强制机制，工具描述就是 AI 唯一的策略来源。
+            # (工具名, 描述, {参数名: 参数说明})
             targets = [
-                ("mc_command", self.mc_command_tool_desc),
-                ("mc_karma", self.karma_tool_desc),
+                ("mc_command", self.mc_command_tool_desc,
+                 {"cost": self.mc_command_cost_param_desc}),
+                ("mc_karma", self.karma_tool_desc,
+                 {"delta": self.karma_delta_param_desc}),
             ]
-            for name, desc in targets:
+            for name, desc, param_descs in targets:
                 tool = mgr.get_func(name)
                 if tool is None:
                     # 查不到只可能是"工具注册晚于插件实例化"或工具名被改，此时配置项
@@ -488,6 +509,15 @@ class NetherLinkPlugin(Star):
                     continue
                 if desc:
                     tool.description = desc
+                # 回填参数说明。parameters 是 dict（{"type","properties","required"}），
+                # 只改 properties 里对应参数的文字，其余结构原样保留——写坏了会让
+                # 模型看不到参数，比描述失效更严重。
+                params = getattr(tool, "parameters", None)
+                props = (params or {}).get("properties") if isinstance(params, dict) else None
+                if props:
+                    for pname, ptext in param_descs.items():
+                        if ptext and pname in props and isinstance(props[pname], dict):
+                            props[pname]["description"] = ptext
         except Exception as e:
             logger.warning(f"NetherLink: 覆盖工具描述失败（使用默认描述）: {e}")
 
@@ -890,22 +920,39 @@ class NetherLinkPlugin(Star):
         "本服没有管理员"与"插件没告诉它"，等于把判断依据抽走了。
         """
         if source == "qq":
-            roster = ", ".join(sorted(self.admin_qq)) or "（未配置）"
-            roster_line = f"服务器管理员（QQ 号）：{roster}。\n"
+            roster = ", ".join(sorted(self.admin_qq)) or "(未配置)"
+            roster_line = f"服务器管理员(QQ 号):{roster}.\n"
         else:
-            roster = ", ".join(sorted(self.admin_mc)) or "（未配置）"
-            roster_line = f"服务器管理员（游戏 ID）：{roster}。\n"
-        who = "是管理员。" if is_admin else "不是管理员。"
+            roster = ", ".join(sorted(self.admin_mc)) or "(未配置)"
+            roster_line = f"服务器管理员(游戏 ID):{roster}.\n"
+        who = "是管理员." if is_admin else "不是管理员."
+        # 游戏侧能确定来源（连接即身份），QQ 侧不能——群友不在游戏里，
+        # 他那句话发往哪台要等 AI 选完 server 参数才定。所以 QQ 侧如实说明
+        # 「来自 QQ 群」并列出**已配置**的服务器（配置里有 ≠ 此刻连着）。
+        # 曾错写成「来自 Minecraft 游戏服务器「MC」」——那个 MC 是兜底名，
+        # 会让 AI 以为消息有明确来源。
+        if source == "qq":
+            configured = [self._mc_server_display(sid) for sid, _ in self.ws_bindings]
+            origin_line = (
+                "这条消息来自 QQ 群.本插件已配置的服务器:"
+                + (",".join(configured) if configured else "(未配置)")
+                + ".\n"
+            )
+        else:
+            origin_line = (
+                f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」.\n"
+            )
         return (
             "<netherlink_context>\n"
-            f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」。\n"
+            f"{origin_line}"
             f"{roster_line}"
-            f"当前发起者：{identity}，{who}\n"
+            f"当前发起者:{identity},{who}\n"
             # 这条要求放在这里而不是 karma_rules 里，是为了覆盖 QQ 侧普通对话
-            # （那条路径看不到 karma_rules）。措辞刻意说「先」——已有的实现里
-            # AI 常常直接回话、跳过查询。
-            "回复之前，先调用 mc_karma（delta 传 0）查一次当前发起者的好感值，"
-            "再据此决定你的态度与说话方式；若要执行指令，也以这个值为准判断够不够。\n"
+            # （那条路径看不到 karma_rules）。
+            # 措辞刻意只说「查一次」——「够不够」的判断属于「要不要执行指令」，
+            # 归 mc_command 的描述管；这里混进来会和它重复（用户 2026-09-19 要求收紧）。
+            "回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,"
+            "再据此决定说话方式与态度.\n"
             "</netherlink_context>"
         )
 
@@ -934,6 +981,31 @@ class NetherLinkPlugin(Star):
         （MoeDawn），而 set 成员判断区分大小写。填 `moedawn` 会静默失效。
         """
         return str(mc_id).strip().lower() in self._admin_mc_lower
+
+    def _tool_schema_mode(self) -> str:
+        """读 AstrBot 的全局「工具调用模式」，供本插件自建的 agent 使用。
+
+        **为什么必须显式传**：`tool_loop_agent` 没有这个形参，它经 `**other_kwargs`
+        转给 runner.reset()，而 reset 的默认值是 `"full"`。也就是说插件自建的三次
+        调用（游戏侧对话、成就、QQ 内层）**不会跟随**用户在 WebUI 里的设置——
+        用户改成 skills-like 后，只有走 AstrBot 主 agent 的 QQ 普通对话会变。
+
+        本插件把 `mc_command` 的价目表放进了 cost 参数说明，只有在 skills-like
+        （参数延迟到选中工具后才下发）下才真正省上下文；所以这里主动跟随全局设置，
+        让四条路径行为一致。
+
+        读不到（老版本 AstrBot / 配置缺失）就返回空串，调用方不传该参数，
+        退回 runner 的默认 "full"——不猜。
+        """
+        try:
+            cfg = getattr(self.context, "astrbot_config", None)
+            if isinstance(cfg, dict):
+                mode = (cfg.get("provider_settings") or {}).get("tool_schema_mode")
+                if mode in ("skills_like", "full"):
+                    return mode
+        except Exception:
+            pass
+        return ""
 
     async def _build_system_parts(
         self, umo: str, identity: str, is_admin: bool, source: str, server_id: str = ""
@@ -1033,9 +1105,10 @@ class NetherLinkPlugin(Star):
                 chat_provider_id=prov_id,
                 system_prompt=NL.join(system_parts),
                 prompt=prompt,
-                tools=self._build_mc_toolset(player),
+                tools=self._build_mc_toolset(player, server_id),
                 contexts=history,
                 max_steps=4,
+                tool_schema_mode=self._tool_schema_mode(),
             )
             text = getattr(resp, "completion_text", None)
             if text is None:
@@ -1168,6 +1241,7 @@ class NetherLinkPlugin(Star):
                     tools=self._build_mc_toolset(player, server_id),
                     contexts=history,
                     max_steps=6,
+                    tool_schema_mode=self._tool_schema_mode(),
                 )
                 reply = (llm_resp.completion_text or "……").strip()[:MC_REPLY_MAX_LEN]
 
@@ -1322,7 +1396,7 @@ class NetherLinkPlugin(Star):
                     },
                     "cost": {
                         "type": "number",
-                        "description": "本次执行消耗的好感值，由你按好感度规则决定；纯查询类传 0",
+                        "description": self.mc_command_cost_param_desc,
                     },
                     "server": {
                         "type": "string",
@@ -1345,7 +1419,7 @@ class NetherLinkPlugin(Star):
                 "properties": {
                     "delta": {
                         "type": "number",
-                        "description": "好感变化量，正增负减；只查询时传 0",
+                        "description": self.karma_delta_param_desc,
                     },
                 },
                 "required": ["delta"],
@@ -1387,7 +1461,8 @@ class NetherLinkPlugin(Star):
                         },
                         "cost": {
                             "type": "number",
-                            "description": "本次执行消耗的好感值，由你按好感度规则决定；纯查询类传 0",
+                            # 价目表就写在这个配置项里（见 mc_command_cost_param_desc）
+                            "description": plugin.mc_command_cost_param_desc,
                         },
                     },
                     "required": ["cmd", "cost"],
@@ -1889,15 +1964,18 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     @filter.llm_tool(name="mc_command")
     async def mc_command(self, event, cmd: str, cost: int) -> str:
-        """在 Minecraft 服务器上以控制台身份执行一条指令，并返回服务器真实输出。
-        执行前请自行判断这条指令是否属于高危操作（如改游戏模式、给予危害游戏的物品、
-        封禁、op、清空区域等）。高危操作应审慎处理。
-        如需判断发起者身份，以系统提示词中的 <netherlink_context> 为准（若其中没有该信息，则按普通玩家对待）。
+        """在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.
+        执行前请自行判断这条指令是否属于高危操作(如改游戏模式,给予危害游戏的物品,
+        封禁,op,清空区域等).高危操作应审慎处理.
+        服务器允许略微 op 的指令,执行前参照 cost 参数的说明报价.
+        调用本工具前先用 mc_karma 扣除发起者的好感,插件会在同一次调用内原子完成扣减
+        (不足则拒绝,执行失败则退回),你不需要自己再扣一次.
+        若当前发起者是管理员(身份见系统提示词中的 <netherlink_context>),你可以给他更宽松的尺度:
+        对他的高危指令更倾向于放行,好感不足时也可以通融;但放行与否仍由你按指令本身和当前情境判断,不是无条件执行.
 
         Args:
-            cmd(string): 完整的 Minecraft 指令，不带开头的斜杠，例如 "gamemode creative Steve"
-            cost(number): 你为本次执行报出的好感消耗（纯查询类指令传 0）。最终消耗由掌握好感度规则的内层决策按规则确定
-        """
+            cmd(string): 完整的 Minecraft 指令,不带开头的斜杠,例如 gamemode creative Steve
+            cost(number): 你为本次执行报出的好感消耗(纯查询类指令传 0).最终消耗由掌握好感度规则的内层决策按规则确定"""
         try:
             # 注意：这里**不再**因 MC 未连接而提前返回。好感度是本地功能，
             # 服务器离线时玩家/群友仍应能对话、查好感、加减好感；离线只让
@@ -1947,6 +2025,7 @@ class NetherLinkPlugin(Star):
                 # 内层 agent 只需「查好感、报价、执行」三步，给一步余量即可，
                 # 绝不能让它在此处循环
                 max_steps=4,
+                tool_schema_mode=self._tool_schema_mode(),
             )
             # 「LLM 没给出文本」与「响应里根本没有这个字段」是两件事：
             # 前者是正常结果，静默回退兜底文案即可；后者意味着 AstrBot 的响应
@@ -1966,16 +2045,12 @@ class NetherLinkPlugin(Star):
 
     @filter.llm_tool(name="mc_karma")
     async def mc_karma(self, event, delta: int) -> str:
-        """查询或增减玩家好感度。目标是当前对话的发起者，无法指定其他玩家。
-        delta 为 0 时只查询，为正数时增加好感，为负数时扣除好感。
-        每次与玩家对话时，先调用本工具（delta=0）查看当前好感值，再据此调整你的说话方式和态度。
-        当玩家请求你执行 Minecraft 指令时，同样先查看好感，判断其剩余好感是否足以支付
-        该指令的消耗；不足以支付的，你会拒绝执行并隐晦的透露原因。
-        好感度的增减由对话内容本身决定（友善互动、不友好言论等），对照好感度规则执行。
+        """查询或增减当前对话发起者的好感度,无法指定其他玩家.
+        delta 为 0 时只查询,为正数时增加好感,为负数时扣除好感.
+        增减依据见好感度规则;执行指令要消耗多少,见 mc_command 的描述.
 
         Args:
-            delta(number): 好感变化量，正增负减；只查询时传 0
-        """
+            delta(number): 好感变化量,正增负减;只查询时传 0"""
         try:
             qq = str(event.get_sender_id() or "")
             key = identity_key("qq", str(event.get_sender_name() or qq), qq)

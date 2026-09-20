@@ -71,6 +71,7 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 | `enable_advancement` / `advancement_prompt` | 玩家获得成就时是否通知 AI，以及通知用的提示词 |
 | `log_karma_changes` | 对话引起的好感变化是否记日志（默认开） |
 | `mc_command_tool_desc` / `karma_tool_desc` | 两个工具的描述文本，决定 AI 如何判断 |
+| `mc_command_cost_param_desc` / `karma_delta_param_desc` | 两个工具**参数**的说明。**指令的好感价目表就写在 cost 那一项里** |
 | `enable_chat` / `enable_join_leave` / `enable_death` / `enable_qq_to_mc` | 各类消息的同步开关 |
 | 各 `template_*` | 消息模板（QQ→MC 与游戏内回复支持 `§` 染色码） |
 

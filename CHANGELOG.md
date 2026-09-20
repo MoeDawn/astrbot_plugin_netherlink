@@ -74,6 +74,12 @@
 
 ### 变更
 
+- **指令的好感价目表已移出对话上下文**：原先每次对话（含闲聊）都会携带整张价目表，
+  现已移入 `mc_command` 的 **cost 参数说明**——只在 AI 决定执行指令时才需要它。
+  配套建议把 AstrBot 的「工具调用模式」设为 **skills-like**（两阶段），
+  参数说明才会延迟加载；用默认的 full 模式则价目表仍会每轮下发。
+- **工具的参数说明现在也可配置**：新增 `mc_command_cost_param_desc` 与
+  `karma_delta_param_desc` 两个配置项（价目表写在前者里）。
 - 插件显示名：`NetherLink MC×QQ互通` → **`NetherLink 群服互通`**
 - 移除 `metadata.yaml` 的 `logo` 字段（`logo.png` 文件仍随包提供）
 - 好感度规则的成本表重写，覆盖更多指令类别
