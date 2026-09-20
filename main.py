@@ -157,6 +157,64 @@ DEFAULT_SERVER_DISPLAY = "MC"
 
 DEFAULT_EXTRA_SYSTEM_PROMPT = "你当前处于一个我的世界服务器内,服务器名称为{server}"
 
+# 注入给 AI 的系统上下文模板（四个面共用：游戏侧对话/成就、QQ 内层 agent、
+# QQ 侧普通对话经 on_llm_request 钩子）。
+# 为什么做成模板：工具描述与参数说明早已可配，唯独这段硬编码——而它恰恰是
+# 四个面**唯一**的共同内容，改一处即全覆盖。占位符：
+#   {origin}   来源整行（不含换行，模板里让它独占一行）
+#   {roster}   管理员名单整行（不含换行；未配置时为「(未配置)」）
+#   {identity} 当前发起者
+#   {is_admin} 是/不是管理员（已含结尾句号）
+# 默认值逐字还原 2026-09-19 起的硬编码文本，有守卫整串比对。
+DEFAULT_NETHERLINK_CONTEXT_TEMPLATE = """\
+<netherlink_context>
+{origin}
+{roster}
+当前发起者:{identity},{is_admin}
+回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.
+</netherlink_context>"""
+
+
+def _render_template(tpl: str, default: str, values: dict, required: tuple, label: str) -> str:
+    """渲染注入模板；占位符写坏时回退默认模板并记 warning。
+
+    判据：渲染结果里**仍有必需占位符的字面量**就算坏。它同时抓住两种写法：
+      1. 少写了必需占位符 -> str.format 抛 KeyError -> _fmt 把**整串原样返回**
+         （所有占位符都成了字面量）；
+      2. 多写了一个不存在的占位符（如 {foo}）-> 有值能填的位置照常填，
+         {foo} 留在结果里。
+    之所以必须校验：用户把 {identity} 写成 {foo} 时 _fmt 会静默原样返回，
+    用户拿到的是一段带字面量 {foo} 的文本——而这段文本承载着「先查好感」这条
+    覆盖四个面的唯一指引（karma_rules 到不了 QQ 侧普通对话），宁可回退也不能发坏文本。
+
+    已知边界（不覆盖）：坏格式说明符（如 {identity:d}）会让 str.format 抛
+    ValueError，_fmt 只兜 KeyError/IndexError，异常会冒出去。这是本项目所有
+    模板共有的既有行为，不在本次范围内。
+    """
+    # 两道校验缺一不可：
+    #   a. 输入模板必须含齐必需占位符 —— 用户把 {identity} 整段删掉时，
+    #      str.format 不会碰它、渲染结果里也没有残留，只查结果查不出来，
+    #      身份信息会被静默丢掉（正是坑五那个「AI 认不出管理员」的成因）。
+    #   b. 渲染结果里不得残留必需占位符的字面量 —— 兜住 {foo} 这类拼错，
+    #      以及少写必需占位符导致 str.format 抛 KeyError、_fmt 把整串原样返回。
+    missing = [ph for ph in required if ph not in tpl]
+    try:
+        text = tpl.format(**values)
+    except (KeyError, IndexError):
+        text = tpl  # 与 _fmt 同口径
+    if missing or any(ph in text for ph in required):
+        logger.warning(
+            f"NetherLink: {label} 的模板占位符有误"
+            f"（{'漏写 ' + str(missing) if missing else '渲染后仍残留必需占位符'}），"
+            f"已回退默认模板。必需占位符：{required}"
+        )
+        try:
+            return default.format(**values)
+        except (KeyError, IndexError):
+            return default
+    return text
+
+
 class NetherLinkPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -205,6 +263,14 @@ class NetherLinkPlugin(Star):
         # （把 karma_rules 的消耗表写成全 0），不能停用代码路径。
         self.karma_rules: str = str(
             config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES
+        )
+        # 注入给 AI 的系统上下文模板（见 DEFAULT_NETHERLINK_CONTEXT_TEMPLATE）。
+        # 空串回退默认值——口径与 karma_rules / 工具描述一致：想「不注入任何内容」
+        # 应当删掉模板里的标签行与内容（留空行），而不是靠清空配置项——后者会让
+        # 「先查好感」这条覆盖四个面的指引静默消失。
+        self.netherlink_context_template: str = str(
+            config.get("template_netherlink_context", DEFAULT_NETHERLINK_CONTEXT_TEMPLATE)
+            or DEFAULT_NETHERLINK_CONTEXT_TEMPLATE
         )
         self.mc_command_tool_desc: str = str(
             config.get("mc_command_tool_desc", DEFAULT_MC_COMMAND_TOOL_DESC)
@@ -902,7 +968,7 @@ class NetherLinkPlugin(Star):
     def _admin_context(
         self, identity: str, is_admin: bool, source: str, server_id: str = ""
     ) -> str:
-        """管理员名单 + 当前发起者身份 + 每次必查好感的要求。
+        """管理员名单 + 当前发起者身份 + 每次必查好感的要求，按模板渲染。
 
         名单只是参考信息，插件不做任何拦截——是否放行由 AI 决定。
 
@@ -911,6 +977,23 @@ class NetherLinkPlugin(Star):
         要求写在这里才能全覆盖——写进 `karma_rules` 对 QQ 侧普通对话无效
         （那条路径看不到 `karma_rules`）。
 
+        模板由 template_netherlink_context 配置，占位符定义见
+        DEFAULT_NETHERLINK_CONTEXT_TEMPLATE。返回值永不为空。
+        """
+        values = self._admin_context_values(identity, is_admin, source, server_id)
+        return _render_template(
+            self.netherlink_context_template,
+            DEFAULT_NETHERLINK_CONTEXT_TEMPLATE,
+            values,
+            ("{origin}", "{roster}", "{identity}", "{is_admin}"),
+            "注入系统上下文",
+        )
+
+    def _admin_context_values(
+        self, identity: str, is_admin: bool, source: str, server_id: str = ""
+    ) -> dict:
+        """算出注入模板的四个占位符值。
+
         ⚠️ 只给**适用**的那份名单：QQ 侧发起时身份是 QQ 号，游戏 ID 名单对他的
         判定毫无帮助；游戏侧发起时我们根本不知道他的 QQ 号，给 QQ 名单反而会让
         AI 误以为掌握了他不在场的信息。名单本身由调用方按 source 选定，
@@ -918,14 +1001,19 @@ class NetherLinkPlugin(Star):
 
         名单为空时也照样输出带队名的那一行（写「未配置」），否则 AI 分不清
         "本服没有管理员"与"插件没告诉它"，等于把判断依据抽走了。
+
+        `{origin}` 与 `{roster}` 是**整行文本但不含换行**（模板里各占一行即可）。
+        它们是条件生成的（名单为空写「(未配置)」、QQ 侧列**已配置**而非"在线"的
+        服务器），把这段判断留在代码里，用户就不必处理「没配管理员时该怎么写」
+        这个边界——而那个兜底是刻意设计，抽掉它 AI 就分不清「本服没管理员」与
+        「插件没说」。
         """
         if source == "qq":
             roster = ", ".join(sorted(self.admin_qq)) or "(未配置)"
-            roster_line = f"服务器管理员(QQ 号):{roster}.\n"
+            roster_line = f"服务器管理员(QQ 号):{roster}."
         else:
             roster = ", ".join(sorted(self.admin_mc)) or "(未配置)"
-            roster_line = f"服务器管理员(游戏 ID):{roster}.\n"
-        who = "是管理员." if is_admin else "不是管理员."
+            roster_line = f"服务器管理员(游戏 ID):{roster}."
         # 游戏侧能确定来源（连接即身份），QQ 侧不能——群友不在游戏里，
         # 他那句话发往哪台要等 AI 选完 server 参数才定。所以 QQ 侧如实说明
         # 「来自 QQ 群」并列出**已配置**的服务器（配置里有 ≠ 此刻连着）。
@@ -936,25 +1024,20 @@ class NetherLinkPlugin(Star):
             origin_line = (
                 "这条消息来自 QQ 群.本插件已配置的服务器:"
                 + (",".join(configured) if configured else "(未配置)")
-                + ".\n"
+                + "."
             )
         else:
             origin_line = (
-                f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」.\n"
+                f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」."
             )
-        return (
-            "<netherlink_context>\n"
-            f"{origin_line}"
-            f"{roster_line}"
-            f"当前发起者:{identity},{who}\n"
-            # 这条要求放在这里而不是 karma_rules 里，是为了覆盖 QQ 侧普通对话
-            # （那条路径看不到 karma_rules）。
-            # 措辞刻意只说「查一次」——「够不够」的判断属于「要不要执行指令」，
-            # 归 mc_command 的描述管；这里混进来会和它重复（用户 2026-09-19 要求收紧）。
-            "回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,"
-            "再据此决定说话方式与态度.\n"
-            "</netherlink_context>"
-        )
+        return {
+            "origin": origin_line,
+            "roster": roster_line,
+            "identity": identity,
+            # 这条要求放在模板里而不是 karma_rules 里，是为了覆盖 QQ 侧普通对话
+            # （那条路径看不到 karma_rules）。默认模板保留它。
+            "is_admin": "是管理员." if is_admin else "不是管理员.",
+        }
 
     def _qq_is_admin(self, event) -> bool:
         """QQ 侧管理员判定：AstrBot 全局管理员或 admin_qq 白名单。
