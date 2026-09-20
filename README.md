@@ -62,13 +62,13 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 | `mc_wake_prefixes` | 游戏内唤醒词（默认 `ai,助手`），**须与 MC 端 `wake-prefixes` 一致** |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏（默认关，防刷屏） |
 | `enable_webui_persona` | 游戏内对话是否使用 WebUI 配置的人格（默认开） |
-| `extra_system_prompt` | 附加提示词，支持 `{server}` 占位符，**留空则不附加** |
-| `karma_rules` | 好感度规则提示词（消耗表、初始值等）。**可自由修改**；想让指令不消耗好感，把消耗表全改成 0 |
+| `extra_system_prompt` | 附加提示词，支持 `{server}` 占位符，**留空则不附加**。默认值含**物品换好感的三步流程**（先查背包、按玩家说出的数量取走、再加好感）|
+| `karma_rules` | 好感度规则 + **指令四类执行尺度**（免费放行 / 可付费 / 一律拒绝 / 按超标程度计价）。**可自由修改**；想让指令不消耗好感，把消耗表全改成 0 |
 | `karma_initial` | 新玩家初始好感（默认 10） |
 | `karma_death_penalty` | 玩家死亡扣的好感（默认 2，0 为不扣） |
 | `max_command_cost` | 单次指令好感消耗上限（默认 100，防止 AI 报价失控） |
 | `karma_records` | 好感度记录，格式 `{"qq:12345": 12}`，可在 WebUI 直接改 |
-| `enable_advancement` / `advancement_prompt` | 玩家获得成就时是否通知 AI，以及通知用的提示词 |
+| `enable_advancement` / `advancement_prompt` | 玩家获得成就时是否通知 AI，以及通知用的提示词（默认含**好感量级 2~10，按成就难度**）|
 | `log_karma_changes` | 对话引起的好感变化是否记日志（默认开） |
 | `mc_command_tool_desc` / `karma_tool_desc` | 两个工具的描述文本，决定 AI 如何判断 |
 | `mc_command_cost_param_desc` / `mc_karma_delta_param_desc` | 两个工具**参数**的说明。**指令的好感价目表就写在 cost 那一项里** |
