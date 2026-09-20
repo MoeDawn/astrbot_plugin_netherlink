@@ -321,7 +321,10 @@ class NetherLinkPlugin(Star):
             or DEFAULT_MC_COMMAND_COST_PARAM_DESC
         )
         self.karma_delta_param_desc: str = str(
-            config.get("karma_delta_param_desc", DEFAULT_KARMA_DELTA_PARAM_DESC)
+            # 注意键名是 mc_karma_delta_param_desc（与 schema 逐字一致）。
+            # 2026-09-20 修：此前这里少写了 mc_ 前缀，键永远读不到，
+            # 配置项自加入起就是死的——用户在 WebUI 改它毫无效果且无告警。
+            config.get("mc_karma_delta_param_desc", DEFAULT_KARMA_DELTA_PARAM_DESC)
             or DEFAULT_KARMA_DELTA_PARAM_DESC
         )
         # 管理员游戏 ID（AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效）
@@ -1625,7 +1628,10 @@ class NetherLinkPlugin(Star):
                     "properties": {
                         "delta": {
                             "type": "number",
-                            "description": "好感变化量，正增负减；只查询时传 0",
+                            # 走配置项，与 QQ 侧内层 agent 同源——否则用户在
+                            # WebUI 改 mc_karma_delta_param_desc 只会改到 QQ 侧，
+                            # 游戏侧纹丝不动且无任何告警（本项目最忌讳的静默分叉）。
+                            "description": plugin.karma_delta_param_desc,
                         },
                     },
                     "required": ["delta"],
@@ -1867,6 +1873,47 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 指令取消后退费失败 [{key}] 涉及 {spend} 点: {cmd} — {e}")
 
+    def _inject_platform_ids(self) -> set:
+        """会走**身份注入**的平台标识集合（aiocqhttp 实例的 meta().id）。
+
+        注入范围自 2026-09-20 起不再由 `target_groups` 界定：绑定群只管消息互通，
+        身份注入与好感度对所有群生效。但仍**必须**限制平台——`on_llm_request`
+        钩子是全局的，对每个 LLM 请求都触发；不认平台就会把「MC 群服互通」的
+        上下文注入到 Telegram / 网页聊天等其他平台的请求里。
+
+        返回空集表示当前没有 aiocqhttp 实例（钩子据此跳过）。
+        """
+        ids: set = set()
+        try:
+            for platform in self.context.platform_manager.platform_insts:
+                meta = platform.meta()
+                if getattr(meta, "name", "") == "aiocqhttp" and meta.id:
+                    ids.add(str(meta.id))
+        except Exception as e:
+            logger.error(f"NetherLink: 解析注入平台标识失败: {e}")
+        return ids
+
+    def _is_aiocqhttp_event(self, event) -> bool:
+        """这个事件是否来自 aiocqhttp 平台的**群消息**。
+
+        两道判据缺一不可：
+          · 群消息——`<netherlink_context>` 讲的是「群友在群里的身份」，
+            私聊里注入它是误导；
+          · 平台是 aiocqhttp——见 `_inject_platform_ids` 的理由。
+
+        用 `get_platform_id()`（平台实例的唯一标识）而不是 `get_platform_name()`
+        （适配器类型名）：用户可能同时跑多个同类适配器，只有 id 能确定是哪个实例。
+        与 `_resolve_qq_platform_id` 的约定保持一致。
+        """
+        try:
+            from astrbot.core.platform.message_type import MessageType
+
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                return False
+            return str(event.get_platform_id() or "") in self._inject_platform_ids()
+        except Exception:
+            return False
+
     def _platform_inst_is_alive(self, platform_id: str) -> bool:
         """该平台标识此刻是否真的有对应实例（用户可能改名或删掉适配器）。"""
         try:
@@ -2027,13 +2074,14 @@ class NetherLinkPlugin(Star):
         `tool_loop_agent` **不经过 pipeline**（源码里既无 `pipeline` 也无
         `call_event_hook`），所以本钩子不会对我们自己的内层 agent / 游戏侧 agent
         触发——那两条路径的名单由 `_build_system_parts` 直接给。
+
+        ⚠️ 2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
+        推群），身份注入改为对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
+        发起者与管理员。判据见 `_is_aiocqhttp_event`，它仍挡住私聊与其他平台。
         """
         try:
-            if not self.target_groups:
-                return
-            group_id = str(event.get_group_id() or "")
-            if group_id not in self.target_groups:
-                return  # 不是绑定的群（含私聊、其他插件构造的请求），一律不碰
+            if not self._is_aiocqhttp_event(event):
+                return  # 私聊 / 其他平台 / 其他插件构造的请求，一律不碰
             if "<netherlink_context>" in (req.system_prompt or ""):
                 return  # 幂等：已经注入过
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
