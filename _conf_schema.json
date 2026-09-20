@@ -213,5 +213,11 @@
     "type": "text",
     "default": "<netherlink_context>\n{origin}\n{roster}\n当前发起者:{identity},{is_admin}\n回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.\n</netherlink_context>",
     "hint": "这段文本会作为系统提示词注入四个场景:游戏内对话,游戏内获得成就,QQ 群友请求执行指令(内层 agent),QQ 群普通对话.改这里即四场景同时生效.可用占位符:{origin} 来源整行,{roster} 管理员名单整行(未配置时为「(未配置)」),{identity} 当前发起者,{is_admin} 是/不是管理员(已含结尾句号).四个占位符各自独占一行即可,不要手工加换行.空串回退默认值.注意:若改动或删掉这里的 netherlink_context 标签名,请同步修改 mc_command 工具描述里指向它的那句话,否则 AI 会找不到身份信息,管理员会被当成普通玩家"
+  },
+  "template_netherlink_request": {
+    "description": "游戏内对话的附加说明模板",
+    "type": "text",
+    "default": "<netherlink_request>\n本节说明该如何使用工具,玩家身份见系统提示词中的 netherlink_context.\n如果玩家想执行 MC 指令(改模式/传送/查名单等),调用 mc_command 工具.\n{karma_hint}\n</netherlink_request>",
+    "hint": "只用于游戏内对话:这段说明会跟玩家那句话拼在一起,发在用户消息里.可用占位符:{karma_hint} 必须保留——它是「调用前先查好感」的固定句,删掉会导致 AI 拿不到使用 mc_karma 的指引,而 mc_command 的 cost 参数是必填的.空串回退默认值.注意:本模板的标签名绝不能与 template_netherlink_context 的标签名相同,同名会让 AI 采信用户消息里这份(没有管理员名单),把管理员当成普通玩家;历史上正是这个原因把它从 netherlink_context 改名为 netherlink_request"
   }
 }

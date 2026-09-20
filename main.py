@@ -155,6 +155,30 @@ DEFAULT_ADVANCEMENT_PROMPT = (
 # 现在固定为 "MC"，与 schema 的 hint 一致（「留空则显示为 [MC]」）。
 DEFAULT_SERVER_DISPLAY = "MC"
 
+# 机器人游戏内名字的兜底值。抽成常量是为了让 KARMA_HINT 能嵌它——
+# 工具描述里那句「调用前先用 <机器人名> 查询好感」必须与配置的 mc_bot_name
+# 一致，而后者的配置读取发生在 __init__ 里，常量定义期拿不到。
+DEFAULT_BOT_NAME = "ai"
+
+# 「调用前先查好感」的固定句。做成独立常量而不是写死在模板里，是为了让它
+# 能以 {karma_hint} 占位符的形式被校验：模板可配，这个占位符不可配。
+KARMA_HINT = f"调用前先用 {DEFAULT_BOT_NAME} 查询好感以决定本次 cost。"
+
+
+# 游戏侧对话的用户消息附加说明模板（**只用于这一条路径**）。
+# ⚠️ 标签名绝不能与 DEFAULT_NETHERLINK_CONTEXT_TEMPLATE 的标签名相同：
+# 那个在 system_prompt 里（含管理员名单与判定），这个在**用户消息**里，
+# 若同名，AI 会采信更靠后的这份（没有名单），把管理员当成普通玩家拒绝执行。
+# 2026-09-19 实测到的正是这个现象，故从 <netherlink_context> 改名为
+# <netherlink_request>。占位符：
+#   {karma_hint} 「调用前先查好感」的固定句（必需，见上）
+DEFAULT_NETHERLINK_REQUEST_TEMPLATE = """\
+<netherlink_request>
+本节说明该如何使用工具,玩家身份见系统提示词中的 netherlink_context.
+如果玩家想执行 MC 指令(改模式/传送/查名单等),调用 mc_command 工具.
+{karma_hint}
+</netherlink_request>"""
+
 DEFAULT_EXTRA_SYSTEM_PROMPT = "你当前处于一个我的世界服务器内,服务器名称为{server}"
 
 # 注入给 AI 的系统上下文模板（四个面共用：游戏侧对话/成就、QQ 内层 agent、
@@ -244,7 +268,9 @@ class NetherLinkPlugin(Star):
         self.server_display_names: dict = self._parse_group_names(
             str(config.get("server_display_names", "") or "")
         )
-        self.mc_bot_name: str = str(config.get("mc_bot_name", "ai") or "ai")
+        self.mc_bot_name: str = str(
+            config.get("mc_bot_name", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
+        )
         self.group_names: dict[str, str] = self._parse_group_names(
             str(config.get("group_names", "") or "")
         )
@@ -271,6 +297,13 @@ class NetherLinkPlugin(Star):
         self.netherlink_context_template: str = str(
             config.get("template_netherlink_context", DEFAULT_NETHERLINK_CONTEXT_TEMPLATE)
             or DEFAULT_NETHERLINK_CONTEXT_TEMPLATE
+        )
+        # 游戏侧对话的用户消息附加说明模板（见 DEFAULT_NETHERLINK_REQUEST_TEMPLATE）。
+        # 空串回退默认值，口径同上——它承载着「身份见 system 里那份」这条
+        # 防遮蔽约定的另一半，静默丢掉会让 AI 去用户消息里找身份。
+        self.netherlink_request_template: str = str(
+            config.get("template_netherlink_request", DEFAULT_NETHERLINK_REQUEST_TEMPLATE)
+            or DEFAULT_NETHERLINK_REQUEST_TEMPLATE
         )
         self.mc_command_tool_desc: str = str(
             config.get("mc_command_tool_desc", DEFAULT_MC_COMMAND_TOOL_DESC)
@@ -1039,6 +1072,22 @@ class NetherLinkPlugin(Star):
             "is_admin": "是管理员." if is_admin else "不是管理员.",
         }
 
+    def _render_context_hint(self) -> str:
+        """渲染游戏侧对话的用户消息附加说明。
+
+        `{karma_hint}` 是**必需占位符**：它承载的「调用前先查好感」是 AI 得知
+        该用 mc_karma 的唯一途径，而 mc_command 的 cost 参数是必填的——删掉它
+        会把 AI 逼进「必须报价但无从得知该报多少」的自相矛盾（决策十要消灭的
+        正是这种状态）。缺了它 _render_template 会回退默认模板并记 warning。
+        """
+        return _render_template(
+            self.netherlink_request_template,
+            DEFAULT_NETHERLINK_REQUEST_TEMPLATE,
+            {"karma_hint": KARMA_HINT},
+            ("{karma_hint}",),
+            "游戏内附加说明",
+        )
+
     def _qq_is_admin(self, event) -> bool:
         """QQ 侧管理员判定：AstrBot 全局管理员或 admin_qq 白名单。
 
@@ -1293,14 +1342,9 @@ class NetherLinkPlugin(Star):
                 # 采信这份**没有管理员信息**的，把管理员当成普通玩家拒绝执行
                 # （2026-09-19 实测到的正是这个现象）。故改用一个不相干的名字，
                 # 身份信息只由 system_prompt 那份承载。
-                karma_hint = "调用前先用 mc_karma 查询好感以决定本次 cost。"
-                context_hint = (
-                    "<netherlink_request>\n"
-                    f"本节说明该如何使用工具，玩家身份见系统提示词中的 netherlink_context。\n"
-                    "如果玩家想执行 MC 指令（改模式/传送/查名单等），调用 mc_command 工具。"
-                    f"{karma_hint}\n"
-                    "</netherlink_request>"
-                )
+                # 2026-09-20：本段改为由 template_netherlink_request 渲染
+                # （见该配置项的 hint 与 DEFAULT_NETHERLINK_REQUEST_TEMPLATE）。
+                context_hint = self._render_context_hint()
 
                 # 会话历史：**按服务器挂会话**（见 _make_synthetic_event），
                 # 所以同一会话里会有多个玩家的话——写入时必须带上说话人，
