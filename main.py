@@ -872,9 +872,14 @@ class NetherLinkPlugin(Star):
     def _admin_context(
         self, identity: str, is_admin: bool, source: str, server_id: str = ""
     ) -> str:
-        """管理员名单 + 当前发起者身份，供 AI 判断是否放行高危操作。
+        """管理员名单 + 当前发起者身份 + 每次必查好感的要求。
 
         名单只是参考信息，插件不做任何拦截——是否放行由 AI 决定。
+
+        **本段是四个「面」唯一的共同内容**（游戏侧对话/成就、QQ 内层 agent、
+        QQ 侧普通对话经 on_llm_request 钩子），所以「每次回复前先查好感」这条
+        要求写在这里才能全覆盖——写进 `karma_rules` 对 QQ 侧普通对话无效
+        （那条路径看不到 `karma_rules`）。
 
         ⚠️ 只给**适用**的那份名单：QQ 侧发起时身份是 QQ 号，游戏 ID 名单对他的
         判定毫无帮助；游戏侧发起时我们根本不知道他的 QQ 号，给 QQ 名单反而会让
@@ -896,6 +901,11 @@ class NetherLinkPlugin(Star):
             f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」。\n"
             f"{roster_line}"
             f"当前发起者：{identity}，{who}\n"
+            # 这条要求放在这里而不是 karma_rules 里，是为了覆盖 QQ 侧普通对话
+            # （那条路径看不到 karma_rules）。措辞刻意说「先」——已有的实现里
+            # AI 常常直接回话、跳过查询。
+            "回复之前，先调用 mc_karma（delta 传 0）查一次当前发起者的好感值，"
+            "再据此决定你的态度与说话方式；若要执行指令，也以这个值为准判断够不够。\n"
             "</netherlink_context>"
         )
 
