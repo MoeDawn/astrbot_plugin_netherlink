@@ -107,14 +107,13 @@ DEFAULT_KARMA_RULES = """[好感度规则]
 # 价目表与「免费/可执行/超标计价」属于「怎么报价」，放进 cost 参数说明
 # （配合 skills_like 模式，闲聊时不加载那张表）。
 #
-# ⚠️ 本描述同时挂给三个面：QQ 外层 agent（`@filter.llm_tool` 注册的那份）、
-# QQ 内层 agent、游戏侧 agent。其中**外层 agent 看不到 `<netherlink_context>`**
-# ——它读的是框架内建的 system_prompt，`tool_loop_agent` 不经过 pipeline，
-# 注入钩子（inject_qq_identity）够不着它。（QQ 侧**普通对话**不在此列：
-# 那走 pipeline，钩子会注入身份。）
-# 所以这里绝不能断言「名单见 netherlink_context」——外层 agent 找不到名单，会把
-# 管理员的合法请求当成"非管理员"直接拒掉，连内层 agent（那份名单就在它手里）
-# 都不会被启动。只描述**场景**，把名单的来源写成条件式，三个面读起来才都是真的。
+# ⚠️ 本描述同时挂给**两个面**：QQ 侧顶层 `@filter.llm_tool` 注册的 mc_command、
+# 游戏侧 `_build_mc_toolset`。（2026-09-21 删掉 QQ 侧内层 agent 之前是三个面。）
+# 两面通常都拿得到 `<netherlink_context>`，但注入有若干不生效的边界（非
+# aiocqhttp 平台、私聊、钩子抛错被吞），所以这里绝不能断言「名单见
+# netherlink_context」——读不到的读者找不到名单，会把管理员的合法请求当成
+# "非管理员"直接拒掉。只描述**场景**，把名单的来源写成条件式，两个面读起来
+# 才都是真的。
 DEFAULT_MC_COMMAND_TOOL_DESC = """\
 在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.
 执行前先按下述情形判断:
@@ -205,11 +204,10 @@ data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}] 查看对方背�
 第三步,物品确认取走后,再按物品价值调用好感度工具增加好感.
 若第一步没搜到该物品,直接告诉对方背包里没有,不要执行 clear."""
 
-# 注入给 AI 的系统上下文模板，按**场景**拆成两份（四个面各取其一：
-# 游戏侧对话/成就用游戏版；QQ 内层 agent 与 QQ 侧普通对话（on_llm_request
-# 钩子）用 QQ 版）。
+# 注入给 AI 的系统上下文模板，按**场景**拆成两份（游戏侧对话/成就用游戏版；
+# QQ 侧、即 on_llm_request 钩子注入的那条路径用 QQ 版）。
 # 为什么做成模板：工具描述与参数说明早已可配，唯独这段硬编码——而它恰恰是
-# 四个面**唯一**的共同内容，改一处即全覆盖。占位符（两份相同）：
+# 几个面**唯一**的共同内容，改一处即全覆盖。占位符（两份相同）：
 #   {origin}   来源整行（不含换行，模板里让它独占一行）
 #   {roster}   管理员名单整行（不含换行；未配置时为「(未配置)」）
 #   {identity} 当前发起者
@@ -1043,7 +1041,7 @@ class NetherLinkPlugin(Star):
         return DEFAULT_SERVER_DISPLAY
 
     # ------------------------------------------------------------------
-    # 提示词拼装（游戏侧与 QQ 内层共用）
+    # 提示词拼装（游戏侧）
     # ------------------------------------------------------------------
     def _admin_context(
         self, identity: str, is_admin: bool, source: str, server_id: str = ""
@@ -1052,10 +1050,10 @@ class NetherLinkPlugin(Star):
 
         名单只是参考信息，插件不做任何拦截——是否放行由 AI 决定。
 
-        **本段是四个「面」唯一的共同内容**（游戏侧对话/成就、QQ 内层 agent、
-        QQ 侧普通对话经 on_llm_request 钩子），所以「每次回复前先查好感」这条
-        要求写在这里才能全覆盖——写进 `karma_rules` 对 QQ 侧普通对话无效
-        （那条路径看不到 `karma_rules`）。
+        **本段是几个「面」唯一的共同内容**（游戏侧对话/成就、QQ 侧普通对话经
+        on_llm_request 钩子），所以「每次回复前先查好感」这条要求写在这里才能
+        全覆盖——写进 `karma_rules` 对 QQ 侧普通对话无效（那条路径看不到
+        `karma_rules`）。
 
         ⚠️ 两个场景的默认文案**故意不同**（2026-09-21 拆分）：QQ 侧不带
         「先查好感」那句（主 agent 有会话记忆，每轮强制查会过频），游戏侧
@@ -1177,13 +1175,13 @@ class NetherLinkPlugin(Star):
         """读 AstrBot 的全局「工具调用模式」，供本插件自建的 agent 使用。
 
         **为什么必须显式传**：`tool_loop_agent` 没有这个形参，它经 `**other_kwargs`
-        转给 runner.reset()，而 reset 的默认值是 `"full"`。也就是说插件自建的三次
-        调用（游戏侧对话、成就、QQ 内层）**不会跟随**用户在 WebUI 里的设置——
-        用户改成 skills-like 后，只有走 AstrBot 主 agent 的 QQ 普通对话会变。
+        转给 runner.reset()，而 reset 的默认值是 `"full"`。也就是说插件自建的两处
+        调用（游戏侧对话、成就）**不会跟随**用户在 WebUI 里的设置——用户改成
+        skills-like 后，只有走 AstrBot 主 agent 的 QQ 普通对话会变。
 
         本插件把 `mc_command` 的价目表放进了 cost 参数说明，只有在 skills-like
         （参数延迟到选中工具后才下发）下才真正省上下文；所以这里主动跟随全局设置，
-        让四条路径行为一致。
+        让各条路径行为一致。
 
         读不到（老版本 AstrBot / 配置缺失）就返回空串，调用方不传该参数，
         退回 runner 的默认 "full"——不猜。
@@ -1201,7 +1199,7 @@ class NetherLinkPlugin(Star):
     async def _build_system_parts(
         self, umo: str, identity: str, is_admin: bool, source: str, server_id: str = ""
     ) -> list:
-        """拼装 LLM 对话的 system_prompt 各段（游戏侧与 QQ 内层共用），顺序即最终顺序。
+        """拼装 LLM 对话的 system_prompt 各段，顺序即最终顺序。
 
         顺序：[WebUI 人格（可开关）] → [extra_system_prompt + karma_rules] → [管理员上下文]
         中间两段连成**同一个** part：用户要求好感度规则紧跟在自定义提示词之后拼接。
@@ -1521,128 +1519,13 @@ class NetherLinkPlugin(Star):
             platform_meta=platform_meta, session_id=(server_id or player),
         )
 
-    # ------------------------------------------------------------------
-    # QQ 侧内层 agent 的工具（handler 模式）
-    # ------------------------------------------------------------------
-    async def _inner_mc_command(
-        self, event, cmd: str, cost: int, server: str = ""
-    ) -> str:
-        """QQ 侧内层 agent 用的 mc_command handler。
-
-        不能复用 self.mc_command——那是被 @filter.llm_tool 装饰过的版本：
-        注册器对它的参数名与注解另有要求，且它走的是 AstrBot 自己的注册调用，
-        不接受显式 ToolSet 的 handler(event, **kwargs) 约定。
-
-        入参与顶层 mc_command 逐字相同（source="qq" + 真实 QQ 号），
-        这样好感度键仍是 qq:{QQ号}、发起人身份仍是 QQ 昵称。
-        """
-        try:
-            qq = str(event.get_sender_id() or "")
-            target = self._resolve_target_server(server)
-            # 解析不出目标时**不猜**：交给 exec_command_for → _send_to_mc 判定，
-            # 只有恰好一台在线才发送，多台会拒发（宁可丢一条也不发错服务器）。
-            # 但若 AI 明确填了一个不存在的名字，那就是它的判断错了，如实告知。
-            if server and not target:
-                online = self._online_servers()
-                names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
-                return f"没有名为「{server}」的服务器在线。在线的是：{names}"
-            return await self.exec_command_for(
-                initiator=str(event.get_sender_name() or qq),
-                cmd=cmd,
-                source="qq",
-                qq=qq,
-                cost=cost,
-                server_id=target,
-            )
-        except Exception as e:
-            logger.error(f"NetherLink: 内层 mc_command 执行失败: {e}")
-            return f"执行出错: {e}"
-
-    async def _inner_mc_karma(self, event, delta: int) -> str:
-        """QQ 侧内层 agent 用的 mc_karma handler。
-
-        与顶层 mc_karma 同口径：目标固定为发起者（QQ 群友），无法指定他人，
-        因此键空间是 qq:{QQ号}，与游戏侧 mc:{游戏ID} 互不干扰。
-        """
-        try:
-            qq = str(event.get_sender_id() or "")
-            key = identity_key("qq", str(event.get_sender_name() or qq), qq)
-            if not int(delta or 0):
-                return f"当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
-            old, new = await self._karma_add(key, int(delta), origin="QQ 对话")
-            return f"好感值 {old} → {new}（本次 {int(delta):+d}）。"
-        except Exception as e:
-            logger.error(f"NetherLink: 内层 mc_karma 执行失败: {e}")
-            return f"执行出错: {e}"
-
-    def _build_qq_toolset(self, event):
-        """构造 QQ 侧内层 agent 的工具集。
-
-        这里**必须**是 handler 模式的 FunctionTool（handler=可调用），因为
-        AstrBot 的 ToolSet 执行路径是 `tool.handler(event, **kwargs)`
-        （`@filter.llm_tool` 注册的工具经 `_PermissionGuardedTool` 走的也是这一条）。
-        游戏侧那套 `@dataclass class X(FunctionTool)` + 覆写 `call()` 属于另一个
-        执行路径（call 模式，第一个参数是 ContextWrapper），把那种实例塞进本
-        ToolSet 会因为没有 handler 而在真机上失败——本机跑不出来。
-
-        event 参数**当前完全未使用**（下方构造不读它）。真实事件是在 ToolSet 执行
-        时才由框架传给 handler 的，构造期拿不到也不需要；身份解析一律留在 handler
-        里做（那才是 handler 约定的位置，挪到这里反而会把约定弄坏）。
-        保留该形参只为与调用点 `self._build_qq_toolset(event)` 对称，不暗示任何
-        隐藏语义（`_build_mc_toolset` 那边没有对应的形参，别照抄）。
-        """
-        from astrbot.core.agent.tool import FunctionTool, ToolSet
-
-        inner_cmd = FunctionTool(
-            name="mc_command",
-            description=self.mc_command_tool_desc,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "cmd": {
-                        "type": "string",
-                        "description": "完整的 Minecraft 指令，不带开头斜杠",
-                    },
-                    "cost": {
-                        "type": "number",
-                        "description": self.mc_command_cost_param_desc,
-                    },
-                    "server": {
-                        "type": "string",
-                        "description": (
-                            "指令发往哪台 MC 服务器（填 server_id 或显示名）。"
-                            "只有一台在线时可省略；多台在线时不填会被拒绝发送。"
-                        ),
-                    },
-                },
-                "required": ["cmd", "cost"],
-            },
-            handler=self._inner_mc_command,
-        )
-        # mc_karma 无条件在列：好感度是强制机制，没有任何配置能把它摘掉
-        inner_karma = FunctionTool(
-            name="mc_karma",
-            description=self.karma_tool_desc,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "delta": {
-                        "type": "number",
-                        "description": self.karma_delta_param_desc,
-                    },
-                },
-                "required": ["delta"],
-            },
-            handler=self._inner_mc_karma,
-        )
-        return ToolSet([inner_cmd, inner_karma])
 
     def _build_mc_toolset(self, player: str, server_id: str = ""):
         """构造游戏内会话用的 mc_command 工具集合。
 
         只有游戏侧这一个调用面，发起人固定为 player（游戏 ID）——QQ 侧走的是
-        `@filter.llm_tool` 注册的顶层 mc_command 与 `_build_qq_toolset`，
-        与这里无关（早先这里有个永远传不到 "qq" 的 source 形参，已删除）。
+        `@filter.llm_tool` 注册的顶层 mc_command，与这里无关（早先这里有个永远
+        传不到 "qq" 的 source 形参，已删除）。
         call() 覆写模式第一个参数是 ContextWrapper[AstrAgentContext]。
         """
         from astrbot.core.agent.tool import FunctionTool, ToolSet
@@ -1707,9 +1590,9 @@ class NetherLinkPlugin(Star):
                     "properties": {
                         "delta": {
                             "type": "number",
-                            # 走配置项，与 QQ 侧内层 agent 同源——否则用户在
-                            # WebUI 改 mc_karma_delta_param_desc 只会改到 QQ 侧，
-                            # 游戏侧纹丝不动且无任何告警（本项目最忌讳的静默分叉）。
+                            # 走配置项，与 QQ 侧顶层 mc_karma 同源——否则用户在
+                            # WebUI 改 mc_karma_delta_param_desc 只会改到一边，
+                            # 另一边纹丝不动且无任何告警（本项目最忌讳的静默分叉）。
                             "description": plugin.karma_delta_param_desc,
                         },
                     },
@@ -2140,9 +2023,11 @@ class NetherLinkPlugin(Star):
 
         为什么需要它：QQ 侧**普通对话**走的是 AstrBot 主 agent，其 system_prompt
         由框架内建、插件注入不进去（见 claude.md 的权限模型一节）。于是群友只是
-        跟 AI 聊天时，AI 完全不知道对方是谁——只有当他请求执行指令、插件另起内层
-        agent 时，那份 system_prompt 才归插件管。本钩子是 AstrBot 给出的唯一注入点
-        （`astrbot/api/event/filter/__init__.py` 导出，`register_on_llm_request` 定义）。
+        跟 AI 聊天时，AI 完全不知道对方是谁。此前只有「群友请求执行指令、插件另起
+        内层 agent」那条路径的 system_prompt 归插件管；内层 agent 已于 2026-09-21
+        删除，QQ 侧只剩主 agent 一条路径，本钩子因此是唯一的注入点。它由 AstrBot
+        提供（`astrbot/api/event/filter/__init__.py` 导出，
+        `register_on_llm_request` 定义）。
 
         ⚠️ **这个钩子是全局的**：对**每一个** LLM 请求都会触发（包括其他插件的
         请求，如用户画像分析、AstrBot 自身的定时任务）。因此必须严格认准来源，
@@ -2151,8 +2036,8 @@ class NetherLinkPlugin(Star):
         幂等：system_prompt 里已有 `<netherlink_context>` 就不再追加。
 
         `tool_loop_agent` **不经过 pipeline**（源码里既无 `pipeline` 也无
-        `call_event_hook`），所以本钩子不会对我们自己的内层 agent / 游戏侧 agent
-        触发——那两条路径的名单由 `_build_system_parts` 直接给。
+        `call_event_hook`），所以本钩子不会对游戏侧 agent 触发——那条路径的名单
+        由 `_build_system_parts` 直接给。
 
         ⚠️ 2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
         推群），身份注入改为对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
@@ -2217,7 +2102,7 @@ class NetherLinkPlugin(Star):
     # LLM 函数工具：QQ 群聊自然语言 -> MC 指令（AstrBot 自动注册给群聊 LLM）
     # ------------------------------------------------------------------
     @filter.llm_tool(name="mc_command")
-    async def mc_command(self, event, cmd: str, cost: int) -> str:
+    async def mc_command(self, event, cmd: str, cost: int, server: str = "") -> str:
         """在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.
         执行前先按下述情形判断:
         一律拒绝的指令(无论对方好感多少都不执行):清空或重置成就进度这类能让对方
@@ -2232,70 +2117,30 @@ class NetherLinkPlugin(Star):
 
         Args:
             cmd(string): 完整的 Minecraft 指令,不带开头的斜杠,例如 gamemode creative Steve
-            cost(number): 你为本次执行报出的好感消耗(纯查询类指令传 0).最终消耗由掌握好感度规则的内层决策按规则确定"""
+            cost(number): 你为本次执行报出的好感消耗(纯查询类指令传 0)
+            server(string): 指令发往哪台 MC 服务器(填 server_id 或显示名).只有一台在线时可省略
+        """
         try:
-            # 注意：这里**不再**因 MC 未连接而提前返回。好感度是本地功能，
-            # 服务器离线时玩家/群友仍应能对话、查好感、加减好感；离线只让
-            # 指令执行本身失败（exec_command_for 会拒绝并如实告知、并退费）。
-            # 提前拦截会把整个 LLM 挡在门外，连带废掉好感度。
+            # 这里**没有**任何连接性前置判断：好感度是本地功能，服务器离线时
+            # 仍应走到 exec_command_for（它自己会拒绝并退费），提前拦截会把
+            # 整个 LLM 挡在门外、连带废掉好感度。
             qq = str(event.get_sender_id() or "")
             identity = str(event.get_sender_name() or qq)
-
-            # 永远起内层 agent：AstrBot 主 agent 的 system_prompt 由框架内建，
-            # 插件注入不了好感度规则与管理员名单，只能另起一个带自定义
-            # system_prompt 的 agent 来承载本次决策。`cost` 是必填参数，AI 必须
-            # 报价，而报价的依据（karma_rules）只有内层看得到——没有"跳过决策"的分支。
-            # event 必须是**真实 QQ 事件**：is_admin()、unified_msg_origin、
-            # 群会话与 conversation manager 全挂在它身上，合成事件会让它们全错。
-            umo = event.unified_msg_origin
-            prov_id = await self.context.get_current_chat_provider_id(umo)
-            if not prov_id:
-                return "未配置可用的 LLM 提供商，无法执行指令。"
-
-            # 外层 agent（`@filter.llm_tool` 注册的那个面）拿不到好感度规则，它报的
-            # cost 本身没有依据。但这个参数在 schema 里是必填的：模型必须给出一个值，
-            # 如果就此丢掉，用户听到的价格与实际扣除的价格会来自两套互不相干的计算。
-            # 所以把它当作「外层给你的初步报价」原样带进内层提示词——内层掌握规则，
-            # 采纳/调整/推翻都由它定，最终价格与 exec_command_for 扣的是同一个数。
-            # 过一遍 clamp_cost 只为把外部输入洗成合法整数（越界报价按上限显示）。
-            quoted = clamp_cost(cost, self.max_command_cost)
-            resp = await self.context.tool_loop_agent(
-                event=event,
-                chat_provider_id=prov_id,
-                system_prompt="\n\n".join(
-                    await self._build_system_parts(
-                        umo, identity, self._qq_is_admin(event), "qq"
-                    )
-                ),
-                prompt=(
-                    f"QQ 群友「{identity}」请求在 Minecraft 服务器上执行这条指令：\n"
-                    f"{cmd}\n"
-                    f"{self._build_online_servers_hint()}\n"
-                    f"外层决策给出的初步报价是 {quoted} 点好感。外层看不到好感度规则，"
-                    "这个数字只是它的猜测，仅供参考。\n"
-                    "请按好感度规则自行判断这条指令该不该执行、要消耗对方多少好感"
-                    "（采纳、调整或推翻上面的报价都可以），"
-                    "然后调用 mc_command 执行（cmd 传原指令，cost 传你决定的消耗）。"
-                    "如果判断不该执行，直接说明原因，不要调用工具。"
-                ),
-                tools=self._build_qq_toolset(event),
-                # 内层 agent 只需「查好感、报价、执行」三步，给一步余量即可，
-                # 绝不能让它在此处循环
-                max_steps=4,
-                tool_schema_mode=self._tool_schema_mode(),
+            # 决策与执行都在本函数内完成（2026-09-21 删掉 QQ 侧内层 agent：
+            # karma_rules 已直接注入主 agent，报价依据可见，不再需要复核层）。
+            # 代价是少一层复核，收益是每次指令由 2 次 LLM 往返降到 1 次。
+            target = self._resolve_target_server(server)
+            # 填了名字却不在线时**不执行**：宁可如实告知，也不让消息落到
+            # _send_to_mc 的「多台在线时拒发」分支——那会让 AI 收到一个
+            # 与它的意图无关的失败。
+            if server and not target:
+                online = self._online_servers()
+                names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
+                return f"没有名为「{server}」的服务器在线。在线的是：{names}"
+            return await self.exec_command_for(
+                initiator=identity, cmd=cmd, source="qq", qq=qq,
+                cost=cost, server_id=target,
             )
-            # 「LLM 没给出文本」与「响应里根本没有这个字段」是两件事：
-            # 前者是正常结果，静默回退兜底文案即可；后者意味着 AstrBot 的响应
-            # 结构变了，继续静默就等于让插件永远假装正常。必须留痕。
-            if hasattr(resp, "completion_text"):
-                text = str(resp.completion_text or "").strip()
-            else:
-                logger.warning(
-                    "NetherLink: 内层 agent 响应缺少 completion_text 字段"
-                    "（AstrBot 响应结构可能已变），本次使用兜底回复"
-                )
-                text = ""
-            return text[:MC_REPLY_MAX_LEN] if text else "指令处理完毕。"
         except Exception as e:
             logger.error(f"NetherLink: mc_command 执行失败: {e}")
             return f"执行出错: {e}"
