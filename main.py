@@ -382,9 +382,9 @@ class NetherLinkPlugin(Star):
         # OverflowError 一并兜底：JSON 里的 1e400 解析成 inf，int(inf) 抛的是
         # OverflowError 而不是 ValueError，漏掉会直接崩掉插件加载。
         try:
-            self.karma_initial: int = clamp_value(int(config.get("karma_initial", 10)))
+            self.karma_initial: int = clamp_value(int(config.get("karma_initial", 20)))
         except (TypeError, ValueError, OverflowError):
-            self.karma_initial = clamp_value(10)
+            self.karma_initial = clamp_value(20)
         # 这两个数都是"外部输入"（WebUI 手填），必须夹住负值：
         #   karma_death_penalty < 0 会把死亡变成好感**奖励**（-(-2) = +2）；
         #   max_command_cost <= 0 会让 clamp_cost 一律返回 0，所有指令免费。
@@ -392,9 +392,9 @@ class NetherLinkPlugin(Star):
         # OverflowError 一并兜底：JSON 里的 1e400 解析成 inf，int(inf) 抛的是
         # OverflowError 而不是 ValueError，漏掉会直接崩掉插件加载。
         try:
-            self.max_command_cost: int = max(0, int(config.get("max_command_cost", 100)))
+            self.max_command_cost: int = max(0, int(config.get("max_command_cost", 80)))
         except (TypeError, ValueError, OverflowError):
-            self.max_command_cost = 100
+            self.max_command_cost = 80
         try:
             self.karma_death_penalty: int = max(
                 0, int(config.get("karma_death_penalty", 2))
@@ -413,13 +413,13 @@ class NetherLinkPlugin(Star):
         )
 
         self.templates = {
-            "chat": config.get("template_chat", "[{server}] {player}: {text}"),
+            "chat": config.get("template_chat", "⌜{server}⌟ <{player}>: {text}"),
             "join": config.get("template_join", "[{server}] {player} 进入了服务器"),
             "leave": config.get("template_leave", "[{server}] {player} 离开了服务器"),
-            "death": config.get("template_death", "[{server}] {message}"),
-            "qq_to_mc": config.get("template_qq_to_mc", "⌜§a{group}§f⌟ <§b{sender}§f> §5{text}§f"),
+            "death": config.get("template_death", "⌜{server}⌟ {message}"),
+            "qq_to_mc": config.get("template_qq_to_mc", "§a⌜{group}⌟§f <§b{sender}§f> §d{text}§f"),
             "bot_reply_game": config.get(
-                "template_bot_reply_game", "⌜§c{bot}§f⌟ : §d{text}§f"
+                "template_bot_reply_game", "§c⌜{bot}⌟§f : §d{text}§f"
             ),
         }
 

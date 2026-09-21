@@ -109,13 +109,13 @@
   "karma_initial": {
     "description": "新玩家的初始好感",
     "type": "int",
-    "default": 10,
+    "default": 20,
     "hint": "玩家首次出现时使用的初始值"
   },
   "max_command_cost": {
     "description": "单次指令的好感消耗上限",
     "type": "int",
-    "default": 100,
+    "default": 80,
     "hint": "AI 报价超过此值时会被裁剪,防止报价失控.填 0 或负数则指令全部免费"
   },
   "karma_death_penalty": {
@@ -178,7 +178,7 @@
   "template_chat": {
     "description": "MC 聊天推送模板",
     "type": "string",
-    "default": "[{server}] {player}: {text}",
+    "default": "⌜{server}⌟ <{player}>: {text}",
     "hint": "可用占位符 {server} 服务器名,{bot} 机器人名,{player} 玩家,{text} 内容"
   },
   "template_join": {
@@ -194,18 +194,18 @@
   "template_death": {
     "description": "死亡推送模板",
     "type": "string",
-    "default": "[{server}] {message}"
+    "default": "⌜{server}⌟ {message}"
   },
   "template_qq_to_mc": {
     "description": "QQ 消息转发进游戏的广播格式",
     "type": "string",
-    "default": "⌜§a{group}§f⌟ <§b{sender}§f> §5{text}§f",
-    "hint": "占位符 {group} 群名,{sender} 群友,{text} 内容.支持 MC 颜色码,如 §a §b §5 §f,由 MC 端渲染"
+    "default": "§a⌜{group}⌟§f <§b{sender}§f> §d{text}§f",
+    "hint": "占位符 {group} 群名,{sender} 群友,{text} 内容.支持 MC 颜色码,如 §a §b §d §f,由 MC 端渲染"
   },
   "template_bot_reply_game": {
     "description": "机器人在游戏内的回复格式",
     "type": "string",
-    "default": "⌜§c{bot}§f⌟ : §d{text}§f",
+    "default": "§c⌜{bot}⌟§f : §d{text}§f",
     "hint": "占位符 {bot} 机器人名字,{text} 回复内容.开头的名字与回复内容的颜色均可在此配置.支持 MC 颜色码"
   },
   "template_netherlink_context_qq": {
