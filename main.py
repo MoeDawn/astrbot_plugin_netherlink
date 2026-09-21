@@ -322,8 +322,9 @@ class NetherLinkPlugin(Star):
         self.extra_system_prompt: str = str(
             config.get("extra_system_prompt", DEFAULT_EXTRA_SYSTEM_PROMPT) or ""
         )
-        # 好感度是强制机制，没有开关：想「不依赖好感度」只能改提示词
-        # （把 karma_rules 的消耗表写成全 0），不能停用代码路径。
+        # 好感度是强制机制，没有开关：想「不依赖好感度」只能改提示词。
+        # ⚠️ 消耗表 2026-09-21 起已不在本项里，而移到了 mc_command 的
+        # cost 参数说明（mc_command_cost_param_desc）——改这里的消耗表**不再生效**。
         self.karma_rules: str = str(
             config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES
         )
@@ -1572,13 +1573,16 @@ class NetherLinkPlugin(Star):
                 # cost 原样透传：裁剪与扣费都在 exec_command_for 里做（唯一入口）。
                 # server_id 由**连接**得出（端口绑定或握手），不经过 AI——
                 # 玩家在 A 服说话，指令就该发到 A 服，没有让 AI 判断的余地。
-                return await plugin.exec_command_for(
+                out = await plugin.exec_command_for(
                     initiator=player,
                     cmd=cmd,
                     source="game",
                     cost=kwargs.get("cost", 0),
                     server_id=server_id,
                 )
+                # 与 QQ 侧对齐：服务器输出可能很长（满背包 NBT、多人 list），
+                # 整段进上下文会持续膨胀。此处原为缺口，2026-09-21 补上。
+                return out[:MC_REPLY_MAX_LEN] if out else out
 
         @dataclass
         class McKarmaTool(FunctionTool):
