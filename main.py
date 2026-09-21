@@ -1244,6 +1244,8 @@ class NetherLinkPlugin(Star):
         插件注不进去——唯一的入口是 `on_llm_request` 钩子。因此这里拼的
         内容必须**自包含**：好感规则 + 查好感的引导 + 管理员信息 + 场景说明。
 
+        内容顺序：好感规则 → 查好感的引导 → 在线服务器清单 → 管理员与来源。
+
         ⚠️ 不含 `extra_system_prompt`：那是游戏侧专属（含背包查验那套流程），
         注给 QQ 侧只会让主 agent 去处理与它无关的流程。
         ⚠️ 不含 WebUI 人格：主 agent 自己会读人格，插件再注一份就重复了。
@@ -1255,6 +1257,10 @@ class NetherLinkPlugin(Star):
         # 而 karma_rules 全文不含 mc_karma——不补这句，QQ 侧整段上下文里
         # 一次都不提这个工具（它明明可用），AI 报价没有任何依据。
         blocks.append(QQ_KARMA_HINT)
+        # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
+        # 删掉内层 agent 后这里成了它唯一的去处——不接回来，多服在线时
+        # AI 只能从 _send_to_mc 的「拒发」报错里试错。
+        blocks.append(self._build_online_servers_hint())
         blocks.append(self._admin_context(identity, is_admin, "qq"))
         return "\n\n".join(blocks)
 
@@ -2137,10 +2143,13 @@ class NetherLinkPlugin(Star):
                 online = self._online_servers()
                 names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
                 return f"没有名为「{server}」的服务器在线。在线的是：{names}"
-            return await self.exec_command_for(
+            out = await self.exec_command_for(
                 initiator=identity, cmd=cmd, source="qq", qq=qq,
                 cost=cost, server_id=target,
             )
+            # 与游戏侧同样限长：服务器输出可能很长（满背包的 NBT、多人 list），
+            # 整段塞进 LLM 上下文会持续膨胀。删内层 agent 时这段截断一度丢失。
+            return out[:MC_REPLY_MAX_LEN] if out else out
         except Exception as e:
             logger.error(f"NetherLink: mc_command 执行失败: {e}")
             return f"执行出错: {e}"
