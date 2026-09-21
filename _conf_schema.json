@@ -217,7 +217,7 @@
   "template_netherlink_context_game": {
     "description": "游戏侧注入给 AI 的系统上下文模板",
     "type": "text",
-    "default": "<netherlink_context>\n{origin}\n{roster}\n当前发起者:{identity},{is_admin}\n对话历史里,每条玩家发言以方括号里的玩家名开头,如 [某玩家名] 你好,\n方括号里的是说话人,不要把他人的发言当成当前发起者说的.\n回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.\n</netherlink_context>",
+    "default": "<netherlink_context>\n{origin}\n{roster}\n当前发起者:{identity},{is_admin}\n对话历史里,每条玩家发言以方括号里的玩家名开头,如 [某玩家名] 你好,\n方括号里的是说话人,不要把他人的发言当成当前发起者说的.\n消息开头的唤醒词是玩家召唤你的口令,不属于消息内容,按它后面的内容理解即可.\n回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.\n</netherlink_context>",
     "hint": "游戏内对话与获得成就共用这一份.占位符同上:{origin} {roster} {identity} {is_admin}.默认值额外含两句:说明历史里方括号标注说话人;要求回复前先查一次好感.空串回退默认值"
   },
   "template_netherlink_request": {

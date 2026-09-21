@@ -232,6 +232,7 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 当前发起者:{identity},{is_admin}
 对话历史里,每条玩家发言以方括号里的玩家名开头,如 [某玩家名] 你好,
 方括号里的是说话人,不要把他人的发言当成当前发起者说的.
+消息开头的唤醒词是玩家召唤你的口令,不属于消息内容,按它后面的内容理解即可.
 回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.
 </netherlink_context>"""
 
@@ -1367,20 +1368,14 @@ class NetherLinkPlugin(Star):
         """
         player = str(data.get("player", "?"))
         text = str(data.get("text", "")).strip()
-        # 剥掉唤醒前缀，剩余部分作为 prompt
-        prompt = text
-        for p in self.mc_wake_prefixes:
-            if text.startswith(p):
-                prompt = text[len(p):].strip()
-                break
-        if not prompt:
-            prompt = "你好"
+        # 不剥离唤醒前缀：AI 看到的就是玩家原话（与推群、写进历史的完全一致）。
+        # 唤醒词是什么、意味着什么，由系统提示词里的场景说明交代。
 
         # 玩家那句唤醒消息本身也要推群。Paper 侧发完 bot_chat 就 return 了，
         # 不会再发一条 chat 事件；若不在这里补，群里就只看到 AI 的回答、
         # 看不到玩家问了什么（2026-09-19 用户要求改掉）。
         # 放在起 LLM 之前：这是已经发生的游戏事实，不该因为 LLM 失败而丢失。
-        # 用 text（玩家原话，含唤醒词）而不是 prompt（剥掉唤醒词），忠实反映他打了什么。
+        # 用 text（玩家原话，含唤醒词），忠实反映他打了什么。
         # 与普通聊天走同一个模板与开关，避免出现"两套聊天格式"。
         if self.config.get("enable_chat", True):
             try:
@@ -1456,7 +1451,7 @@ class NetherLinkPlugin(Star):
                     event=event,
                     chat_provider_id=prov_id,
                     system_prompt="\n\n".join(system_parts) if system_parts else None,
-                    prompt=f"{context_hint}\n\n玩家消息：{prompt}",
+                    prompt=f"{context_hint}\n\n玩家消息：{text}",
                     tools=self._build_mc_toolset(player, server_id),
                     contexts=history,
                     max_steps=6,
@@ -1470,7 +1465,7 @@ class NetherLinkPlugin(Star):
                 await conv_mgr.add_message_pair(
                     cid=curr_cid,
                     user_message=UserMessageSegment(
-                        content=[TextPart(text=f"[{player}] {prompt}")]
+                        content=[TextPart(text=f"[{player}] {text}")]
                     ),
                     assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
                 )
