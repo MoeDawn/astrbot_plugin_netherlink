@@ -172,6 +172,13 @@ DEFAULT_BOT_NAME = "ai"
 # 能以 {karma_hint} 占位符的形式被校验：模板可配，这个占位符不可配。
 KARMA_HINT = f"调用前先用 {DEFAULT_BOT_NAME} 查询好感以决定本次 cost。"
 
+# QQ 侧普通对话用的「需要时查好感」句。**刻意不带频率限定**（不说「每次」）——
+# QQ 侧走 AstrBot 主 agent，有会话记忆，每轮强制查会过频（用户实测：清空历史后
+# AI 会自行判断何时该查）。但它必须存在：`<netherlink_context>` 拆成 QQ/游戏两份
+# 后「先查好感」那句只留在游戏侧，而 karma_rules 全文并不含 `mc_karma`——不补这句，
+# QQ 侧注入的整段上下文里工具名一次都不出现，AI 只能靠猜。
+QQ_KARMA_HINT = "需要判断对方好感时,调用 mc_karma(delta 传 0)查询."
+
 
 # 游戏侧对话的用户消息附加说明模板（**只用于这一条路径**）。
 # ⚠️ 标签名绝不能与 DEFAULT_NETHERLINK_CONTEXT_QQ/_GAME 的标签名相同：
@@ -1232,6 +1239,27 @@ class NetherLinkPlugin(Star):
         parts.append(self._admin_context(identity, is_admin, source, server_id))
         return parts
 
+    async def _build_qq_context(self, identity: str, is_admin: bool) -> str:
+        """拼装 QQ 侧注入给 AI 的全部上下文（钩子与工具共用）。
+
+        QQ 侧走 AstrBot **主 agent**，它的 system_prompt 由框架内建、
+        插件注不进去——唯一的入口是 `on_llm_request` 钩子。因此这里拼的
+        内容必须**自包含**：好感规则 + 查好感的引导 + 管理员信息 + 场景说明。
+
+        ⚠️ 不含 `extra_system_prompt`：那是游戏侧专属（含背包查验那套流程），
+        注给 QQ 侧只会让主 agent 去处理与它无关的流程。
+        ⚠️ 不含 WebUI 人格：主 agent 自己会读人格，插件再注一份就重复了。
+        """
+        blocks: list[str] = []
+        if self.karma_rules:
+            blocks.append(self.karma_rules)
+        # 工具名只能在这里点出来：拆成两份模板后「先查好感」留在游戏侧，
+        # 而 karma_rules 全文不含 mc_karma——不补这句，QQ 侧整段上下文里
+        # 一次都不提这个工具（它明明可用），AI 报价没有任何依据。
+        blocks.append(QQ_KARMA_HINT)
+        blocks.append(self._admin_context(identity, is_admin, "qq"))
+        return "\n\n".join(blocks)
+
     async def _handle_advancement(self, data: dict, server_id: str = ""):
         """玩家获得成就：把配置的提示词交给 AI，由它更新好感并回话。
 
@@ -2137,7 +2165,7 @@ class NetherLinkPlugin(Star):
                 return  # 幂等：已经注入过
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
             is_admin = self._qq_is_admin(event)
-            ctx = self._admin_context(identity, is_admin, "qq")
+            ctx = await self._build_qq_context(identity, is_admin)
             req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
             # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
             # 排查「AI 认不出管理员」时先看这行有没有出现。
