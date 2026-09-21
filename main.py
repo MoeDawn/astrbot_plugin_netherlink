@@ -182,7 +182,7 @@ KARMA_HINT = f"调用前先用 {DEFAULT_BOT_NAME} 查询好感以决定本次 co
 
 
 # 游戏侧对话的用户消息附加说明模板（**只用于这一条路径**）。
-# ⚠️ 标签名绝不能与 DEFAULT_NETHERLINK_CONTEXT_TEMPLATE 的标签名相同：
+# ⚠️ 标签名绝不能与 DEFAULT_NETHERLINK_CONTEXT_QQ/_GAME 的标签名相同：
 # 那个在 system_prompt 里（含管理员名单与判定），这个在**用户消息**里，
 # 若同名，AI 会采信更靠后的这份（没有名单），把管理员当成普通玩家拒绝执行。
 # 2026-09-19 实测到的正是这个现象，故从 <netherlink_context> 改名为
@@ -206,16 +206,29 @@ data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}] 查看对方背�
 第三步,物品确认取走后,再按物品价值调用好感度工具增加好感.
 若第一步没搜到该物品,直接告诉对方背包里没有,不要执行 clear."""
 
-# 注入给 AI 的系统上下文模板（四个面共用：游戏侧对话/成就、QQ 内层 agent、
-# QQ 侧普通对话经 on_llm_request 钩子）。
+# 注入给 AI 的系统上下文模板，按**场景**拆成两份（四个面各取其一：
+# 游戏侧对话/成就用游戏版；QQ 内层 agent 与 QQ 侧普通对话（on_llm_request
+# 钩子）用 QQ 版）。
 # 为什么做成模板：工具描述与参数说明早已可配，唯独这段硬编码——而它恰恰是
-# 四个面**唯一**的共同内容，改一处即全覆盖。占位符：
+# 四个面**唯一**的共同内容，改一处即全覆盖。占位符（两份相同）：
 #   {origin}   来源整行（不含换行，模板里让它独占一行）
 #   {roster}   管理员名单整行（不含换行；未配置时为「(未配置)」）
 #   {identity} 当前发起者
 #   {is_admin} 是/不是管理员（已含结尾句号）
-# 默认值逐字还原 2026-09-19 起的硬编码文本，有守卫整串比对。
-DEFAULT_NETHERLINK_CONTEXT_TEMPLATE = """\
+# 两份的差异是**刻意的**，不是历史包袱（2026-09-21 拆分）：
+#   · QQ 侧不带「先查好感」那句——主 agent 有会话记忆，每轮强制查会过频
+#     （用户实测：清空历史后 AI 会自行判断何时该查）。
+#   · 游戏侧多一句「历史里方括号标注说话人」——会话按**服务器**建，同一
+#     会话里有多名玩家的发言，不说明格式 AI 会把别人的话当成当前发起者说的。
+# 默认值有守卫整串比对（与 schema 的 default 逐字一致）。
+DEFAULT_NETHERLINK_CONTEXT_QQ = """\
+<netherlink_context>
+{origin}
+{roster}
+当前发起者:{identity},{is_admin}
+</netherlink_context>"""
+
+DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 <netherlink_context>
 {origin}
 {roster}
@@ -317,13 +330,18 @@ class NetherLinkPlugin(Star):
         self.karma_rules: str = str(
             config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES
         )
-        # 注入给 AI 的系统上下文模板（见 DEFAULT_NETHERLINK_CONTEXT_TEMPLATE）。
+        # 注入给 AI 的系统上下文模板，两场景各一份（见
+        # DEFAULT_NETHERLINK_CONTEXT_QQ / DEFAULT_NETHERLINK_CONTEXT_GAME）。
         # 空串回退默认值——口径与 karma_rules / 工具描述一致：想「不注入任何内容」
         # 应当删掉模板里的标签行与内容（留空行），而不是靠清空配置项——后者会让
-        # 「先查好感」这条覆盖四个面的指引静默消失。
-        self.netherlink_context_template: str = str(
-            config.get("template_netherlink_context", DEFAULT_NETHERLINK_CONTEXT_TEMPLATE)
-            or DEFAULT_NETHERLINK_CONTEXT_TEMPLATE
+        # 「先查好感」这条覆盖游戏侧的指引静默消失。
+        self.netherlink_context_qq: str = str(
+            config.get("template_netherlink_context_qq", DEFAULT_NETHERLINK_CONTEXT_QQ)
+            or DEFAULT_NETHERLINK_CONTEXT_QQ
+        )
+        self.netherlink_context_game: str = str(
+            config.get("template_netherlink_context_game", DEFAULT_NETHERLINK_CONTEXT_GAME)
+            or DEFAULT_NETHERLINK_CONTEXT_GAME
         )
         # 游戏侧对话的用户消息附加说明模板（见 DEFAULT_NETHERLINK_REQUEST_TEMPLATE）。
         # 空串回退默认值，口径同上——它承载着「身份见 system 里那份」这条
@@ -1040,16 +1058,28 @@ class NetherLinkPlugin(Star):
         要求写在这里才能全覆盖——写进 `karma_rules` 对 QQ 侧普通对话无效
         （那条路径看不到 `karma_rules`）。
 
-        模板由 template_netherlink_context 配置，占位符定义见
-        DEFAULT_NETHERLINK_CONTEXT_TEMPLATE。返回值永不为空。
+        ⚠️ 两个场景的默认文案**故意不同**（2026-09-21 拆分）：QQ 侧不带
+        「先查好感」那句（主 agent 有会话记忆，每轮强制查会过频），游戏侧
+        多一句「历史里方括号标注说话人」（会话按服务器建，多个玩家共用）。
+        这**不是**「每次回复前先查好感覆盖四个面」那句注释的失效——它现在
+        覆盖的是模板默认值里有它的那份（游戏侧）；QQ 侧改成靠 AI 自行判断
+        何时查，是用户实测后的明确决定。
+
+        模板由 template_netherlink_context_qq / _game 配置，占位符定义见
+        DEFAULT_NETHERLINK_CONTEXT_QQ / DEFAULT_NETHERLINK_CONTEXT_GAME。
+        返回值永不为空。
         """
         values = self._admin_context_values(identity, is_admin, source, server_id)
+        if source == "qq":
+            tpl, default = self.netherlink_context_qq, DEFAULT_NETHERLINK_CONTEXT_QQ
+            label = "QQ 侧系统上下文"
+        else:
+            tpl, default = self.netherlink_context_game, DEFAULT_NETHERLINK_CONTEXT_GAME
+            label = "游戏侧系统上下文"
         return _render_template(
-            self.netherlink_context_template,
-            DEFAULT_NETHERLINK_CONTEXT_TEMPLATE,
-            values,
+            tpl, default, values,
             ("{origin}", "{roster}", "{identity}", "{is_admin}"),
-            "注入系统上下文",
+            label,
         )
 
     def _admin_context_values(
