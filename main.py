@@ -162,21 +162,21 @@ DEFAULT_ADVANCEMENT_PROMPT = '玩家[{player}]在服务器[{server}]里获得了
 # 现在固定为 "MC"，与 schema 的 hint 一致（「留空则显示为 [MC]」）。
 DEFAULT_SERVER_DISPLAY = "MC"
 
-# 机器人游戏内名字的兜底值。抽成常量是为了让 KARMA_HINT 能嵌它——
-# 工具描述里那句「调用前先用 <机器人名> 查询好感」必须与配置的 mc_bot_name
-# 一致，而后者的配置读取发生在 __init__ 里，常量定义期拿不到。
+# 机器人游戏内名字的兜底值。抽成常量只为让下面的配置读取有个单一来源，
+# 便于与别处的默认值对齐（原先是给 KARMA_HINT 嵌机器人名用的，
+# 那句文案现在不再提及机器人名）。
 DEFAULT_BOT_NAME = "ai"
 
-# 「调用前先查好感」的固定句。做成独立常量而不是写死在模板里，是为了让它
+# 「查好感」的固定句。做成独立常量而不是写死在模板里，是为了让它
 # 能以 {karma_hint} 占位符的形式被校验：模板可配，这个占位符不可配。
-KARMA_HINT = f"调用前先用 {DEFAULT_BOT_NAME} 查询好感以决定本次 cost。"
+KARMA_HINT = "调用前先查询好感以决定本次 cost。"
 
 # QQ 侧普通对话用的「需要时查好感」句。**刻意不带频率限定**（不说「每次」）——
 # QQ 侧走 AstrBot 主 agent，有会话记忆，每轮强制查会过频（用户实测：清空历史后
 # AI 会自行判断何时该查）。但它必须存在：`<netherlink_context>` 拆成 QQ/游戏两份
 # 后「先查好感」那句只留在游戏侧，而 karma_rules 全文并不含 `mc_karma`——不补这句，
 # QQ 侧注入的整段上下文里工具名一次都不出现，AI 只能靠猜。
-QQ_KARMA_HINT = "需要判断对方好感时,调用 mc_karma(delta 传 0)查询."
+QQ_KARMA_HINT = "互动涉及好感度时,调用 mc_karma"
 
 
 # 游戏侧对话的用户消息附加说明模板（**只用于这一条路径**）。
@@ -1239,7 +1239,7 @@ class NetherLinkPlugin(Star):
         return parts
 
     async def _build_qq_context(self, identity: str, is_admin: bool) -> str:
-        """拼装 QQ 侧注入给 AI 的全部上下文（钩子与工具共用）。
+        """拼装 QQ 侧注入给 AI 的全部上下文。
 
         QQ 侧走 AstrBot **主 agent**，它的 system_prompt 由框架内建、
         插件注不进去——唯一的入口是 `on_llm_request` 钩子。因此这里拼的
@@ -1257,6 +1257,11 @@ class NetherLinkPlugin(Star):
         # 工具名只能在这里点出来：拆成两份模板后「先查好感」留在游戏侧，
         # 而 karma_rules 全文不含 mc_karma——不补这句，QQ 侧整段上下文里
         # 一次都不提这个工具（它明明可用），AI 报价没有任何依据。
+        #
+        # ⚠️ 这句**刻意不带 delta 怎么写**：`karma_tool_desc`（工具描述，随
+        # schema 下发）已经写明「delta 为 0 时只查询，正数增加，负数扣除」。
+        # 本句只负责「有这个工具、什么时候用它」——重复参数说明既冗余，
+        # 也会与工具描述形成第二个真相来源。
         blocks.append(QQ_KARMA_HINT)
         # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
         # 删掉内层 agent 后这里成了它唯一的去处——不接回来，多服在线时
