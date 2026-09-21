@@ -2029,7 +2029,12 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     @filter.on_llm_request()
     async def inject_qq_identity(self, event, req) -> None:
-        """给 QQ 侧的 LLM 请求补上发起者身份。
+        """给 QQ 侧的 LLM 请求补上完整上下文。
+
+        注入的是 `_build_qq_context` 的全部产物：好感规则 + 查好感的引导 +
+        在线服务器清单 + 管理员与来源（`<netherlink_context>`）。
+        方法名保留 `inject_qq_identity` 是历史原因（起初只注身份），
+        改名会牵动 AstrBot 的 handler 注册，收益不大。
 
         为什么需要它：QQ 侧**普通对话**走的是 AstrBot 主 agent，其 system_prompt
         由框架内建、插件注入不进去（见 claude.md 的权限模型一节）。于是群友只是
@@ -2041,7 +2046,8 @@ class NetherLinkPlugin(Star):
 
         ⚠️ **这个钩子是全局的**：对**每一个** LLM 请求都会触发（包括其他插件的
         请求，如用户画像分析、AstrBot 自身的定时任务）。因此必须严格认准来源，
-        绝不污染别人的提示词——只处理**绑定群**的群消息。
+        绝不污染别人的提示词——只处理 **aiocqhttp 的群消息**（判据见下与
+        `_is_aiocqhttp_event`）：私聊、其他平台、其他插件构造的请求一律不碰。
 
         幂等：system_prompt 里已有 `<netherlink_context>` 就不再追加。
 
@@ -2049,9 +2055,9 @@ class NetherLinkPlugin(Star):
         `call_event_hook`），所以本钩子不会对游戏侧 agent 触发——那条路径的名单
         由 `_build_system_parts` 直接给。
 
-        ⚠️ 2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
-        推群），身份注入改为对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
-        发起者与管理员。判据见 `_is_aiocqhttp_event`，它仍挡住私聊与其他平台。
+        2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
+        推群），本钩子对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
+        发起者与管理员。
         """
         try:
             if not self._is_aiocqhttp_event(event):
