@@ -2324,6 +2324,18 @@ class NetherLinkPlugin(Star):
                 online = self._online_servers()
                 names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
                 return f"没有名为「{server}」的服务器在线。在线的是：{names}"
+            # 对称的那条：**没填 server 且多台在线**时同样提前拦下。
+            # 不拦的话消息会落到 _send_to_mc 的「拒发」分支，而它只返回 False、
+            # 不带原因，最终被翻译成「未收到服务器回执（可能仍在执行）」——
+            # 一句**事实上错误**的话（根本没发送），AI 据此判断「服务器掉线了」，
+            # 给用户的答复是「两台服务器都没回执，去问问管理员」（2026-09-22 实测）。
+            if not server and len(self._online_servers()) > 1:
+                online = self._online_servers()
+                names = "、".join(f"{d}（server_id: {s}）" for s, d in online)
+                return (
+                    f"当前有 {len(online)} 台 MC 服务器在线，必须用 server 参数指明"
+                    f"发往哪一台（填 server_id 或显示名都可）。在线的是：{names}"
+                )
             out = await self.exec_command_for(
                 initiator=identity, cmd=cmd, source="qq", qq=qq,
                 cost=cost, server_id=target,
