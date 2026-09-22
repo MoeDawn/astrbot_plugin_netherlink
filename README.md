@@ -146,15 +146,24 @@ AI:  （这类请求一律拒绝，不调用指令工具）
 ## 环境要求
 
 - AstrBot（含可用的 LLM 提供商）
-- Minecraft 服务端：**目前仅支持 Paper 26.3**（其他版本或服务端核心未适配）
+- Minecraft 服务端：**Paper 26.3 / Purpur 26.3 / Folia**（见下表）
 - 服务端已装并运行 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)
   —— 请用**同版本**的那一份（`0.0.2`）
 - AstrBot 只需配置，无需额外依赖
 
-> ⚠️ **版本限定**：本插件目前**只支持 Minecraft 26.3 的 Paper 端**。
-> 换到其他 MC 版本（如 1.21、1.20）或其他服务端核心（Spigot / Fabric / Forge 等）
-> **不能保证可用**——MC 端插件是按 Paper 26.3 的 API 编译的，且依赖一些 Paper
-> 特有的接口。适配其他版本需要单独改造 MC 端。
+> **支持的服务端核心（Minecraft 26.3）**
+
+| 核心 | 状态 | 说明 |
+|---|---|---|
+| **Paper** | ✅ 已验证 | 当前实机运行的就是它 |
+| **Purpur** | ✅ 可运行 | Paper 的分支，API 与事件完全一致 |
+| **Folia** | ⚠️ 已适配，未实机验证 | 代码已改用 Paper/Folia 共用的调度器并声明 `folia-supported`；但没有跑过真 Folia 服务端 |
+| Spigot | ❌ 不支持 | 依赖 Paper 专有扩展 `Bukkit.createCommandSender`（用来捕获指令输出），Spigot 没有这个 API |
+| Fabric / NeoForge | ❌ 不支持 | 它们是**模组加载器**而非 Bukkit 实现，需要单独移植的客户端版本 |
+
+> ⚠️ **版本限定**：MC 端只支持 **Minecraft 26.3**。换到其他 MC 版本（如 1.21、1.20）
+> 需要重新编译、并可能改动代码——本插件按 26.3 的 API 编译，
+> 且依赖 Paper 的 `AsyncChatEvent` 与 `Bukkit.createCommandSender`。
 
 ## 许可
 
