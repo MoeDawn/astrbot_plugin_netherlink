@@ -30,6 +30,17 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+# ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
+# `mc_platform` 用 `@register_platform_adapter` 把适配器类注册进
+# `platform_cls_map`——AstrBot 是「先加载插件、后初始化平台」，
+# 靠的正是这期间注册进去的类型。若改成函数内惰性导入，注册就发生得太晚：
+# 配置项明明在，框架却查不到该 type 的类，只会记一条「Platform adapter
+# not found」然后跳过（2026-09-22 实测踩到）。
+try:
+    from . import mc_platform  # noqa: F401
+except ImportError:  # 插件以顶层模块方式加载时
+    import mc_platform  # noqa: F401
+
 try:
     from .karma import (
         KARMA_MAX_RECORDS,
@@ -51,6 +62,29 @@ except ImportError:  # 插件以顶层模块方式加载时
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
+
+# 游戏侧在 AstrBot 里的**平台标识**。
+# 唯一来源：平台适配器（迁移后）、合成事件、注入钩子的分流判据、钩子内的 umo 拼装
+# 都读这一个常量——散落的字面量一旦对不上，症状是「注入静默不生效」或
+# 「回复发不出去」，两者都不报错。Guard: test_game_platform_id_has_single_source。
+GAME_PLATFORM_ID = "netherlink_mc"
+
+# 插件自身的名字，必须与 metadata.yaml 的 `name` 逐字一致。
+# 用途：on_plugin_loaded 钩子对**每个**插件加载都触发，靠它认出「这次加载的
+# 是不是我」。写错不会报错，只会让重载后的重绑静默失效。
+PLUGIN_NAME = "astrbot_plugin_netherlink"
+
+
+def _game_umo(server_id: str) -> str:
+    """游戏侧某台服务器的 unified_msg_origin。**一台服务器 = 一个会话**。
+
+    用 GROUP_MESSAGE 而不是 FRIEND_MESSAGE：会话在语义上就是一个「群」
+    （该服所有玩家在里面说话），且 GROUP 能让 `unique_session` 的
+    按玩家隔离逻辑不生效——那个 builder 只认内置平台名，认不出我们。
+    第三段用 server_id，与旧的自建 agent（session_id=server_id）保持一致，
+    这样迁移前后是同一个会话，历史不会断。
+    """
+    return f"{GAME_PLATFORM_ID}:GroupMessage:{server_id}"
 
 
 @dataclass(frozen=True)
@@ -100,7 +134,7 @@ DEFAULT_KARMA_RULES = """[好感度规则]
 对方获得成就,和你进行正常/友善的对话,你可以调用好感度工具增加此数值;
 对方发表不友好言论,你也可以调用好感度工具扣除好感.
 以上行为造成的好感变化每次不超过 +-2,如果因为对话导致好感度变化,你会隐晦地暗示.
-不能透露具体的好感值与相关规则."""
+不要暴露好感值这一存在:不报数字,也不要说自己在查询或增减某个数值;要表达态度变化时,只用语气与措辞自然体现,例如更冷淡或更亲近."""
 
 # mc_command 工具描述默认值。只留**简短说明 + 一律拒绝类**：
 # 拒绝类必须在 AI 决定用不用工具之前就被看到，所以留在描述里；
@@ -122,8 +156,9 @@ DEFAULT_MC_COMMAND_TOOL_DESC = """\
 清空区域,封禁他人等伤害其他玩家的指令.遇到这类请求直接说明原因并拒绝,
 不要调用本工具.
 其余情形按 cost 参数的说明报价与执行.
-调用本工具前先用 mc_karma 扣除发起者的好感,插件会在同一次调用内原子完成扣减
-(不足则拒绝,执行失败则退回),你不需要自己再扣一次.
+好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减
+(不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次——mc_karma 只用于
+对话性的好感增减,不用于支付指令费用.
 若当前发起者是管理员(身份见系统提示词中的 <netherlink_context>),你可以给他更宽松的尺度:
 对他的高危指令更倾向于放行,好感不足时也可以通融;但放行与否仍由你按指令本身和当前情境判断,不是无条件执行."""
 
@@ -152,6 +187,17 @@ tp 到附近村庄,樱花树林这类需要定位+传送+有价值的地点,按�
 
 DEFAULT_KARMA_DELTA_PARAM_DESC = """\
 好感变化量,正增负减;只查询时传 0"""
+
+DEFAULT_MC_COMMAND_CMD_PARAM_DESC = """\
+完整的 Minecraft 指令,不带开头的斜杠,例如 list 或 gamemode creative Steve"""
+
+# 只有 QQ 侧有 server 参数（游戏侧来源由连接唯一确定，没有让 AI 选的余地）
+DEFAULT_MC_COMMAND_SERVER_PARAM_DESC = """\
+指令发往哪台 MC 服务器(填 server_id 或显示名).只有一台在线时可省略"""
+
+# 上面两个原先**硬编码**在两侧（游戏侧 ToolSet 与顶层 docstring 的 Args 段），
+# 措辞还不一样——「同一段文本多处副本必然漂移」的典型。收成配置项后两侧
+# 共用一份默认值，用户也终于改得动。
 
 # 玩家获得成就时发给 AI 的提示词默认值
 DEFAULT_ADVANCEMENT_PROMPT = '玩家[{player}]在服务器[{server}]里获得了[{advancement}],请你以此更新对该玩家的好感值,并在游戏里发表自己的看法.好感增量按成就难度决定:越难获得的成就给得越多,范围 2 到 10.普通采集与探索类成就偏下限,稀有,危险或需要大量时间的成就偏上限.'
@@ -315,6 +361,12 @@ class NetherLinkPlugin(Star):
         # 游戏侧对话的系统提示词拼装：
         # [WebUI 人格（可开关）] + [自定义提示词] + [karma 好感规则（始终注入）]
         self.enable_webui_persona: bool = bool(config.get("enable_webui_persona", True))
+        # 游戏侧改走**原生平台适配器**（见 mc_platform.py）。
+        # 默认 **False**：该路径需要 AstrBot 重启一次才会实例化适配器，
+        # 首次打开开关就期待它工作会得到一个静默的「没有回复」。
+        # 打开后若适配器仍未实例化，_handle_bot_chat 会**响亮地**记一条
+        # ERROR 并回退到内置 agent，不会让玩家收到空回复。
+        self.enable_game_platform: bool = bool(config.get("enable_game_platform", True))
         # 注意：本项与下面三个 DEFAULT_* 的兜底口径不同，是有意为之，勿"修正"。
         # 本项允许留空关闭（消费点用 `if self.extra_system_prompt:` 判定，
         # WebUI 配置提示也写着"留空则不附加"），所以只有"键缺失"才回退默认值，
@@ -363,6 +415,16 @@ class NetherLinkPlugin(Star):
         self.mc_command_cost_param_desc: str = str(
             config.get("mc_command_cost_param_desc", DEFAULT_MC_COMMAND_COST_PARAM_DESC)
             or DEFAULT_MC_COMMAND_COST_PARAM_DESC
+        )
+        self.mc_command_cmd_param_desc: str = str(
+            config.get("mc_command_cmd_param_desc", DEFAULT_MC_COMMAND_CMD_PARAM_DESC)
+            or DEFAULT_MC_COMMAND_CMD_PARAM_DESC
+        )
+        self.mc_command_server_param_desc: str = str(
+            config.get(
+                "mc_command_server_param_desc", DEFAULT_MC_COMMAND_SERVER_PARAM_DESC
+            )
+            or DEFAULT_MC_COMMAND_SERVER_PARAM_DESC
         )
         self.karma_delta_param_desc: str = str(
             # 注意键名是 mc_karma_delta_param_desc（与 schema 逐字一致）。
@@ -508,6 +570,9 @@ class NetherLinkPlugin(Star):
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
         # 扫描过），因此放在 __init__ 末尾；失败不影响工具可用性
         self._apply_configured_tool_descs()
+        # 游戏侧平台适配器：补写配置项 + 把适配器重新绑到本实例。
+        # 放在最后：它依赖上面的配置解析结果（server_display_names 等）。
+        self._init_game_platform()
         logger.info("NetherLink 已加载")
 
     # ------------------------------------------------------------------
@@ -639,7 +704,11 @@ class NetherLinkPlugin(Star):
             # (工具名, 描述, {参数名: 参数说明})
             targets = [
                 ("mc_command", self.mc_command_tool_desc,
-                 {"cost": self.mc_command_cost_param_desc}),
+                 {
+                     "cmd": self.mc_command_cmd_param_desc,
+                     "cost": self.mc_command_cost_param_desc,
+                     "server": self.mc_command_server_param_desc,
+                 }),
                 ("mc_karma", self.karma_tool_desc,
                  {"delta": self.karma_delta_param_desc}),
             ]
@@ -1330,7 +1399,10 @@ class NetherLinkPlugin(Star):
                 prompt=prompt,
                 tools=self._build_mc_toolset(player, server_id),
                 contexts=history,
-                max_steps=4,
+                # 与 _handle_bot_chat 同口径：步数用尽时 runner 会拔掉工具并强推
+                # 一段（见那边的注释）。成就这条路径要「查好感 → 加好感 → 回话」，
+                # 4 步余量为零，同样会出现被强推的收尾。
+                max_steps=16,
                 tool_schema_mode=self._tool_schema_mode(),
             )
             text = getattr(resp, "completion_text", None)
@@ -1393,6 +1465,32 @@ class NetherLinkPlugin(Star):
             except Exception as e:
                 logger.error(f"NetherLink: 推送游戏内唤醒消息到群失败: {e}")
 
+        # ---- 分派：原生平台路径 vs 自建 agent 路径 ----
+        # 开关默认关；打开后需要 AstrBot 重启一次让框架实例化适配器。
+        # 适配器缺席时**回退**而不是丢消息——玩家不该因为一个配置项收到空回复。
+        if self.enable_game_platform:
+            adapter = self._resolve_game_adapter()
+            if adapter is not None and adapter._plugin is not None:
+                adapter.handle_bot_chat(
+                    player, server_id, text,
+                    display_name=self._mc_server_display(server_id),
+                )
+                return
+            # 回退是**设计内**的：绝不让玩家因为一个配置项收到空回复。
+            # 但话术要分清两种情况——重载后能自愈的，别吓唬用户去重启。
+            if adapter is not None:
+                logger.warning(
+                    "NetherLink: 游戏侧适配器在，但尚未绑定到当前插件实例"
+                    "（通常发生在刚重载插件之后）。本次回退到内置 agent，"
+                    "重载或重启后会自动恢复，无需手工干预。"
+                )
+            else:
+                logger.error(
+                    "NetherLink: enable_game_platform 已开启，但游戏侧平台适配器"
+                    "不存在——首次启用必须重启一次 AstrBot（框架只在启动时"
+                    "实例化平台）。本次回退到内置 agent。"
+                )
+        
         # 锁的粒度：会话是按**服务器**建的，所以并发也必须按服务器串行——
         # 否则同一个会话会被两条请求同时追加，历史交错。
         lock_key = server_id or player
@@ -1447,14 +1545,37 @@ class NetherLinkPlugin(Star):
                 except (json.JSONDecodeError, TypeError):
                     history = []
 
+                # 本轮发起者由**插件自己**写进事件：这条路径不是「监听进站消息
+                # 被动触发」，而是插件主动为某个玩家起一次对话。钩子
+                # （inject_qq_identity）只在「进站消息驱动」时能拿到发起者，
+                # 主动发起这条路径上它无从得知——所以这里必须先落一次 extra，
+                # 钩子读到就不会再覆盖。
+                try:
+                    event.set_extra("netherlink_direct_initiator", {
+                        "player": player, "server_id": server_id, "text": text,
+                    })
+                except Exception as e:
+                    # 合成 event / 测试替身未必有 set_extra。失败只意味着
+                    # 注入钩子读不到这份 extra、退回原行为，不该连累对话本身。
+                    logger.debug(f"NetherLink: 写入直发身份失败（忽略）: {e}")
                 llm_resp = await self.context.tool_loop_agent(
                     event=event,
                     chat_provider_id=prov_id,
                     system_prompt="\n\n".join(system_parts) if system_parts else None,
-                    prompt=f"{context_hint}\n\n玩家消息：{text}",
+                    # 当前发起者必须出现在**用户消息**里，且与历史里 `[玩家名] 内容`
+                    # 的写法一致——会话是按**服务器**建的，同一会话里有多名玩家，
+                    # 光靠 system 里那句「当前发起者:X」压不住历史里别人的发言，
+                    # AI 会把指令挂到历史里最近出现过的那个人身上（实测症状）。
+                    prompt=f"{context_hint}\n\n[{player}] {text}",
                     tools=self._build_mc_toolset(player, server_id),
                     contexts=history,
-                    max_steps=6,
+                    # 步数上限：原来写 6，对「查好感 → 报价 → 执行指令 → 组织回复」
+                    # 这种 4~5 步的流程只剩一两步余量。用尽时 runner 会**拔掉全部
+                    # 工具**并注入 MAX_STEPS_REACHED_PROMPT 强推最后一段
+                    # （tool_loop_agent_runner.py:1150-1171），于是同一轮里既有
+                    # 工具调用时产生的文字、又有被强推的收尾——玩家看到的就是
+                    # 「回复分成两段」。提到 16：正常流程用不到，纯粹堵死这条路。
+                    max_steps=16,
                     tool_schema_mode=self._tool_schema_mode(),
                 )
                 reply = (llm_resp.completion_text or "……").strip()[:MC_REPLY_MAX_LEN]
@@ -1479,6 +1600,100 @@ class NetherLinkPlugin(Star):
                 )
             finally:
                 self._player_llm_locks.pop(lock_key, None)
+
+    async def send_game_line(self, text: str, server_id: str = "") -> None:
+        """把一行文本按 `template_bot_reply_game` 渲染后发到**指定**服务器。
+
+        只发游戏。要不要同步到 QQ 由**调用方分成两步**决定（见
+        `sync_bot_reply_to_qq`）——早先把两件事塞进一个 `sync_qq` 布尔、
+        让它穿过「事件 → 适配器 → 插件」三层，结果漏传两次（2026-09-22）。
+        拆成两个方法后，**没有可以被忘记传的参数**。
+        """
+        line = self.templates["bot_reply_game"].replace(
+            "{bot}", self.mc_bot_name
+        ).replace("{text}", str(text).replace("§", "&"))
+        await self._send_to_mc({"type": "bot_reply", "line": line}, server_id)
+
+    async def sync_bot_reply_to_qq(self, text: str, server_id: str = "") -> None:
+        """把 AI 的回复同步到**所有绑定群**（游戏内对话 → QQ 群）。
+
+        只在「这是 AI 的最终答复」时调用。工具调用/思考那类过程消息不进群：
+        否则群里会被每一步工具调用刷屏，而群友要的是「AI 说了什么」。
+        """
+        await self._broadcast(
+            f"[{self._mc_server_display(server_id)}] {self.mc_bot_name}: {text}"
+        )
+        logger.info(
+            f"NetherLink: Ai 回复已同步到 {len(self.target_groups)} 个绑定群"
+        )
+
+    def _init_game_platform(self) -> None:
+        """补写平台配置项 + 把适配器重新绑到本插件实例。
+
+        **为什么只是补配置项、不自己造实例**：AstrBot 在 core_lifecycle 里
+        「先加载插件（plugin_manager.reload）后初始化平台
+        （platform_manager.initialize）」，所以只要 config["platform"]
+        里已有这条记录，重启后框架就会自己把适配器实例化。
+        自己 new 一个再塞进 platform_insts 也能跑，但那样会绕过框架的
+        生命周期管理（terminate/reload 都管不到它），得不偿失。
+
+        **幂等按 id 判**：不判的话每次插件重载都会往配置里追加一条，
+        越积越多；而且 `send_message` 只匹配**第一个**命中的实例，
+        旧实例会继续吃消息。
+        """
+        if self.context is None:
+            # 无上下文（测试替身、或框架尚未注入）时不存在平台管理器，
+            # 也没有可写的配置——静默跳过。口径与 _apply_configured_tool_descs
+            # 一致：这不是错误，刷一条 warning 只会污染日志。
+            return
+        try:
+            cfg = self.context.get_config()
+            platforms = cfg.get("platform")
+            if not isinstance(platforms, list):
+                logger.warning(
+                    "NetherLink: 配置里 platform 不是列表，跳过游戏侧平台注册"
+                )
+                return
+            # ⚠️ 只能 append 到**已存在的那个 list**，不能整体重新赋值：
+            # PlatformManager 在 __init__ 时就把 config["platform"] 存成了
+            # 活引用，重新赋值会让它继续指向旧 list。
+            wanted = {
+                "type": GAME_PLATFORM_ID,
+                "id": GAME_PLATFORM_ID,
+                "enable": True,
+                "netherlink_managed": True,
+            }
+            existing = None
+            for item in platforms:
+                if isinstance(item, dict) and str(item.get("id")) == GAME_PLATFORM_ID:
+                    existing = item
+                    break
+            if existing is None:
+                platforms.append(dict(wanted))
+                try:
+                    cfg.save_config()
+                except Exception as e:
+                    logger.error(f"NetherLink: 写入平台配置失败（重启后需手动添加）: {e}")
+                logger.info(
+                    "NetherLink: 已在配置里登记游戏侧平台 "
+                    f"（id={GAME_PLATFORM_ID}）。**需要重启 AstrBot 一次**，"
+                    "框架才会实例化它（也可在 WebUI 的平台列表里手动启用）。"
+                )
+            elif not existing.get("enable"):
+                # 用户手动关掉了这个平台——尊重它，不偷偷改回去
+                logger.warning(
+                    f"NetherLink: 平台 {GAME_PLATFORM_ID} 在配置里是 disabled，"
+                    "游戏内对话将无法工作。请在 WebUI 里启用它。"
+                )
+
+            # 绑定**不在这里做**：本方法跑在插件加载期，而框架要到
+            # `platform_manager.initialize()` 才实例化适配器——此处去看
+            # 必然「尚未实例化」，绑不上（2026-09-22 实测踩到）。
+            # 真正的绑定在 on_astrbot_loaded 钩子里（那个钩子按设计排在
+            # 平台初始化之后），见 _bind_game_platform。
+        except Exception as e:
+            # 平台注册失败不能让插件加载失败——其余功能（QQ 侧、好感度）照常
+            logger.error(f"NetherLink: 初始化游戏侧平台失败: {e}")
 
     async def _send_bot_reply(self, text: str, sync_qq: bool, server_id: str = ""):
         """向**来源那台**服务器广播机器人回复，可选同步到 QQ 群。
@@ -1553,10 +1768,9 @@ class NetherLinkPlugin(Star):
                     "properties": {
                         "cmd": {
                             "type": "string",
-                            "description": (
-                                "完整的 Minecraft 指令，不带开头斜杠，"
-                                "例如 'list' 或 'gamemode creative Steve'"
-                            ),
+                            # 走配置项：与 QQ 侧顶层工具同源，否则用户改了
+                            # 一边、另一边纹丝不动（本项目最忌讳的静默分叉）。
+                            "description": plugin.mc_command_cmd_param_desc,
                         },
                         "cost": {
                             "type": "number",
@@ -1617,9 +1831,9 @@ class NetherLinkPlugin(Star):
                     return "错误：delta 必须是数字。"
                 key = identity_key("game", player, "")
                 if not delta:
-                    return f"当前好感值：{await plugin._karma_get(key)}（范围 -50~100）。"
+                    return f"[{key}] 当前好感值：{await plugin._karma_get(key)}（范围 -50~100）。"
                 old, new = await plugin._karma_add(key, delta, origin="游戏内对话")
-                return f"好感值 {old} → {new}（本次 {delta:+d}）。"
+                return f"[{key}] 好感值 {old} → {new}（本次 {delta:+d}）。"
 
         # mc_karma 无条件在列（好感度是强制机制，没有能摘掉它的配置）
         return ToolSet([McCommandTool(), McKarmaTool()])
@@ -1865,6 +2079,58 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 解析注入平台标识失败: {e}")
         return ids
 
+    def _is_game_event(self, event) -> bool:
+        """这个事件是否来自**游戏侧**（插件自建 agent 的合成事件 / 迁移后的 MC 平台）。
+        
+        判据只看平台标识，不看消息类型——游戏侧没有「群/私聊」之分。
+        两个标识都要认：
+          · `netherlink_mc`——迁移到原生平台适配器后的真实事件；
+          · 合成事件那套（平台 id 也是 netherlink_mc，见 _make_synthetic_event）。
+        刻意**不**在本函数里判「是不是我们该管的场景」，那是调用方的事——
+        与 `_is_aiocqhttp_event` 的口径保持一致（那边也只判平台 + 消息类型）。
+        """
+        try:
+            return str(event.get_platform_id() or "") == GAME_PLATFORM_ID
+        except Exception:
+            return False
+    
+    async def _build_game_context(
+        self, identity: str, is_admin: bool, server_id: str = ""
+    ) -> str:
+        """拼装**游戏侧**注入给 AI 的全部上下文。
+        
+        与 `_build_qq_context` 的分工（两份内容刻意不同，见 claude.md 的
+        「三个面、两个场景」）：
+          · 游戏侧**含** `extra_system_prompt`（物品换好感那套三步流程是游戏侧专属）
+            与 **WebUI 人格**——自建 agent 不读人格，必须由插件带上；
+          · 游戏侧**不含**在线服务器清单（来源由连接唯一确定，没有让 AI 选的余地，
+            列出来反而会让它去填 `server` 参数）。
+        
+        段顺序与 `_build_system_parts` 一致：人格 → [自定义 + 好感规则] → 管理员上下文。
+        本函数是给**原生平台路径**用的；自建 agent 那条路径仍走 `_build_system_parts`。
+        """
+        parts: list = []
+        if self.enable_webui_persona:
+            try:
+                persona = await self.context.persona_manager.get_default_persona_v3(
+                    _game_umo(server_id)
+                )
+                if persona and persona.get("prompt"):
+                    parts.append(str(persona["prompt"]))
+            except Exception as e:
+                logger.warning(f"NetherLink: 读取 WebUI 人格失败（跳过）: {e}")
+        blocks: list = []
+        extra = str(self.extra_system_prompt or "")
+        extra = extra.replace("{server}", self._mc_server_display(server_id))
+        if extra.strip():
+            blocks.append(extra)
+        if self.karma_rules:
+            blocks.append(self.karma_rules)
+        if blocks:
+            parts.append("\n".join(blocks))
+        parts.append(self._admin_context(identity, is_admin, "game", server_id))
+        return "\n\n".join(parts)
+    
     def _is_aiocqhttp_event(self, event) -> bool:
         """这个事件是否来自 aiocqhttp 平台的**群消息**。
 
@@ -1948,6 +2214,7 @@ class NetherLinkPlugin(Star):
     async def _broadcast(self, text: str):
         """向所有绑定群推送文本。"""
         if not self.target_groups:
+            logger.warning("NetherLink: 没有配置绑定群，消息无处推送")
             return
         platform_id = self._resolve_qq_platform_id()
         if not platform_id:
@@ -2027,6 +2294,251 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # QQ 群消息 -> MC
     # ------------------------------------------------------------------
+    @filter.on_astrbot_loaded()
+    async def _bind_game_platform(self) -> None:
+        """启动完成时把游戏侧适配器绑到本插件实例（必要时补加载）。
+
+        必须是这个钩子，因为框架的启动顺序是：
+            plugin_manager.reload()         <- 插件加载，__init__ 在这里跑
+            platform_manager.initialize()   <- 平台实例化
+            on_astrbot_loaded 钩子          <- 本方法在这里跑
+        所以插件 __init__ 里去看适配器**必然**看到「尚未实例化」——
+        2026-09-22 实测就是这么踩到的（日志里那句是误导）。
+
+        同时做**补加载**：配置里有记录但框架没实例化出来时，由插件自己
+        调 load_platform 拉起来。比只提示用户重启可靠——在 WebUI 里改完
+        配置不重启也能生效。走 load_platform 而不是自己 new 实例，
+        否则会绕过框架的生命周期管理（terminate/reload 都管不到它）。
+        """
+        if not self.enable_game_platform:
+            return
+        try:
+            # 热重载时 `mc_platform` 会留在 `sys.modules` 里不被清掉
+            # （框架只按 `data.plugins.<本插件>.*` 前缀清理，那是 **main.py 的**
+            # 模块名，而本模块是以**顶层名** `mc_platform` 进缓存的）。
+            # 后果：`@register_platform_adapter` 不会重跑，注册表里没有我们的
+            # 类型，`have_adapter` 报 False → 需要重启。
+            # 与 `_init_game_platform` 里那句「框架自动重新导入」的假设正相反，
+            # 2026-09-22 用户实测到的重载报错就是这么来的。
+            self._drop_platform_module_for_reload()
+            adapter = self._resolve_game_adapter()
+            if adapter is None:
+                entry = self._game_platform_entry()
+                if entry is not None and entry.get("enable"):
+                    logger.info(
+                        f"NetherLink: 平台 {GAME_PLATFORM_ID} 尚未实例化，正在补加载"
+                    )
+                    await self.context.platform_manager.load_platform(entry)
+                    adapter = get_adapter(GAME_PLATFORM_ID)
+            if adapter is None:
+                logger.error(
+                    f"NetherLink: 平台 {GAME_PLATFORM_ID} 仍未能实例化——"
+                    "游戏内对话会回退到内置 agent。请查 AstrBot 启动日志里"
+                    "有无该平台的加载报错。"
+                )
+                return
+            # 与重载钩子同口径：实例可能是上次进程留下的旧类（改装后重启
+            # 尤其常见），只 bind_plugin 换不掉它的方法代码，得重建。
+            if type(adapter) is not self._current_adapter_class():
+                logger.warning(
+                    "NetherLink: 检测到陈旧的平台适配器实例（仍在运行旧代码），"
+                    "正在重建它"
+                )
+                entry = self._game_platform_entry()
+                if entry is not None:
+                    try:
+                        await self.context.platform_manager.reload(entry)
+                    except Exception as e:
+                        logger.error(f"NetherLink: 重建平台适配器失败: {e}")
+                    adapter = self._find_live_adapter()
+            if adapter is None:
+                logger.error(
+                    "NetherLink: 平台适配器重建后仍不可用，游戏内对话将回退。"
+                )
+                return
+            adapter.bind_plugin(self)
+            logger.info(
+                f"NetherLink: 游戏侧平台适配器已就绪并绑定（id={GAME_PLATFORM_ID}）"
+            )
+            self._warn_about_display_flags()
+        except Exception as e:
+            logger.error(f"NetherLink: 绑定游戏侧平台适配器失败: {e}")
+
+    @staticmethod
+    def _drop_platform_module_for_reload() -> None:
+        """热重载时主动丢弃 `mc_platform` 模块，让下次导入重新执行注册。
+
+        为什么需要它：平台类型是靠 `@register_platform_adapter` 在**导入期**
+        登记进 `platform_cls_map` 的。而插件重载时框架只清理
+        `data.plugins.<插件名>.*` 前缀下的模块；`mc_platform` 是以**顶层名**
+        进 `sys.modules` 的（main.py 的双形态导入兜底分支），不在清理范围内。
+        它留在缓存里 → 装饰器不重跑 → 注册表空 → 插件以为「适配器没实例化」，
+        提示用户重启（2026-09-22 实测）。
+
+        注意：框架的 `unregister_platform_adapters_by_module` 已经把旧的
+        类型从注册表摘掉了，所以这里只需让它**重新导入**一次即可补回来。
+        """
+        try:
+            import sys as _sys
+
+            _sys.modules.pop("mc_platform", None)
+        except Exception:
+            pass
+
+    def _find_live_adapter(self):
+        """在 `platform_insts` 里找**正在运行**的游戏侧适配器实例。
+
+        这是比模块级 `_ADAPTERS` 字典更权威的来源：热重载时 `mc_platform`
+        会被重新导入，那个字典是**新的、空的**，而实例是**老的**——只查字典
+        会以为「没有实例」，进而错误地再 `load_platform` 一个，
+        于是两个实例并存（`send_message` 只匹配第一个，回复可能走旧实例）。
+        """
+        try:
+            insts = getattr(self.context.platform_manager, "platform_insts", None)
+        except Exception:
+            return None
+        for inst in insts or []:
+            try:
+                if inst.meta().id == GAME_PLATFORM_ID:
+                    return inst
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _lookup_game_adapter():
+        """按模块级注册表取适配器（两种导入形态都试一次）。"""
+        for attempt in (0, 1):
+            try:
+                if attempt == 0:
+                    from mc_platform import get_adapter
+                else:
+                    from .mc_platform import get_adapter
+                return get_adapter(GAME_PLATFORM_ID)
+            except ImportError:
+                continue
+        return None
+
+    def _resolve_game_adapter(self):
+        """取游戏侧适配器：**先用运行中的实例**，其次才查模块注册表。"""
+        return self._find_live_adapter() or self._lookup_game_adapter()
+
+    def have_adapter(self) -> bool:
+        """平台路径此刻是否真的可用（适配器在、且已绑到本插件实例）。"""
+        try:
+            adapter = self._resolve_game_adapter()
+        except Exception:
+            return False
+        return adapter is not None and adapter._plugin is not None
+
+    @filter.on_plugin_loaded()
+    async def _rebind_game_platform_after_reload(self, metadata) -> None:
+        """插件热重载后，把**仍然活着的**适配器重新绑到新插件实例。
+
+        为什么需要它：重载会换掉插件对象，但框架只清理注册表里的类型，
+        **不停掉已在运行的平台实例**（star_manager 的 unregister 只动
+        `platform_cls_map`）。于是旧实例继续活着、却还引用着**旧插件对象**：
+        读的是旧配置，写的是旧状态。修法是每次插件加载完都重绑一次。
+
+        为什么不走适配器的模块级注册表（`get_adapter`）：重载时
+        `mc_platform` 会被重新导入，那个字典是**新的、空的**，而实例是
+        **老的**——两边对不上。实例存活的位置是 `platform_insts`，从那里找。
+        """
+        if not self.enable_game_platform:
+            return
+        try:
+            name = getattr(metadata, "name", "") or ""
+            # 钩子对**每个**插件加载都触发，必须只认自己
+            if name and name != PLUGIN_NAME:
+                return
+            inst = self._find_live_adapter()
+            if inst is None:
+                return  # 实例不存在（首次启用还没重启过），交给启动钩子处理
+
+            # ⚠️ 陈旧实例检测——这是本插件最难发现的一类 bug。
+            # 框架热重载只把**类**从注册表摘掉，**不停掉正在运行的实例**
+            # （star_manager 的 unregister 只动 platform_cls_map）。
+            # 而 Python 实例持有的是**类对象引用**：mc_platform 重新导入后
+            # 产生的是新类，旧实例仍指向旧类——于是它跑的是**旧代码**，
+            # 插件这边改多少遍、跑在游戏里的都还是老逻辑（2026-09-22 实测：
+            # 三轮修复全无效果，因为线上的实例根本没有那些代码）。
+            # 只 bind_plugin 换不掉实例的方法代码，必须**重建**。
+            if type(inst) is not self._current_adapter_class():
+                logger.warning(
+                    "NetherLink: 检测到陈旧的平台适配器实例（仍在运行旧代码），"
+                    "正在重建它"
+                )
+                entry = self._game_platform_entry()
+                if entry is not None:
+                    try:
+                        await self.context.platform_manager.reload(entry)
+                    except Exception as e:
+                        logger.error(f"NetherLink: 重建平台适配器失败: {e}")
+                    inst = self._find_live_adapter()
+            if inst is None:
+                return
+            inst.bind_plugin(self)
+            logger.info(
+                "NetherLink: 重载后已把游戏侧平台适配器重新绑定到新插件实例"
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 重载后重绑平台适配器失败: {e}")
+
+    @staticmethod
+    def _current_adapter_class():
+        """取**当前**模块里的适配器类，用于识别陈旧实例。
+
+        导入前先丢弃缓存的模块，确保拿到的是刚加载进来的那份定义。
+        """
+        try:
+            import sys as _sys
+
+            for attempt in (0, 1):
+                if attempt == 0:
+                    import mc_platform as _mod
+                else:
+                    from . import mc_platform as _mod
+                _sys.modules.setdefault("mc_platform", _mod)
+                return getattr(_mod, "NetherLinkMcAdapter", None)
+        except Exception:
+            return None
+
+    def _game_platform_entry(self) -> Optional[dict]:
+        """取配置里那条游戏侧平台记录（没有则 None）。"""
+        try:
+            platforms = self.context.get_config().get("platform")
+        except Exception:
+            return None
+        if not isinstance(platforms, list):
+            return None
+        for item in platforms:
+            if isinstance(item, dict) and str(item.get("id")) == GAME_PLATFORM_ID:
+                return item
+        return None
+
+    def _warn_about_display_flags(self) -> None:
+        """提示用户打开 AstrBot 的三个展示开关。
+
+        它们是「能不能看到 AI 在干什么」的总闸，且默认全关；不开的话
+        注入与工具都正常、只是界面上看不到，极易被当成「插件没生效」。
+        """
+        try:
+            ps = self.context.get_config().get("provider_settings") or {}
+        except Exception:
+            return
+        want = [
+            ("show_tool_use_status", "显示工具调用状态"),
+            ("show_tool_call_result", "显示工具返回结果"),
+            ("display_reasoning_text", "显示思考过程"),
+        ]
+        off = [label for key, label in want if not ps.get(key)]
+        if off:
+            logger.info(
+                "NetherLink: 以下 AstrBot 开关当前是关的，游戏内看不到 AI 的"
+                f"工具调用/思考：{chr(12289).join(off)}。"
+                "要看到请在 WebUI 的提供商设置里打开对应项。"
+            )
+
     @filter.on_llm_request()
     async def inject_qq_identity(self, event, req) -> None:
         """给 QQ 侧的 LLM 请求补上完整上下文。
@@ -2064,6 +2576,37 @@ class NetherLinkPlugin(Star):
                 return  # 私聊 / 其他平台 / 其他插件构造的请求，一律不碰
             if "<netherlink_context>" in (req.system_prompt or ""):
                 return  # 幂等：已经注入过
+            if self._is_game_event(event):
+                # 游戏侧的身份**唯一来源**是本函数算出来的这份，工具与提示词都读它。
+                # 为什么不能靠「AI 从历史里推断当前说话人」：会话是按**服务器**建的，
+                # 一台服上所有玩家共用一个会话，历史里只有 `[A] 帮我传送` 这类没有
+                # 主语的句子。AI 于是把指令挂到历史里最近出现过的那个人身上——
+                # 「指令执行到上一个说话人身上」就是这么来的（2026-09-21 实测）。
+                # 游戏侧的来源是 1:1 的（连接即身份），从 session_id 取出 server_id
+                # 即可，不必像 QQ 侧那样查平台实例。
+                direct = event.get_extra("netherlink_direct_initiator") or {}
+                player = str(
+                    direct.get("player")
+                    or event.get_sender_name()
+                    or event.get_sender_id()
+                    or "?"
+                )
+                server_id = str(direct.get("server_id") or event.get_session_id() or "")
+                # 工具在**同一次请求内**读这份 extra 取发起者，不再靠闭包
+                # （闭包那套只有在插件自建 agent 时才成立）。
+                event.set_extra(
+                    "netherlink_ctx",
+                    {"source": "game", "player": player, "server_id": server_id},
+                )
+                ctx = await self._build_game_context(
+                    player, self._game_is_admin(player), server_id
+                )
+                req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
+                logger.info(
+                    f"NetherLink: 已为游戏侧对话注入身份 —— 发起者 {player}，"
+                    f"服务器 {self._mc_server_display(event.get_session_id())}"
+                )
+                return
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
             is_admin = self._qq_is_admin(event)
             ctx = await self._build_qq_context(identity, is_admin)
@@ -2115,6 +2658,40 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: QQ->MC 转发失败: {e}")
 
     # ------------------------------------------------------------------
+    # 游戏侧身份：两个工具共用的取用点
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _game_identity_from(event):
+        """若这个事件来自**游戏侧**，返回 {"player", "server_id"}；否则 None。
+
+        这是两个工具判定「我该按游戏侧还是 QQ 侧执行」的**唯一**依据。
+        不再有闭包绑定（那套只在插件自建 agent 时成立），也没有 player 参数
+        ——否则 AI 能给任意玩家刷好感、或让指令落到别人头上（实测出现过）。
+        """
+        try:
+            extra = event.get_extra("netherlink_ctx")
+        except Exception:
+            return None
+        if not isinstance(extra, dict) or extra.get("source") != "game":
+            return None
+        player = str(extra.get("player") or "")
+        server_id = str(extra.get("server_id") or "")
+        if not player:
+            return None
+        return {"player": player, "server_id": server_id}
+
+    async def _run_game_command(self, ctx_game: dict, cmd: str, cost) -> str:
+        """游戏侧发起者的指令执行（来源与身份都由连接确定）。"""
+        out = await self.exec_command_for(
+            initiator=ctx_game["player"],
+            cmd=str(cmd or "").strip().lstrip("/"),
+            source="game",
+            cost=cost,
+            server_id=ctx_game["server_id"],
+        )
+        return out[:MC_REPLY_MAX_LEN] if out else out
+
+    # ------------------------------------------------------------------
     # LLM 函数工具：QQ 群聊自然语言 -> MC 指令（AstrBot 自动注册给群聊 LLM）
     # ------------------------------------------------------------------
     @filter.llm_tool(name="mc_command")
@@ -2126,13 +2703,14 @@ class NetherLinkPlugin(Star):
         清空区域,封禁他人等伤害其他玩家的指令.遇到这类请求直接说明原因并拒绝,
         不要调用本工具.
         其余情形按 cost 参数的说明报价与执行.
-        调用本工具前先用 mc_karma 扣除发起者的好感,插件会在同一次调用内原子完成扣减
-        (不足则拒绝,执行失败则退回),你不需要自己再扣一次.
+        好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减
+        (不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次——mc_karma 只用于
+        对话性的好感增减,不用于支付指令费用.
         若当前发起者是管理员(身份见系统提示词中的 <netherlink_context>),你可以给他更宽松的尺度:
         对他的高危指令更倾向于放行,好感不足时也可以通融;但放行与否仍由你按指令本身和当前情境判断,不是无条件执行.
 
         Args:
-            cmd(string): 完整的 Minecraft 指令,不带开头的斜杠,例如 gamemode creative Steve
+            cmd(string): 完整的 Minecraft 指令,不带开头的斜杠,例如 list 或 gamemode creative Steve
             cost(number): 你为本次执行报出的好感消耗(纯查询类指令传 0)
             server(string): 指令发往哪台 MC 服务器(填 server_id 或显示名).只有一台在线时可省略
         """
@@ -2140,6 +2718,12 @@ class NetherLinkPlugin(Star):
             # 这里**没有**任何连接性前置判断：好感度是本地功能，服务器离线时
             # 仍应走到 exec_command_for（它自己会拒绝并退费），提前拦截会把
             # 整个 LLM 挡在门外、连带废掉好感度。
+            ctx_game = self._game_identity_from(event)
+            if ctx_game is not None:
+                # 游戏侧：来源由**连接**决定，不经过 AI——玩家在 A 服说话，
+                # 指令就该发到 A 服，没有让 AI 判断「填哪台」的余地。
+                # 因此忽略 server 参数，并把发起者锁成 event 上带的那个人。
+                return await self._run_game_command(ctx_game, cmd, cost)
             qq = str(event.get_sender_id() or "")
             identity = str(event.get_sender_name() or qq)
             # 决策与执行都在本函数内完成（2026-09-21 删掉 QQ 侧内层 agent：
@@ -2173,12 +2757,20 @@ class NetherLinkPlugin(Star):
         Args:
             delta(number): 好感变化量,正增负减;只查询时传 0"""
         try:
-            qq = str(event.get_sender_id() or "")
-            key = identity_key("qq", str(event.get_sender_name() or qq), qq)
+            ctx_game = self._game_identity_from(event)
+            if ctx_game is not None:
+                # 游戏侧的 key 空间是 mc:{玩家名}，与 QQ 侧的 qq:{QQ号} 相互独立
+                # （同一个人在两边是两份好感，这是刻意的，不做映射）。
+                key = identity_key("game", ctx_game["player"], "")
+                origin = "游戏内对话"
+            else:
+                qq = str(event.get_sender_id() or "")
+                key = identity_key("qq", str(event.get_sender_name() or qq), qq)
+                origin = "QQ 对话"
             if not int(delta or 0):
-                return f"当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
-            old, new = await self._karma_add(key, int(delta), origin="QQ 对话")
-            return f"好感值 {old} → {new}（本次 {int(delta):+d}）。"
+                return f"[{key}] 当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
+            old, new = await self._karma_add(key, int(delta), origin=origin)
+            return f"[{key}] 好感值 {old} → {new}（本次 {int(delta):+d}）。"
         except Exception as e:
             logger.error(f"NetherLink: mc_karma 执行失败: {e}")
             return f"执行出错: {e}"
