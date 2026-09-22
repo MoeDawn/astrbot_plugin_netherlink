@@ -7,7 +7,7 @@
 - **游戏内机器人对话**：玩家发唤醒词开头的话即可与 AI 对话，玩家的话与 AI 的回复都同步到群
 - **好感度系统**：AI 依对话与请求自主增减好感，好感存在服务端，影响它的态度与是否愿意办事
 
-配套的 MC 服务端插件：[ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)
+配套的 MC 服务端插件：[netherlink-server](https://github.com/MoeDawn/netherlink-server)
 
 ## 效果示例
 
@@ -44,7 +44,7 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 > `ws_ports` 里写的 `server-name` 要与 MC 端 `config.yml` 的 `server-name` 对应；
 > 只写端口时则直接采用 MC 端上报的那个名字。
 
-还需要：AstrBot 已配好可用的 **LLM 提供商**（对话与指令解析都依赖它），以及 MC 端已装 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)。
+还需要：AstrBot 已配好可用的 **LLM 提供商**（对话与指令解析都依赖它），以及 MC 端已装 [netherlink-server](https://github.com/MoeDawn/netherlink-server)。
 
 ## 配置项
 
@@ -147,7 +147,7 @@ AI:  （这类请求一律拒绝，不调用指令工具）
 
 - AstrBot（含可用的 LLM 提供商）
 - Minecraft 服务端：**Paper 26.3 / Purpur 26.3 / Folia**（见下表）
-- 服务端已装并运行 [ab-netherlink-paper](https://github.com/MoeDawn/ab-netherlink-paper)
+- 服务端已装并运行 [netherlink-server](https://github.com/MoeDawn/netherlink-server)
   —— 请用**同版本**的那一份（`0.0.2`）
 - AstrBot 只需配置，无需额外依赖
 
