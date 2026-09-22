@@ -148,7 +148,7 @@ AI:  （这类请求一律拒绝，不调用指令工具）
 - AstrBot（含可用的 LLM 提供商）
 - Minecraft 服务端：**Paper 26.3 / Purpur 26.3 / Folia**（见下表）
 - 服务端已装并运行 [netherlink-server](https://github.com/MoeDawn/netherlink-server)
-  —— 请用**同版本**的那一份（`0.0.2`）
+  —— 请用**同版本**的那一份（`0.1.0`）
 - AstrBot 只需配置，无需额外依赖
 
 > **支持的服务端核心（Minecraft 26.3）**
