@@ -191,10 +191,15 @@ class NetherLinkMcAdapter(Platform):
     # ------------------------------------------------------------------
     # 入站：玩家消息 -> 真实事件 -> 交给 pipeline
     # ------------------------------------------------------------------
-    def handle_bot_chat(
-        self, player: str, server_id: str, text: str, display_name: str = ""
+    def _commit(
+        self,
+        player: str,
+        server_id: str,
+        text: str,
+        display_name: str = "",
+        kind: str = "chat",
     ) -> None:
-        """把一个游戏内玩家消息变成 AstrBot 事件，推进事件队列。
+        """把一条游戏侧消息变成 AstrBot 事件并推进队列（各入口共用）。
 
         - `session_id` 用 **server_id**：一台服一个会话（用户明确要求）。
         - `type` 用 GROUP_MESSAGE：语义上就是一个「群」，且能让
@@ -202,6 +207,9 @@ class NetherLinkMcAdapter(Platform):
           内置平台名，认不出我们）。
         - `self_id` 用 PLATFORM_ID：与 sender_id（玩家名）不同即可，
           避免被 `ignore_bot_self_message` 误判成机器人自己的消息。
+        - `kind`：`chat` = 玩家在说话；`advancement` = 服务器发来的系统通知，
+          不是玩家说的话（2026-09-22 用户实测：AI 会把成就通知当成玩家在
+          邀功）。放进 extra 供注入钩子区分。
         """
         if not server_id:
             logger.warning(
@@ -218,14 +226,14 @@ class NetherLinkMcAdapter(Platform):
             # ⚠️ **必须建 Group**：没有它 `get_group_id()` 返回空，
             # AstrBot 的 `get_event_auto_name` 就会退回用**发送者名字**
             # 给会话命名——于是对话列表里「群名」显示成了玩家昵称
-            # （2026-09-22 用户实测到的）。g/g_name 用服务器显示名，
+            # （2026-09-22 用户实测到的）。group_name 用服务器显示名，
             # 认不出时退回 server_id。
             msg.group = Group(
                 group_id=server_id, group_name=display_name or server_id
             )
             msg.message = [Plain(text)]
             msg.message_str = text
-            msg.raw_message = {"type": "bot_chat", "player": player, "text": text}
+            msg.raw_message = {"type": kind, "player": player, "text": text}
 
             event = NetherLinkMcEvent(
                 message_str=text,
@@ -238,7 +246,12 @@ class NetherLinkMcAdapter(Platform):
             # （闭包只在插件自建 agent 时才成立）。
             event.set_extra(
                 "netherlink_ctx",
-                {"source": "game", "player": player, "server_id": server_id},
+                {
+                    "source": "game",
+                    "player": player,
+                    "server_id": server_id,
+                    "kind": kind,
+                },
             )
             # 关掉流式：MC 聊天框里一条一条刷没有意义，而且流式会把
             # 「🔨 调用工具」之类的通知拆散。**非流式路径**才会把
@@ -247,10 +260,28 @@ class NetherLinkMcAdapter(Platform):
             event.set_extra("enable_streaming", False)
             self.commit_event(event)
             logger.info(
-                f"NetherLink: 游戏内消息已入队 [{server_id}] <{player}> {text[:40]}"
+                f"NetherLink: 游戏内消息已入队 [{server_id}] <{player}> "
+                f"({kind}) {text[:40]}"
             )
         except Exception as e:
             logger.error(f"NetherLink: 构造游戏侧事件失败: {e}")
+
+    def handle_bot_chat(
+        self, player: str, server_id: str, text: str, display_name: str = ""
+    ) -> None:
+        """玩家用唤醒词对 AI 说话。"""
+        self._commit(player, server_id, text, display_name, kind="chat")
+
+    def handle_advancement(
+        self, player: str, server_id: str, text: str, display_name: str = ""
+    ) -> None:
+        """玩家获得成就——**服务器发来的系统通知**，不是玩家说的话。
+
+        `text` 是插件按 `advancement_prompt` 渲染好的整段（占位符已替换成
+        客观事实）。走同一条管线的好处：人格、工具、出站推群全部复用，
+        而且与玩家对话进**同一个会话**，AI 有上下文。
+        """
+        self._commit(player, server_id, text, display_name, kind="advancement")
 
     # ------------------------------------------------------------------
     # 出站：AstrBot 要发给这个「群」的内容 -> MC 下行

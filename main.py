@@ -134,15 +134,16 @@ DEFAULT_KARMA_RULES = """[好感度规则]
 对方获得成就,和你进行正常/友善的对话,你可以调用好感度工具增加此数值;
 对方发表不友好言论,你也可以调用好感度工具扣除好感.
 以上行为造成的好感变化每次不超过 +-2,如果因为对话导致好感度变化,你会隐晦地暗示.
+互动涉及好感度时,调用 mc_karma.
 不要暴露好感值这一存在:不报数字,也不要说自己在查询或增减某个数值;要表达态度变化时,只用语气与措辞自然体现,例如更冷淡或更亲近."""
 
 # mc_command 工具描述默认值。只留**简短说明 + 一律拒绝类**：
 # 拒绝类必须在 AI 决定用不用工具之前就被看到，所以留在描述里；
 # 价目表与「免费/可执行/超标计价」属于「怎么报价」，放进 cost 参数说明
-# （配合 skills_like 模式，闲聊时不加载那张表）。
+# （2026-09-22 起是 full 模式：每轮全量下发，价差表也看得见。）
 #
 # ⚠️ 本描述同时挂给**两个面**：QQ 侧顶层 `@filter.llm_tool` 注册的 mc_command、
-# 游戏侧 `_build_mc_toolset`。（2026-09-21 删掉 QQ 侧内层 agent 之前是三个面。）
+# 游戏侧同一份描述（2026-09-22 起游戏侧也走全局工具表）。
 # 两面通常都拿得到 `<netherlink_context>`，但注入有若干不生效的边界（非
 # aiocqhttp 平台、私聊、钩子抛错被吞），所以这里绝不能断言「名单见
 # netherlink_context」——读不到的读者找不到名单，会把管理员的合法请求当成
@@ -153,8 +154,9 @@ DEFAULT_MC_COMMAND_TOOL_DESC = """\
 执行前先按下述情形判断:
 一律拒绝的指令(无论对方好感多少都不执行):清空或重置成就进度这类能让对方
 反复刷成就的,召唤末影龙/凋零等明显影响服务器的高危指令,破坏他人建筑,
-清空区域,封禁他人等伤害其他玩家的指令.遇到这类请求直接说明原因并拒绝,
-不要调用本工具.
+清空区域,封禁他人等伤害其他玩家的指令.另外,
+刷怪笼(spawner)原版无法获得的方块,与各类刷怪蛋(spawn_egg)一律不给玩家,玩家头颅除外.
+遇到这类请求直接说明原因并拒绝,不要调用本工具.
 其余情形按 cost 参数的说明报价与执行.
 好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减
 (不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次——mc_karma 只用于
@@ -181,9 +183,12 @@ tp 到附近村庄,樱花树林这类需要定位+传送+有价值的地点,按�
 原版无法获得但不危害游戏的物品(超出附魔上限的附魔,指定数值的生物等)15 起.
 三,超规格物品按超标程度计价:给出属性或附魔超出原版正常范围的物品时,
 超标越多收费越高;轻微超标按普通物品价格上浮,严重超标(如超出附魔上限数倍)
-应从高报价,对方好感不足就拒绝.
+应从高报价,对方好感不足就拒绝.完全超标(远超原版上限,明显不该存在于正常
+游戏中的物品)则直接拒绝执行,不要调用 mc_command.
 以上仅为参考,其他指令的消耗自行判断;若本次消耗大于对方剩余好感,
-你会拒绝执行并隐晦地透露原因."""
+你会拒绝执行并隐晦地透露原因.
+注意:部分指令(tp 传送/kill 等)服务器执行后不会返回任何输出,这是正常的,
+不要因为没看到输出就以为失败或重复执行."""
 
 DEFAULT_KARMA_DELTA_PARAM_DESC = """\
 好感变化量,正增负减;只查询时传 0"""
@@ -200,7 +205,7 @@ DEFAULT_MC_COMMAND_SERVER_PARAM_DESC = """\
 # 共用一份默认值，用户也终于改得动。
 
 # 玩家获得成就时发给 AI 的提示词默认值
-DEFAULT_ADVANCEMENT_PROMPT = '玩家[{player}]在服务器[{server}]里获得了[{advancement}],请你以此更新对该玩家的好感值,并在游戏里发表自己的看法.好感增量按成就难度决定:越难获得的成就给得越多,范围 2 到 10.普通采集与探索类成就偏下限,稀有,危险或需要大量时间的成就偏上限.'
+DEFAULT_ADVANCEMENT_PROMPT = '系统通知:服务器[{server}]记录到玩家[{player}]达成了成就[{advancement}].这不是玩家对你说的话,而是服务器派给你的一个任务:请据此更新对该玩家的好感值,并主动对他道贺.好感增量按成就难度决定:越难获得的成就给得越多,范围 2 到 10.普通采集与探索类成就偏下限,稀有,危险或需要大量时间的成就偏上限.'
 
 # 游戏内对话附加提示词默认值，{server} 会替换为服务器名
 # 没有为某台服务器配 `server_display_names` 时的兜底显示名。
@@ -208,118 +213,86 @@ DEFAULT_ADVANCEMENT_PROMPT = '玩家[{player}]在服务器[{server}]里获得了
 # 现在固定为 "MC"，与 schema 的 hint 一致（「留空则显示为 [MC]」）。
 DEFAULT_SERVER_DISPLAY = "MC"
 
+# 游戏侧注入给 AI 的系统上下文模板（**与 QQ 侧对称**）。
+# 占位符：{identity} 当前发起者、{is_admin} 是/不是管理员（已含结尾句号）、
+#        {server} 服务器显示名。
+# 2026-09-22 由 extra_system_prompt 改名而来——身份行从代码生成改为模板承载，
+# 用户就能在配置界面里看到并修改它（与 QQ 侧那份同等可配）。
+#
+# ⚠️ 外层的 <netherlink_context> 标签**不能删**：mc_command 的工具描述里写着
+# 「身份见系统提示词中的 <netherlink_context>」。游戏侧少了它，AI 在系统提示词
+# 里找不到该标签，就会把管理员当普通玩家——第五个坑（同名标签互相遮蔽）的
+# 后遗症会原地复发。
+#
+# ⚠️ 末尾「先查一次好感」那句也是游戏侧专属，别顺手删掉：游戏侧会话按**服务器**
+# 建、玩家进出频繁，每轮都该查；QQ 侧刻意不查（主 agent 有会话记忆，每轮强制
+# 查会过频）。
+DEFAULT_NETHERLINK_CONTEXT_GAME = """<netherlink_context>
+你当前处于一个我的世界服务器内,服务器名称为{server}.
+当前发起者:{identity},{is_admin}
+玩家在游戏公屏里对你说的话,群名与玩家 ID 由 AstrBot 自行附带,不需要你复述.
+玩家试图或暗示要给你东西时(例如"我给你金锭"),不要仅凭这句话就道谢并加好感——
+东西还没真的到你手上.严格按以下顺序操作,不得跳过任何一步:
+第一步,先用 data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}] 查看对方背包,
+确认里面确实有所说的物品,以及实际有几个.
+第二步,只清理对方明确说出的那个数量,例如对方说给 3 个钻石,
+就执行 clear <玩家ID> minecraft:diamond 3.
+绝不能不带数量执行 clear,那会清空该物品的全部.
+第三步,物品确认取走后,才按物品价值调用好感度工具增加好感,
+并在回话里体现出东西已经拿到.
+若第一步没搜到该物品,直接告诉对方背包里没有,不要执行 clear,也不要加好感.
+对方只是口头说说,没走到第二步时,不要当作已经收到了东西.
+回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.
+</netherlink_context>"""
+
+# QQ 侧注入给 AI 的系统上下文模板（**游戏侧不用它**）。
+# 游戏侧那份并入「游戏内自定义提示词」，身份由代码生成——见 _admin_context。
+# 占位符：{identity} 当前发起者、{is_admin} 是/不是管理员（已含结尾句号）。
+# （{origin} / {roster} 已于 2026-09-22 删除，见 _admin_context_values）
+DEFAULT_NETHERLINK_CONTEXT_QQ = """\
+<netherlink_context>
+当前发起者:{identity},{is_admin}
+</netherlink_context>"""
+
 # 机器人游戏内名字的兜底值。抽成常量只为让下面的配置读取有个单一来源，
-# 便于与别处的默认值对齐（原先是给 KARMA_HINT 嵌机器人名用的，
+# 便于与别处的默认值对齐。
 # 那句文案现在不再提及机器人名）。
 DEFAULT_BOT_NAME = "ai"
 
-# 「查好感」的固定句。做成独立常量而不是写死在模板里，是为了让它
-# 能以 {karma_hint} 占位符的形式被校验：模板可配，这个占位符不可配。
-KARMA_HINT = "调用前先查询好感以决定本次 cost。"
 
-# QQ 侧普通对话用的「需要时查好感」句。**刻意不带频率限定**（不说「每次」）——
-# QQ 侧走 AstrBot 主 agent，有会话记忆，每轮强制查会过频（用户实测：清空历史后
-# AI 会自行判断何时该查）。但它必须存在：`<netherlink_context>` 拆成 QQ/游戏两份
-# 后「先查好感」那句只留在游戏侧，而 karma_rules 全文并不含 `mc_karma`——不补这句，
-# QQ 侧注入的整段上下文里工具名一次都不出现，AI 只能靠猜。
-QQ_KARMA_HINT = "互动涉及好感度时,调用 mc_karma"
-
-
-# 游戏侧对话的用户消息附加说明模板（**只用于这一条路径**）。
-# ⚠️ 标签名绝不能与 DEFAULT_NETHERLINK_CONTEXT_QQ/_GAME 的标签名相同：
-# 那个在 system_prompt 里（含管理员名单与判定），这个在**用户消息**里，
-# 若同名，AI 会采信更靠后的这份（没有名单），把管理员当成普通玩家拒绝执行。
-# 2026-09-19 实测到的正是这个现象，故从 <netherlink_context> 改名为
-# <netherlink_request>。占位符：
-#   {karma_hint} 「调用前先查好感」的固定句（必需，见上）
-DEFAULT_NETHERLINK_REQUEST_TEMPLATE = """\
-<netherlink_request>
-本节说明该如何使用工具,玩家身份见系统提示词中的 netherlink_context.
-如果玩家想执行 MC 指令(改模式/传送/查名单等),调用 mc_command 工具.
-{karma_hint}
-</netherlink_request>"""
-
-DEFAULT_EXTRA_SYSTEM_PROMPT = """你当前处于一个我的世界服务器内,服务器名称为{server}.
-玩家想用物品换取好感时,严格按以下顺序操作,不得跳过任何一步:
-第一步,先用 data get entity <玩家ID> Inventory 或
-data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}] 查看对方背包,
-确认里面确实有所说的物品,以及实际有几个.
-第二步,只清理对方明确说出的那个数量,例如对方说用 3 个钻石,
-就执行 clear <玩家ID> minecraft:diamond 3.
-绝不能不带数量执行 clear,那会清空该物品的全部.
-第三步,物品确认取走后,再按物品价值调用好感度工具增加好感.
-若第一步没搜到该物品,直接告诉对方背包里没有,不要执行 clear."""
-
-# 注入给 AI 的系统上下文模板，按**场景**拆成两份（游戏侧对话/成就用游戏版；
-# QQ 侧、即 on_llm_request 钩子注入的那条路径用 QQ 版）。
-# 为什么做成模板：工具描述与参数说明早已可配，唯独这段硬编码——而它恰恰是
-# 几个面**唯一**的共同内容，改一处即全覆盖。占位符（两份相同）：
-#   {origin}   来源整行（不含换行，模板里让它独占一行）
-#   {roster}   管理员名单整行（不含换行；未配置时为「(未配置)」）
-#   {identity} 当前发起者
-#   {is_admin} 是/不是管理员（已含结尾句号）
-# 两份的差异是**刻意的**，不是历史包袱（2026-09-21 拆分）：
-#   · QQ 侧不带「先查好感」那句——主 agent 有会话记忆，每轮强制查会过频
-#     （用户实测：清空历史后 AI 会自行判断何时该查）。
-#   · 游戏侧多一句「历史里方括号标注说话人」——会话按**服务器**建，同一
-#     会话里有多名玩家的发言，不说明格式 AI 会把别人的话当成当前发起者说的。
-# 默认值有守卫整串比对（与 schema 的 default 逐字一致）。
-DEFAULT_NETHERLINK_CONTEXT_QQ = """\
-<netherlink_context>
-{origin}
-{roster}
-当前发起者:{identity},{is_admin}
-</netherlink_context>"""
-
-DEFAULT_NETHERLINK_CONTEXT_GAME = """\
-<netherlink_context>
-{origin}
-{roster}
-当前发起者:{identity},{is_admin}
-对话历史里,每条玩家发言以方括号里的玩家名开头,如 [某玩家名] 你好,
-方括号里的是说话人,不要把他人的发言当成当前发起者说的.
-消息开头的唤醒词是玩家召唤你的口令,不属于消息内容,按它后面的内容理解即可.
-回复之前,先调用 mc_karma(delta 传 0)查一次当前发起者的好感值,再据此决定说话方式与态度.
-</netherlink_context>"""
 
 
 def _render_template(tpl: str, default: str, values: dict, required: tuple, label: str) -> str:
     """渲染注入模板；占位符写坏时回退默认模板并记 warning。
 
-    判据：渲染结果里**仍有必需占位符的字面量**就算坏。它同时抓住两种写法：
-      1. 少写了必需占位符 -> str.format 抛 KeyError -> _fmt 把**整串原样返回**
-         （所有占位符都成了字面量）；
-      2. 多写了一个不存在的占位符（如 {foo}）-> 有值能填的位置照常填，
-         {foo} 留在结果里。
-    之所以必须校验：用户把 {identity} 写成 {foo} 时 _fmt 会静默原样返回，
-    用户拿到的是一段带字面量 {foo} 的文本——而这段文本承载着「先查好感」这条
-    覆盖四个面的唯一指引（karma_rules 到不了 QQ 侧普通对话），宁可回退也不能发坏文本。
+    ⚠️ **不能直接用 `str.format`**：模板里合法地会含 NBT 语法，例如
+         data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}]
+    其中 `{id:` 会被 `str.format` 当成格式化占位符并抛 `KeyError: 'id'`，
+    于是**整段模板被判坏、静默回退**——用户改了默认值却永远看不到效果
+    （2026-09-22 实测到的正是这个）。所以这里只**逐个替换已知占位符**，
+    其余 `{...}` 原样保留。
 
-    已知边界（不覆盖）：坏格式说明符（如 {identity:d}）会让 str.format 抛
-    ValueError，_fmt 只兜 KeyError/IndexError，异常会冒出去。这是本项目所有
-    模板共有的既有行为，不在本次范围内。
+    两道校验缺一不可：
+      a. 输入模板必须含齐必需占位符 —— 用户把 `{identity}` 整段删掉时，
+         替换阶段不会碰它、结果里也没有残留，只查结果查不出来，
+         身份信息会被静默丢掉（正是「AI 认不出管理员」的成因）。
+      b. 渲染结果里不得残留必需占位符的字面量 —— 兜住 `{foo}` 这类拼错。
     """
-    # 两道校验缺一不可：
-    #   a. 输入模板必须含齐必需占位符 —— 用户把 {identity} 整段删掉时，
-    #      str.format 不会碰它、渲染结果里也没有残留，只查结果查不出来，
-    #      身份信息会被静默丢掉（正是坑五那个「AI 认不出管理员」的成因）。
-    #   b. 渲染结果里不得残留必需占位符的字面量 —— 兜住 {foo} 这类拼错，
-    #      以及少写必需占位符导致 str.format 抛 KeyError、_fmt 把整串原样返回。
     missing = [ph for ph in required if ph not in tpl]
-    try:
-        text = tpl.format(**values)
-    except (KeyError, IndexError):
-        text = tpl  # 与 _fmt 同口径
+
+    def _fill(text: str) -> str:
+        for key, val in values.items():
+            text = text.replace("{" + key + "}", str(val))
+        return text
+
+    text = _fill(tpl)
     if missing or any(ph in text for ph in required):
         logger.warning(
             f"NetherLink: {label} 的模板占位符有误"
             f"（{'漏写 ' + str(missing) if missing else '渲染后仍残留必需占位符'}），"
             f"已回退默认模板。必需占位符：{required}"
         )
-        try:
-            return default.format(**values)
-        except (KeyError, IndexError):
-            return default
+        return _fill(default)
     return text
 
 
@@ -364,16 +337,23 @@ class NetherLinkPlugin(Star):
         # 游戏侧改走**原生平台适配器**（见 mc_platform.py）。
         # 默认 **False**：该路径需要 AstrBot 重启一次才会实例化适配器，
         # 首次打开开关就期待它工作会得到一个静默的「没有回复」。
-        # 打开后若适配器仍未实例化，_handle_bot_chat 会**响亮地**记一条
-        # ERROR 并回退到内置 agent，不会让玩家收到空回复。
+        # 打开后若适配器仍未实例化，_handle_bot_chat 会**响亮地**记一条 ERROR
+        # 并回执玩家（自建 agent 已于 2026-09-22 删除，没有第二条路可退）。
         self.enable_game_platform: bool = bool(config.get("enable_game_platform", True))
-        # 注意：本项与下面三个 DEFAULT_* 的兜底口径不同，是有意为之，勿"修正"。
-        # 本项允许留空关闭（消费点用 `if self.extra_system_prompt:` 判定，
-        # WebUI 配置提示也写着"留空则不附加"），所以只有"键缺失"才回退默认值，
-        # "键存在但为空串"必须保持 ""。下面三个则相反：空串会让 AI 失去规则约束
-        # 或根本无法调用工具，属于坏配置，一律回退默认文案。
-        self.extra_system_prompt: str = str(
-            config.get("extra_system_prompt", DEFAULT_EXTRA_SYSTEM_PROMPT) or ""
+        # 两份上下文模板都**空串回退默认值**——口径与其他提示词一致：
+        # 想「不注入任何内容」应当删掉模板里的正文，而不是清空配置项
+        # （清空会让默认值静默回来，用户以为关掉了其实没有）。
+        # ⚠️ 2026-09-22 之前 extra_system_prompt 是「留空=不附加」的另一套口径，
+        # 合并成 template_netherlink_context_game 后统一了。
+        self.netherlink_context_qq: str = str(
+            config.get("template_netherlink_context_qq", DEFAULT_NETHERLINK_CONTEXT_QQ)
+            or DEFAULT_NETHERLINK_CONTEXT_QQ
+        )
+        # 游戏侧上下文模板。空串回退默认值（口径与其他提示词一致：想「不注入」
+        # 应当删掉模板内容，而不是清空配置项——清空会让默认值静默回来）。
+        self.netherlink_context_game: str = str(
+            config.get("template_netherlink_context_game", DEFAULT_NETHERLINK_CONTEXT_GAME)
+            or DEFAULT_NETHERLINK_CONTEXT_GAME
         )
         # 好感度是强制机制，没有开关：想「不依赖好感度」只能改提示词。
         # ⚠️ 消耗表 2026-09-21 起已不在本项里，而移到了 mc_command 的
@@ -386,21 +366,6 @@ class NetherLinkPlugin(Star):
         # 空串回退默认值——口径与 karma_rules / 工具描述一致：想「不注入任何内容」
         # 应当删掉模板里的标签行与内容（留空行），而不是靠清空配置项——后者会让
         # 「先查好感」这条覆盖游戏侧的指引静默消失。
-        self.netherlink_context_qq: str = str(
-            config.get("template_netherlink_context_qq", DEFAULT_NETHERLINK_CONTEXT_QQ)
-            or DEFAULT_NETHERLINK_CONTEXT_QQ
-        )
-        self.netherlink_context_game: str = str(
-            config.get("template_netherlink_context_game", DEFAULT_NETHERLINK_CONTEXT_GAME)
-            or DEFAULT_NETHERLINK_CONTEXT_GAME
-        )
-        # 游戏侧对话的用户消息附加说明模板（见 DEFAULT_NETHERLINK_REQUEST_TEMPLATE）。
-        # 空串回退默认值，口径同上——它承载着「身份见 system 里那份」这条
-        # 防遮蔽约定的另一半，静默丢掉会让 AI 去用户消息里找身份。
-        self.netherlink_request_template: str = str(
-            config.get("template_netherlink_request", DEFAULT_NETHERLINK_REQUEST_TEMPLATE)
-            or DEFAULT_NETHERLINK_REQUEST_TEMPLATE
-        )
         self.mc_command_tool_desc: str = str(
             config.get("mc_command_tool_desc", DEFAULT_MC_COMMAND_TOOL_DESC)
             or DEFAULT_MC_COMMAND_TOOL_DESC
@@ -1133,88 +1098,54 @@ class NetherLinkPlugin(Star):
         覆盖的是模板默认值里有它的那份（游戏侧）；QQ 侧改成靠 AI 自行判断
         何时查，是用户实测后的明确决定。
 
-        模板由 template_netherlink_context_qq / _game 配置，占位符定义见
-        DEFAULT_NETHERLINK_CONTEXT_QQ / DEFAULT_NETHERLINK_CONTEXT_GAME。
+        QQ 侧走可配模板 template_netherlink_context_qq；游戏侧由代码生成
+        （它并入「游戏内自定义提示词」，见 extra_system_prompt）。
         返回值永不为空。
         """
         values = self._admin_context_values(identity, is_admin, source, server_id)
-        if source == "qq":
-            tpl, default = self.netherlink_context_qq, DEFAULT_NETHERLINK_CONTEXT_QQ
-            label = "QQ 侧系统上下文"
-        else:
+        if source != "qq":
+            self_label = "游戏侧系统上下文"
             tpl, default = self.netherlink_context_game, DEFAULT_NETHERLINK_CONTEXT_GAME
-            label = "游戏侧系统上下文"
+        else:
+            self_label = "QQ 侧系统上下文"
+            tpl, default = self.netherlink_context_qq, DEFAULT_NETHERLINK_CONTEXT_QQ
+        # 两侧各走一份**可配模板**（2026-09-22 对称化）。
+        # 渲染失败（占位符写坏 / 漏写必需占位符）会回退默认模板并记 warning。
         return _render_template(
             tpl, default, values,
-            ("{origin}", "{roster}", "{identity}", "{is_admin}"),
-            label,
+            ("{identity}", "{is_admin}"),
+            self_label,
         )
 
     def _admin_context_values(
-        self, identity: str, is_admin: bool, source: str, server_id: str = ""
+        self,
+        identity: str,
+        is_admin: bool,
+        source: str,
+        server_id: str = "",
     ) -> dict:
-        """算出注入模板的四个占位符值。
+        """算出注入模板的占位符值：只有三项。
 
-        ⚠️ 只给**适用**的那份名单：QQ 侧发起时身份是 QQ 号，游戏 ID 名单对他的
-        判定毫无帮助；游戏侧发起时我们根本不知道他的 QQ 号，给 QQ 名单反而会让
-        AI 误以为掌握了他不在场的信息。名单本身由调用方按 source 选定，
-        两侧的成员判定仍各用各的（_qq_is_admin / _game_is_admin）。
+        ⚠️ `{is_admin}` **始终给**（是/不是都要说）——用户 2026-09-22 明确要求
+        「只需要包含当前说话的玩家是不是管理员」。
 
-        名单为空时也照样输出带队名的那一行（写「未配置」），否则 AI 分不清
-        "本服没有管理员"与"插件没告诉它"，等于把判断依据抽走了。
+        `{server}` 给游戏侧模板用（显示名）。
 
-        `{origin}` 与 `{roster}` 是**整行文本但不含换行**（模板里各占一行即可）。
-        它们是条件生成的（名单为空写「(未配置)」、QQ 侧列**已配置**而非"在线"的
-        服务器），把这段判断留在代码里，用户就不必处理「没配管理员时该怎么写」
-        这个边界——而那个兜底是刻意设计，抽掉它 AI 就分不清「本服没管理员」与
-        「插件没说」。
+        `{origin}`（来源 + 服务器列表）与 `{roster}`（完整名单）已于 2026-09-22
+        删除：前者与 AstrBot 自带的 Group name、以及 `_build_online_servers_hint()`
+        里那份**在线**服务器清单重复；后者对「是否管理员」这个判断没有增量信息。
+        `admin_context_admin_only` 开关随之删除（它只管这两行）。
+        占位符减到三个后，**模板里再写 {origin}/{roster} 会原样发出去**——
+        `_render_template` 只替换已知的键，其余 `{...}` 一律保留（NBT 花括号
+        那一课）。所以不要把它们加回模板提示词里。
         """
-        if source == "qq":
-            roster = ", ".join(sorted(self.admin_qq)) or "(未配置)"
-            roster_line = f"服务器管理员(QQ 号):{roster}."
-        else:
-            roster = ", ".join(sorted(self.admin_mc)) or "(未配置)"
-            roster_line = f"服务器管理员(游戏 ID):{roster}."
-        # 游戏侧能确定来源（连接即身份），QQ 侧不能——群友不在游戏里，
-        # 他那句话发往哪台要等 AI 选完 server 参数才定。所以 QQ 侧如实说明
-        # 「来自 QQ 群」并列出**已配置**的服务器（配置里有 ≠ 此刻连着）。
-        # 曾错写成「来自 Minecraft 游戏服务器「MC」」——那个 MC 是兜底名，
-        # 会让 AI 以为消息有明确来源。
-        if source == "qq":
-            configured = [self._mc_server_display(sid) for sid, _ in self.ws_bindings]
-            origin_line = (
-                "这条消息来自 QQ 群.本插件已配置的服务器:"
-                + (",".join(configured) if configured else "(未配置)")
-                + "."
-            )
-        else:
-            origin_line = (
-                f"这条消息来自 Minecraft 游戏服务器「{self._mc_server_display(server_id)}」."
-            )
         return {
-            "origin": origin_line,
-            "roster": roster_line,
             "identity": identity,
-            # 这条要求放在模板里而不是 karma_rules 里，是为了覆盖 QQ 侧普通对话
-            # （那条路径看不到 karma_rules）。默认模板保留它。
             "is_admin": "是管理员." if is_admin else "不是管理员.",
+            # 游戏侧模板里的 {server}——用**显示名**（server_display_names 配的，
+            # 没配则兜底 MC），与 QQ 群前缀、模板 {server} 保持一致。
+            "server": self._mc_server_display(server_id),
         }
-
-    def _render_context_hint(self) -> str:
-        """渲染游戏侧对话的用户消息附加说明。
-
-        `{karma_hint}` 是**必需占位符**：它承载的「调用前先查好感」是 AI 得知
-        该用 mc_karma 的唯一途径，而 mc_command 的 cost 参数是必填的——删掉它
-        会把 AI 逼进「必须报价但无从得知该报多少」的自相矛盾（决策十要消灭的
-        正是这种状态）。缺了它 _render_template 会回退默认模板并记 warning。
-        """
-        return _render_template(
-            self.netherlink_request_template,
-            DEFAULT_NETHERLINK_REQUEST_TEMPLATE,
-            {"karma_hint": KARMA_HINT},
-            ("{karma_hint}",),
-            "游戏内附加说明",
-        )
 
     def _qq_is_admin(self, event) -> bool:
         """QQ 侧管理员判定：AstrBot 全局管理员或 admin_qq 白名单。
@@ -1242,114 +1173,51 @@ class NetherLinkPlugin(Star):
         """
         return str(mc_id).strip().lower() in self._admin_mc_lower
 
-    def _tool_schema_mode(self) -> str:
-        """读 AstrBot 的全局「工具调用模式」，供本插件自建的 agent 使用。
 
-        **为什么必须显式传**：`tool_loop_agent` 没有这个形参，它经 `**other_kwargs`
-        转给 runner.reset()，而 reset 的默认值是 `"full"`。也就是说插件自建的两处
-        调用（游戏侧对话、成就）**不会跟随**用户在 WebUI 里的设置——用户改成
-        skills-like 后，只有走 AstrBot 主 agent 的 QQ 普通对话会变。
 
-        本插件把 `mc_command` 的价目表放进了 cost 参数说明，只有在 skills-like
-        （参数延迟到选中工具后才下发）下才真正省上下文；所以这里主动跟随全局设置，
-        让各条路径行为一致。
+    async def _build_context(self, identity: str, is_admin: bool,
+                             server_id: str = "", source: str = "qq",
+                             extra: str = "", extra_in_front: bool = False) -> str:
+        """拼装注入给 AI 的全部上下文。QQ 侧与游戏侧共用这一个函数。
 
-        读不到（老版本 AstrBot / 配置缺失）就返回空串，调用方不传该参数，
-        退回 runner 的默认 "full"——不猜。
+        为什么合并（2026-09-22 用户要求）：走原生群聊后，AstrBot 自己会在玩家
+        消息后附上 User ID / Nickname / Group name，两侧的差别就只剩「这是哪个
+        场景」。以前维护两份近乎重复的拼装，只会漂移。
+
+        内容顺序：好感规则 -> [extra（仅游戏侧）]-> 在线服务器清单 -> 管理员与身份。
+        `source`：`"qq"` / `"game"`，决定 `_admin_context` 给哪一份文案
+        （游戏侧多「唤醒词含义」与「先查一次好感」两句）。
+        `extra`：仅游戏侧附加的提示词（`extra_system_prompt`），含背包查验那套
+        流程——注给 QQ 侧只会让主 agent 去处理与它无关的事，所以那边给空串。
+        `extra_in_front`：游戏侧要求 extra 紧跟在**好感规则**之后（用户
+        2026-09-21 明确要求「好感度规则紧跟自定义提示词」）；QQ 侧则放末尾。
         """
-        try:
-            cfg = getattr(self.context, "astrbot_config", None)
-            if isinstance(cfg, dict):
-                mode = (cfg.get("provider_settings") or {}).get("tool_schema_mode")
-                if mode in ("skills_like", "full"):
-                    return mode
-        except Exception:
-            pass
-        return ""
-
-    async def _build_system_parts(
-        self, umo: str, identity: str, is_admin: bool, source: str, server_id: str = ""
-    ) -> list:
-        """拼装 LLM 对话的 system_prompt 各段，顺序即最终顺序。
-
-        顺序：[WebUI 人格（可开关）] → [extra_system_prompt + karma_rules] → [管理员上下文]
-        中间两段连成**同一个** part：用户要求好感度规则紧跟在自定义提示词之后拼接。
-        段与段之间由调用点用 "\\n\\n" 连接（见 _handle_bot_chat）。
-        source 透传给 _admin_context，决定给 AI 看哪一份管理员名单
-        （"qq" / "game"）。
-
-        最后一段（管理员上下文）永远存在，所以返回值永不为空。
-        """
-        parts: list[str] = []
-        if self.enable_webui_persona:
-            try:
-                # get_default_persona_v3 是协程方法：漏掉 await 会拿到 coroutine 对象，
-                # 随后的 persona.get(...) 抛 AttributeError 并被本兜底吞掉，
-                # 人格于是静默失效（Task 9 修的正是这个 bug）。
-                persona = await self.context.persona_manager.get_default_persona_v3(umo)
-                if persona and persona.get("prompt"):
-                    parts.append(str(persona["prompt"]))
-            except Exception as e:
-                # 读不到人格不能连累对话，但必须留痕——静默失败正是这个 bug 藏了这么久的原因
-                logger.warning(f"NetherLink: 读取 WebUI 人格失败（跳过）: {e}")
-
-        # 自定义提示词与好感规则连成一个 part。extra_system_prompt 留空 = 不附加
-        # （见 __init__ 里的口径说明），此时好感规则仍独立贡献，且不留前导换行。
-        blocks: list[str] = []
-        extra = str(self.extra_system_prompt or "")
-        extra = extra.replace("{server}", self._mc_server_display(server_id))  # 唯一支持的占位符
-        if extra.strip():
+        blocks = []
+        if self.karma_rules:
+            blocks.append(self.karma_rules)
+        # 工具名（mc_karma）由 karma_rules 的默认值点出——
+        # 用户 2026-09-22：好感规则本来就有配置项，把「互动涉及好感度时调用」
+        # 写在那儿比单独维护一个 QQ_KARMA_HINT 常量更省事，也不会两处漂移。
+        if extra_in_front and extra.strip():
             blocks.append(extra)
-        if self.karma_rules:
-            blocks.append(self.karma_rules)
-        if blocks:
-            parts.append("\n".join(blocks))
-
-        parts.append(self._admin_context(identity, is_admin, source, server_id))
-        return parts
-
-    async def _build_qq_context(self, identity: str, is_admin: bool) -> str:
-        """拼装 QQ 侧注入给 AI 的全部上下文。
-
-        QQ 侧走 AstrBot **主 agent**，它的 system_prompt 由框架内建、
-        插件注不进去——唯一的入口是 `on_llm_request` 钩子。因此这里拼的
-        内容必须**自包含**：好感规则 + 查好感的引导 + 管理员信息 + 场景说明。
-
-        内容顺序：好感规则 → 查好感的引导 → 在线服务器清单 → 管理员与来源。
-
-        ⚠️ 不含 `extra_system_prompt`：那是游戏侧专属（含背包查验那套流程），
-        注给 QQ 侧只会让主 agent 去处理与它无关的流程。
-        ⚠️ 不含 WebUI 人格：主 agent 自己会读人格，插件再注一份就重复了。
-        """
-        blocks: list[str] = []
-        if self.karma_rules:
-            blocks.append(self.karma_rules)
-        # 工具名只能在这里点出来：拆成两份模板后「先查好感」留在游戏侧，
-        # 而 karma_rules 全文不含 mc_karma——不补这句，QQ 侧整段上下文里
-        # 一次都不提这个工具（它明明可用），AI 报价没有任何依据。
-        #
-        # ⚠️ 这句**刻意不带 delta 怎么写**：`karma_tool_desc`（工具描述，随
-        # schema 下发）已经写明「delta 为 0 时只查询，正数增加，负数扣除」。
-        # 本句只负责「有这个工具、什么时候用它」——重复参数说明既冗余，
-        # 也会与工具描述形成第二个真相来源。
-        blocks.append(QQ_KARMA_HINT)
         # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
-        # 删掉内层 agent 后这里成了它唯一的去处——不接回来，多服在线时
-        # AI 只能从 _send_to_mc 的「拒发」报错里试错。
         blocks.append(self._build_online_servers_hint())
-        blocks.append(self._admin_context(identity, is_admin, "qq"))
+        blocks.append(self._admin_context(identity, is_admin, source, server_id))
+        if not extra_in_front and extra.strip():
+            blocks.append(extra)
         return "\n\n".join(blocks)
 
     async def _handle_advancement(self, data: dict, server_id: str = ""):
-        """玩家获得成就：把配置的提示词交给 AI，由它更新好感并回话。
+        """玩家获得成就：把渲染好的提示词推进**平台管线**，由 AI 更新好感并回话。
 
-        与死亡扣减的差别：死亡是 AI 不在场的**代码**扣减；成就是**AI 在场**的
-        判断——提示词（`advancement_prompt`）说明获得了什么成就，AI 自己决定
-        加减多少好感（走 mc_karma 工具）并给出评论。因此这里要起一次完整的
-        LLM 对话，回复广播回游戏公屏并同步 QQ 群。
+        与死亡扣减的差别：死亡是 AI 不在场的**代码**扣减；成就是 AI **在场**的
+        判断，所以要走一次完整的对话。
 
-        玩家可能已离线（成就事件与在线状态无关），所以不取 per-player 锁：
-        离线时 `_make_synthetic_event` 仍可用，回复只会进群与公屏。
+        2026-09-22 改走适配器（原先自己造合成事件、自己调 tool_loop_agent）：
+          · 人格 / 工具 / agent 钩子 / 出站推群全部复用，不用维护第二套；
+          · 与玩家对话进**同一个会话**，AI 有上下文；
+          · 提示词里声明了这是**系统通知**（kind="advancement"），
+            否则 AI 会把成就当成玩家在跟它邀功（用户实测）。
         """
         player = str(data.get("player") or "")
         advancement = str(data.get("advancement") or "")
@@ -1358,97 +1226,49 @@ class NetherLinkPlugin(Star):
         if not self.enable_advancement:
             return
 
-        NL = chr(10) + chr(10)   # 段间空行；用 chr 拼装以免源码里出现转义序列
         try:
-            event = self._make_synthetic_event(player, server_id)
-            umo = event.unified_msg_origin
-            prov_id = await self.context.get_current_chat_provider_id(umo)
-            if not prov_id:
-                logger.warning("NetherLink: 未配置 LLM 提供商，成就事件不处理")
+            adapter = self._resolve_game_adapter()
+            if adapter is None or adapter._plugin is None:
+                logger.warning(
+                    "NetherLink: 平台适配器不可用，本次成就通知跳过"
+                    "（首次启用请重启一次 AstrBot）"
+                )
                 return
-
-            system_parts = await self._build_system_parts(
-                umo, player, self._game_is_admin(player), source="game",
-                server_id=server_id,
-            )
-            # 提示词里的 {player}/{server}/{advancement} 由插件替换——成就是
-            # 客观事实，不该让 AI 去猜谁拿到了什么
-            prompt = (
+            # 提示词里的 {player}/{server}/{advancement} 由插件替换——
+            # 成就是客观事实，不该让 AI 去猜谁拿到了什么
+            text = (
                 self.advancement_prompt
                 .replace("{player}", player)
                 .replace("{server}", self._mc_server_display(server_id))
                 .replace("{advancement}", advancement)
             )
-
-            conv_mgr = self.context.conversation_manager
-            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
-            if not curr_cid:
-                curr_cid = await conv_mgr.new_conversation(umo)
-            conversation = await conv_mgr.get_conversation(
-                umo, curr_cid, create_if_not_exists=True
-            )
-            try:
-                history = json.loads(conversation.history) if conversation.history else []
-            except (json.JSONDecodeError, TypeError):
-                history = []
-
-            resp = await self.context.tool_loop_agent(
-                event=event,
-                chat_provider_id=prov_id,
-                system_prompt=NL.join(system_parts),
-                prompt=prompt,
-                tools=self._build_mc_toolset(player, server_id),
-                contexts=history,
-                # 与 _handle_bot_chat 同口径：步数用尽时 runner 会拔掉工具并强推
-                # 一段（见那边的注释）。成就这条路径要「查好感 → 加好感 → 回话」，
-                # 4 步余量为零，同样会出现被强推的收尾。
-                max_steps=16,
-                tool_schema_mode=self._tool_schema_mode(),
-            )
-            text = getattr(resp, "completion_text", None)
-            if text is None:
-                logger.warning("NetherLink: 成就响应缺少 completion_text 字段")
-                text = ""
-            reply = (text or "").strip()[:MC_REPLY_MAX_LEN] or "（恭喜！）"
-
-            from astrbot.core.agent.message import (
-                AssistantMessageSegment, TextPart, UserMessageSegment,
-            )
-            await conv_mgr.add_message_pair(
-                cid=curr_cid,
-                user_message=UserMessageSegment(
-                    content=[TextPart(text=f"[{player}] {prompt}")]
-                ),
-                assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
-            )
-
-            await self._send_bot_reply(reply, sync_qq=True, server_id=server_id)
-            logger.info(
-                f"NetherLink: 成就事件已处理 [{player}] {advancement}"
+            adapter.handle_advancement(
+                player, server_id, text,
+                display_name=self._mc_server_display(server_id),
             )
         except Exception as e:
             logger.error(f"NetherLink: 处理成就事件失败: {e}")
 
     async def _handle_bot_chat(self, data: dict, server_id: str = ""):
-        """游戏内玩家用唤醒词跟机器人说话：转交给 AstrBot 的 LLM 管线处理。
+        """玩家用唤醒词对 AI 说话，交给原生平台管线。
 
-        设计对齐 AstrBot 理念：插件不自建人设，而是把玩家消息作为 prompt 转交
-        tool_loop_agent（使用 WebUI 配置的人格与模型），仅附加最小化的来源
-        提示词（消息来自游戏服务器 + 玩家身份）。多轮上下文通过合成事件
-        的 unified_msg_origin 挂到 AstrBot 会话管理器，同一玩家连续对话有记忆。
-        回复广播回游戏公屏 + 同步 QQ 群。
+        本方法只是 WS 层的薄入口：解析字段、定位适配器、委托出去。
+        真正的对话由 AstrBot 完整 pipeline 处理（人格 / 记忆 / 工具 /
+        agent 钩子 / 出站推群全部复用），见 mc_platform.py。
+
+        2026-09-22 之前这里自己造合成事件 + 自己调 tool_loop_agent，那条路径
+        绕过 pipeline，代价是拿不到工具状态提示、还要自己维护一整套工具与
+        提示词拼装。已整体删除——现在只有这一条路。
         """
         player = str(data.get("player", "?"))
         text = str(data.get("text", "")).strip()
-        # 不剥离唤醒前缀：AI 看到的就是玩家原话（与推群、写进历史的完全一致）。
-        # 唤醒词是什么、意味着什么，由系统提示词里的场景说明交代。
+        if not text:
+            return
 
         # 玩家那句唤醒消息本身也要推群。Paper 侧发完 bot_chat 就 return 了，
-        # 不会再发一条 chat 事件；若不在这里补，群里就只看到 AI 的回答、
-        # 看不到玩家问了什么（2026-09-19 用户要求改掉）。
-        # 放在起 LLM 之前：这是已经发生的游戏事实，不该因为 LLM 失败而丢失。
-        # 用 text（玩家原话，含唤醒词），忠实反映他打了什么。
-        # 与普通聊天走同一个模板与开关，避免出现"两套聊天格式"。
+        # 不会再发一条 chat 事件；不补的话群里只看到 AI 的回答、
+        # 看不到玩家问了什么（2026-09-19 用户要求）。
+        # 推的是玩家原话（含唤醒词），与普通聊天同一个模板与开关。
         if self.config.get("enable_chat", True):
             try:
                 await self._broadcast(
@@ -1465,142 +1285,27 @@ class NetherLinkPlugin(Star):
             except Exception as e:
                 logger.error(f"NetherLink: 推送游戏内唤醒消息到群失败: {e}")
 
-        # ---- 分派：原生平台路径 vs 自建 agent 路径 ----
-        # 开关默认关；打开后需要 AstrBot 重启一次让框架实例化适配器。
-        # 适配器缺席时**回退**而不是丢消息——玩家不该因为一个配置项收到空回复。
-        if self.enable_game_platform:
-            adapter = self._resolve_game_adapter()
-            if adapter is not None and adapter._plugin is not None:
-                adapter.handle_bot_chat(
-                    player, server_id, text,
-                    display_name=self._mc_server_display(server_id),
-                )
-                return
-            # 回退是**设计内**的：绝不让玩家因为一个配置项收到空回复。
-            # 但话术要分清两种情况——重载后能自愈的，别吓唬用户去重启。
-            if adapter is not None:
-                logger.warning(
-                    "NetherLink: 游戏侧适配器在，但尚未绑定到当前插件实例"
-                    "（通常发生在刚重载插件之后）。本次回退到内置 agent，"
-                    "重载或重启后会自动恢复，无需手工干预。"
-                )
-            else:
-                logger.error(
-                    "NetherLink: enable_game_platform 已开启，但游戏侧平台适配器"
-                    "不存在——首次启用必须重启一次 AstrBot（框架只在启动时"
-                    "实例化平台）。本次回退到内置 agent。"
-                )
-        
-        # 锁的粒度：会话是按**服务器**建的，所以并发也必须按服务器串行——
-        # 否则同一个会话会被两条请求同时追加，历史交错。
-        lock_key = server_id or player
-        lock = self._player_llm_locks.setdefault(lock_key, asyncio.Lock())
-        if lock.locked():
-            await self._send_bot_reply(
-                "（上一条还在思考中，稍等一下…）", sync_qq=False, server_id=server_id
+        adapter = self._resolve_game_adapter()
+        if adapter is None or adapter._plugin is None:
+            # 自建 agent 已删除，没有可回退的第二条路，如实告知别让玩家干等。
+            logger.error(
+                "NetherLink: 平台适配器不可用，游戏内对话无法进行"
+                "（首次启用请重启一次 AstrBot 让框架加载平台）"
+            )
+            await self._send_to_mc(
+                {
+                    "type": "bot_reply",
+                    "line": self.templates["bot_reply_game"]
+                    .replace("{bot}", self.mc_bot_name)
+                    .replace("{text}", "（我暂时没法回答，请检查机器人配置）"),
+                },
+                server_id,
             )
             return
-
-        async with lock:
-            try:
-                event = self._make_synthetic_event(player, server_id)
-                umo = event.unified_msg_origin
-                prov_id = await self.context.get_current_chat_provider_id(umo)
-
-                # 系统提示词拼装（顺序见 _build_system_parts）：
-                # [WebUI 人格（可开关）] + [自定义提示词 + karma 规则] + [管理员上下文]
-                system_parts = await self._build_system_parts(
-                    umo, player, self._game_is_admin(player), source="game",
-                    server_id=server_id,
-                )
-
-                # 附加提示词：来源与管理员名单已由 system_prompt 里的
-                # _admin_context 交代（那里有服务器名、适用名单、发起者身份），
-                # 这里只补它没说的——这条消息该怎么用工具。
-                # mc_karma 永远在工具集里（好感度是强制机制），所以这句是无条件的。
-                #
-                # ⚠️ 这里**绝不能**再用 `<netherlink_context>` 这个标签名。
-                # 该标签在 system_prompt 里已有一份**完整**的（含管理员名单与
-                # 「是否管理员」的判定），而 mc_command 的工具描述明确让 AI
-                # 「以对话中提供的 <netherlink_context> 为准」。本节内容在**用户
-                # 消息**里（比 system_prompt 更靠后、更像"对话"），若同名，AI 会
-                # 采信这份**没有管理员信息**的，把管理员当成普通玩家拒绝执行
-                # （2026-09-19 实测到的正是这个现象）。故改用一个不相干的名字，
-                # 身份信息只由 system_prompt 那份承载。
-                # 2026-09-20：本段改为由 template_netherlink_request 渲染
-                # （见该配置项的 hint 与 DEFAULT_NETHERLINK_REQUEST_TEMPLATE）。
-                context_hint = self._render_context_hint()
-
-                # 会话历史：**按服务器挂会话**（见 _make_synthetic_event），
-                # 所以同一会话里会有多个玩家的话——写入时必须带上说话人，
-                # 否则 AI 看到一串没有主语的发言，分不清谁在说什么，
-                # 甚至会把这轮别人的话当成自己的上下文。
-                conv_mgr = self.context.conversation_manager
-                curr_cid = await conv_mgr.get_curr_conversation_id(umo)
-                if not curr_cid:
-                    curr_cid = await conv_mgr.new_conversation(umo)
-                conversation = await conv_mgr.get_conversation(umo, curr_cid, create_if_not_exists=True)
-                try:
-                    history = json.loads(conversation.history) if conversation.history else []
-                except (json.JSONDecodeError, TypeError):
-                    history = []
-
-                # 本轮发起者由**插件自己**写进事件：这条路径不是「监听进站消息
-                # 被动触发」，而是插件主动为某个玩家起一次对话。钩子
-                # （inject_qq_identity）只在「进站消息驱动」时能拿到发起者，
-                # 主动发起这条路径上它无从得知——所以这里必须先落一次 extra，
-                # 钩子读到就不会再覆盖。
-                try:
-                    event.set_extra("netherlink_direct_initiator", {
-                        "player": player, "server_id": server_id, "text": text,
-                    })
-                except Exception as e:
-                    # 合成 event / 测试替身未必有 set_extra。失败只意味着
-                    # 注入钩子读不到这份 extra、退回原行为，不该连累对话本身。
-                    logger.debug(f"NetherLink: 写入直发身份失败（忽略）: {e}")
-                llm_resp = await self.context.tool_loop_agent(
-                    event=event,
-                    chat_provider_id=prov_id,
-                    system_prompt="\n\n".join(system_parts) if system_parts else None,
-                    # 当前发起者必须出现在**用户消息**里，且与历史里 `[玩家名] 内容`
-                    # 的写法一致——会话是按**服务器**建的，同一会话里有多名玩家，
-                    # 光靠 system 里那句「当前发起者:X」压不住历史里别人的发言，
-                    # AI 会把指令挂到历史里最近出现过的那个人身上（实测症状）。
-                    prompt=f"{context_hint}\n\n[{player}] {text}",
-                    tools=self._build_mc_toolset(player, server_id),
-                    contexts=history,
-                    # 步数上限：原来写 6，对「查好感 → 报价 → 执行指令 → 组织回复」
-                    # 这种 4~5 步的流程只剩一两步余量。用尽时 runner 会**拔掉全部
-                    # 工具**并注入 MAX_STEPS_REACHED_PROMPT 强推最后一段
-                    # （tool_loop_agent_runner.py:1150-1171），于是同一轮里既有
-                    # 工具调用时产生的文字、又有被强推的收尾——玩家看到的就是
-                    # 「回复分成两段」。提到 16：正常流程用不到，纯粹堵死这条路。
-                    max_steps=16,
-                    tool_schema_mode=self._tool_schema_mode(),
-                )
-                reply = (llm_resp.completion_text or "……").strip()[:MC_REPLY_MAX_LEN]
-
-                # 把本轮对话写回会话历史（下次对话带上）。
-                # 用户消息前缀说话人，让共享会话里的发言有归属。
-                from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
-                await conv_mgr.add_message_pair(
-                    cid=curr_cid,
-                    user_message=UserMessageSegment(
-                        content=[TextPart(text=f"[{player}] {text}")]
-                    ),
-                    assistant_message=AssistantMessageSegment(content=[TextPart(text=reply)]),
-                )
-
-                # 游戏内按模板渲染（含 § 染色），QQ 群同步纯文本回复
-                await self._send_bot_reply(reply, sync_qq=True, server_id=server_id)
-            except Exception as e:
-                logger.error(f"NetherLink: 游戏内 LLM 对话失败: {e}")
-                await self._send_bot_reply(
-                    "（机器人暂时无法思考，请稍后再试）", sync_qq=False, server_id=server_id
-                )
-            finally:
-                self._player_llm_locks.pop(lock_key, None)
-
+        adapter.handle_bot_chat(
+            player, server_id, text,
+            display_name=self._mc_server_display(server_id),
+        )
     async def send_game_line(self, text: str, server_id: str = "") -> None:
         """把一行文本按 `template_bot_reply_game` 渲染后发到**指定**服务器。
 
@@ -1695,148 +1400,9 @@ class NetherLinkPlugin(Star):
             # 平台注册失败不能让插件加载失败——其余功能（QQ 侧、好感度）照常
             logger.error(f"NetherLink: 初始化游戏侧平台失败: {e}")
 
-    async def _send_bot_reply(self, text: str, sync_qq: bool, server_id: str = ""):
-        """向**来源那台**服务器广播机器人回复，可选同步到 QQ 群。
-
-        必须定向：多台在线时不指定目标，`_send_to_mc` 会拒发（宁丢不发错），
-        玩家就永远等不到回复。
-        """
-        line = self.templates["bot_reply_game"].replace("{bot}", self.mc_bot_name).replace(
-            "{text}", text.replace("§", "&")
-        )
-        await self._send_to_mc({"type": "bot_reply", "line": line}, server_id)
-        if sync_qq:
-            # QQ 端正常输出回复文本（§ 染色码只属于游戏渲染，不同步）
-            await self._broadcast(
-                f"[{self._mc_server_display(server_id)}] {self.mc_bot_name}: {text}"
-            )
-
-    def _make_synthetic_event(self, player: str, server_id: str = "") -> AstrMessageEvent:
-        """为游戏内玩家构造一个合成的消息事件（不走消息平台，仅用于 LLM 上下文）。
-
-        sender.user_id 存游戏 ID，使工具闭包能从 event 拿到发起人身份。
-        AstrMessageEvent 是抽象基类但无抽象方法，可直接实例化。
-
-        **会话按服务器建**（session_id = server_id，不是玩家名）——2026-09-19
-        用户决定：这样一个会话里能看到该服所有玩家的消息，AI 更容易掌握服务器上
-        的整体情况。代价是并发语义从「同一玩家串行」变成「同一服务器串行」，
-        且写入历史的用户消息必须带说话人（否则分不清谁说的，见 _handle_bot_chat）。
-        """
-        from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
-        from astrbot.core.platform.message_type import MessageType
-        from astrbot.core.platform.platform_metadata import PlatformMetadata
-
-        msg_obj = AstrBotMessage()
-        msg_obj.type = MessageType.OTHER_MESSAGE
-        msg_obj.self_id = "netherlink_mc"
-        msg_obj.sender = MessageMember(user_id=player, nickname=player)
-        msg_obj.message_str = ""
-        platform_meta = PlatformMetadata(
-            name="netherlink_mc", description="NetherLink MC 端合成事件", id="netherlink_mc"
-        )
-        # session_id 用 server_id：**按服务器建会话**。server_id 为空（未握手
-        # 的极端情形）时退回玩家名，保证总能落到一个会话上。
-        return AstrMessageEvent(
-            message_str="", message_obj=msg_obj,
-            platform_meta=platform_meta, session_id=(server_id or player),
-        )
 
 
-    def _build_mc_toolset(self, player: str, server_id: str = ""):
-        """构造游戏内会话用的 mc_command 工具集合。
 
-        只有游戏侧这一个调用面，发起人固定为 player（游戏 ID）——QQ 侧走的是
-        `@filter.llm_tool` 注册的顶层 mc_command，与这里无关（早先这里有个永远
-        传不到 "qq" 的 source 形参，已删除）。
-        call() 覆写模式第一个参数是 ContextWrapper[AstrAgentContext]。
-        """
-        from astrbot.core.agent.tool import FunctionTool, ToolSet
-        from pydantic import Field
-        from pydantic.dataclasses import dataclass
-
-        plugin = self
-
-        @dataclass
-        class McCommandTool(FunctionTool):
-            """游戏侧 mc_command：发起人固定为 player，cost 由 AI 报价。"""
-
-            name: str = "mc_command"
-            description: str = plugin.mc_command_tool_desc
-            parameters: dict = Field(
-                default_factory=lambda: {
-                    "type": "object",
-                    "properties": {
-                        "cmd": {
-                            "type": "string",
-                            # 走配置项：与 QQ 侧顶层工具同源，否则用户改了
-                            # 一边、另一边纹丝不动（本项目最忌讳的静默分叉）。
-                            "description": plugin.mc_command_cmd_param_desc,
-                        },
-                        "cost": {
-                            "type": "number",
-                            # 价目表就写在这个配置项里（见 mc_command_cost_param_desc）
-                            "description": plugin.mc_command_cost_param_desc,
-                        },
-                    },
-                    "required": ["cmd", "cost"],
-                }
-            )
-
-            async def call(self, context, **kwargs) -> str:
-                cmd = str(kwargs.get("cmd", "")).strip().lstrip("/")
-                # cost 原样透传：裁剪与扣费都在 exec_command_for 里做（唯一入口）。
-                # server_id 由**连接**得出（端口绑定或握手），不经过 AI——
-                # 玩家在 A 服说话，指令就该发到 A 服，没有让 AI 判断的余地。
-                out = await plugin.exec_command_for(
-                    initiator=player,
-                    cmd=cmd,
-                    source="game",
-                    cost=kwargs.get("cost", 0),
-                    server_id=server_id,
-                )
-                # 与 QQ 侧对齐：服务器输出可能很长（满背包 NBT、多人 list），
-                # 整段进上下文会持续膨胀。此处原为缺口，2026-09-21 补上。
-                return out[:MC_REPLY_MAX_LEN] if out else out
-
-        @dataclass
-        class McKarmaTool(FunctionTool):
-            """游戏侧 mc_karma：读写本地好感表里当前对话玩家的那一份。
-
-            与顶层 mc_karma 同口径——目标是当前发起者，无法指定其他玩家，
-            因此没有 player 参数（否则 LLM 能给别人刷好感）。
-            """
-
-            name: str = "mc_karma"
-            description: str = plugin.karma_tool_desc
-            parameters: dict = Field(
-                default_factory=lambda: {
-                    "type": "object",
-                    "properties": {
-                        "delta": {
-                            "type": "number",
-                            # 走配置项，与 QQ 侧顶层 mc_karma 同源——否则用户在
-                            # WebUI 改 mc_karma_delta_param_desc 只会改到一边，
-                            # 另一边纹丝不动且无任何告警（本项目最忌讳的静默分叉）。
-                            "description": plugin.karma_delta_param_desc,
-                        },
-                    },
-                    "required": ["delta"],
-                }
-            )
-
-            async def call(self, context, **kwargs) -> str:
-                try:
-                    delta = int(float(kwargs.get("delta", 0)))
-                except (TypeError, ValueError, OverflowError):
-                    return "错误：delta 必须是数字。"
-                key = identity_key("game", player, "")
-                if not delta:
-                    return f"[{key}] 当前好感值：{await plugin._karma_get(key)}（范围 -50~100）。"
-                old, new = await plugin._karma_add(key, delta, origin="游戏内对话")
-                return f"[{key}] 好感值 {old} → {new}（本次 {delta:+d}）。"
-
-        # mc_karma 无条件在列（好感度是强制机制，没有能摘掉它的配置）
-        return ToolSet([McCommandTool(), McKarmaTool()])
 
     # ------------------------------------------------------------------
     # 指令执行核心（QQ llm_tool 与游戏内 tool_loop_agent 共用）
@@ -2085,7 +1651,7 @@ class NetherLinkPlugin(Star):
         判据只看平台标识，不看消息类型——游戏侧没有「群/私聊」之分。
         两个标识都要认：
           · `netherlink_mc`——迁移到原生平台适配器后的真实事件；
-          · 合成事件那套（平台 id 也是 netherlink_mc，见 _make_synthetic_event）。
+          · 迁移前的合成事件（平台 id 也是 netherlink_mc）。
         刻意**不**在本函数里判「是不是我们该管的场景」，那是调用方的事——
         与 `_is_aiocqhttp_event` 的口径保持一致（那边也只判平台 + 消息类型）。
         """
@@ -2097,19 +1663,12 @@ class NetherLinkPlugin(Star):
     async def _build_game_context(
         self, identity: str, is_admin: bool, server_id: str = ""
     ) -> str:
-        """拼装**游戏侧**注入给 AI 的全部上下文。
-        
-        与 `_build_qq_context` 的分工（两份内容刻意不同，见 claude.md 的
-        「三个面、两个场景」）：
-          · 游戏侧**含** `extra_system_prompt`（物品换好感那套三步流程是游戏侧专属）
-            与 **WebUI 人格**——自建 agent 不读人格，必须由插件带上；
-          · 游戏侧**不含**在线服务器清单（来源由连接唯一确定，没有让 AI 选的余地，
-            列出来反而会让它去填 `server` 参数）。
-        
-        段顺序与 `_build_system_parts` 一致：人格 → [自定义 + 好感规则] → 管理员上下文。
-        本函数是给**原生平台路径**用的；自建 agent 那条路径仍走 `_build_system_parts`。
+        """游戏侧的上下文 = 人格 + 通用上下文（含游戏侧专属的附加提示词）。
+
+        与 QQ 侧共用 _build_context，只在前面多一段 WebUI 人格
+        （QQ 侧主 agent 自己会读人格，插件不用带）。
         """
-        parts: list = []
+        parts = []
         if self.enable_webui_persona:
             try:
                 persona = await self.context.persona_manager.get_default_persona_v3(
@@ -2119,18 +1678,13 @@ class NetherLinkPlugin(Star):
                     parts.append(str(persona["prompt"]))
             except Exception as e:
                 logger.warning(f"NetherLink: 读取 WebUI 人格失败（跳过）: {e}")
-        blocks: list = []
-        extra = str(self.extra_system_prompt or "")
-        extra = extra.replace("{server}", self._mc_server_display(server_id))
-        if extra.strip():
-            blocks.append(extra)
-        if self.karma_rules:
-            blocks.append(self.karma_rules)
-        if blocks:
-            parts.append("\n".join(blocks))
-        parts.append(self._admin_context(identity, is_admin, "game", server_id))
-        return "\n\n".join(parts)
-    
+        # 游戏侧上下文的渲染（含 {server} 替换）现在由 _admin_context 走模板完成。
+        parts.append(
+            await self._build_context(
+                identity, is_admin, server_id=server_id, source="game",
+            )
+        )
+        return "\n\n".join(p for p in parts if p.strip())    
     def _is_aiocqhttp_event(self, event) -> bool:
         """这个事件是否来自 aiocqhttp 平台的**群消息**。
 
@@ -2543,7 +2097,7 @@ class NetherLinkPlugin(Star):
     async def inject_qq_identity(self, event, req) -> None:
         """给 QQ 侧的 LLM 请求补上完整上下文。
 
-        注入的是 `_build_qq_context` 的全部产物：好感规则 + 查好感的引导 +
+        注入的是 `_build_context` 的全部产物：好感规则 + 查好感的引导 +
         在线服务器清单 + 管理员与来源（`<netherlink_context>`）。
         方法名保留 `inject_qq_identity` 是历史原因（起初只注身份），
         改名会牵动 AstrBot 的 handler 注册，收益不大。
@@ -2562,20 +2116,30 @@ class NetherLinkPlugin(Star):
         `_is_aiocqhttp_event`）：私聊、其他平台、其他插件构造的请求一律不碰。
 
         幂等：system_prompt 里已有 `<netherlink_context>` 就不再追加。
+        ⚠️ 这不是可有可无的优化：钩子是全局的，同一个 `ProviderRequest` 可能
+        被重复处理，不去重会把整段上下文叠两次——AI 会同时看到两份身份，
+        后一份还带着重复的好感规则。判断点放在**两条分支之前**，两份默认模板
+        都带这个标签（游戏侧 2026-09-22 补回了包裹标签）。
 
-        `tool_loop_agent` **不经过 pipeline**（源码里既无 `pipeline` 也无
-        `call_event_hook`），所以本钩子不会对游戏侧 agent 触发——那条路径的名单
-        由 `_build_system_parts` 直接给。
+        游戏侧**不再走自建 agent**（2026-09-22 删除）：它与 QQ 侧同为本钩子
+        的两个分支，game 分支由 `_build_game_context` 拼装、QQ 分支由
+        `_build_context` 拼装。
 
         2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
         推群），本钩子对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
         发起者与管理员。
         """
         try:
-            if not self._is_aiocqhttp_event(event):
-                return  # 私聊 / 其他平台 / 其他插件构造的请求，一律不碰
+            # 幂等：这个请求已经注入过了就不再追加。见 docstring 里的说明——
+            # **必须在两条分支之前**，否则重复处理时两边都会各叠一份。
             if "<netherlink_context>" in (req.system_prompt or ""):
-                return  # 幂等：已经注入过
+                return
+            # ⚠️ 必须先判游戏侧，再判 aiocqhttp。
+            # 这两条是**互斥的两个场景**，但原先写成
+            #     if not self._is_aiocqhttp_event(event): return
+            # 而游戏侧的平台 id 不是 aiocqhttp —— 于是游戏侧事件在这一行就被
+            # 整条挡掉，下面的游戏侧分支**永远到不了**（2026-09-22 排查时发现）。
+            # 症状是静默的：游戏内对话照常进行，只是 AI 拿不到身份与管理信息。
             if self._is_game_event(event):
                 # 游戏侧的身份**唯一来源**是本函数算出来的这份，工具与提示词都读它。
                 # 为什么不能靠「AI 从历史里推断当前说话人」：会话是按**服务器**建的，
@@ -2607,9 +2171,11 @@ class NetherLinkPlugin(Star):
                     f"服务器 {self._mc_server_display(event.get_session_id())}"
                 )
                 return
+            if not self._is_aiocqhttp_event(event):
+                return  # 私聊 / 其他平台 / 其他插件构造的请求，一律不碰
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
             is_admin = self._qq_is_admin(event)
-            ctx = await self._build_qq_context(identity, is_admin)
+            ctx = await self._build_context(identity, is_admin)
             req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
             # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
             # 排查「AI 认不出管理员」时先看这行有没有出现。
@@ -2623,8 +2189,28 @@ class NetherLinkPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event):
-        """绑定群的普通消息转发进游戏公屏。"""
+
+        """绑定群的普通消息转发进游戏公屏；游戏侧事件则在此打开 LLM 阀门。
+
+        ⚠️ **`event.is_at_or_wake_command` 必须在这里补上**（2026-09-22 实测定位）。
+        `ProcessStage` 只在它为真时才发起 LLM 请求：
+            if (not event._has_send_oper and event.is_at_or_wake_command
+                    and not event.call_llm):  ->  agent_sub_stage
+        而它**只由 `WakingCheckStage` 的「唤醒词 / @ / 私聊」三条路**置真——
+        插件注册的普通 handler 只会把 `is_wake` 置真，**不碰这个字段**。
+        症状：游戏内消息一路走到 `ProcessStage`、handler 也被调用了，
+        然后管道静默结束（`pipeline execution completed.`），
+        **LLM 请求根本没发起**，日志里连一条报错都没有。
+
+        顺序是安全的：`ProcessStage` 先跑 handler（stage.py:37），
+        再检查这个字段（stage.py:56）。
+        """
         try:
+            # 游戏侧（原生平台）的消息不能被 target_groups 拦住——那项只管
+            # QQ 群的消息互通。这里放行并打开 LLM 阀门。
+            if event.get_platform_id() == GAME_PLATFORM_ID:
+                event.is_at_or_wake_command = True
+                return
             group_id = str(event.get_group_id() or "")
             if group_id not in self.target_groups:
                 return
@@ -2700,8 +2286,9 @@ class NetherLinkPlugin(Star):
         执行前先按下述情形判断:
         一律拒绝的指令(无论对方好感多少都不执行):清空或重置成就进度这类能让对方
         反复刷成就的,召唤末影龙/凋零等明显影响服务器的高危指令,破坏他人建筑,
-        清空区域,封禁他人等伤害其他玩家的指令.遇到这类请求直接说明原因并拒绝,
-        不要调用本工具.
+        清空区域,封禁他人等伤害其他玩家的指令.另外,
+        刷怪笼(spawner)原版无法获得的方块,与各类刷怪蛋(spawn_egg)一律不给玩家,玩家头颅除外.
+        遇到这类请求直接说明原因并拒绝,不要调用本工具.
         其余情形按 cost 参数的说明报价与执行.
         好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减
         (不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次——mc_karma 只用于

@@ -62,7 +62,8 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 | `mc_wake_prefixes` | 游戏内唤醒词（默认 `ai,助手`），**须与 MC 端 `wake-prefixes` 一致** |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏（默认关，防刷屏） |
 | `enable_webui_persona` | 游戏内对话是否使用 WebUI 配置的人格（默认开） |
-| `extra_system_prompt` | 附加提示词，支持 `{server}` 占位符，**留空则不附加**。默认值含**物品换好感的三步流程**（先查背包、按玩家说出的数量取走、再加好感）|
+| `enable_game_platform` | 游戏内对话走 **AstrBot 原生平台管线**（默认开）。**首次启用需要重启一次 AstrBot**——框架在启动时实例化平台 |
+| `template_netherlink_context_game` | **游戏侧注入给 AI 的系统上下文模板**（2026-09-22 由 `extra_system_prompt` 改名而来）。占位符 `{identity}` `{is_admin}` `{server}`。默认值含「你处于 MC 服务器 + 当前发起者是否管理员 + 玩家试图给你东西时的三步流程」。**空串回退默认值**（想「不注入」应删掉模板正文）|
 | `karma_rules` | 好感度规则：范围、对话如何影响态度、每次变化不超过 ±2、要隐晦暗示、不透露具体数值。**可自由修改**；想「不依赖好感度」请改 `mc_command_cost_param_desc`（把价目表写成免费/传 0），改这里已经不管用——指令的执行尺度不在这一项里 |
 | `karma_initial` | 新玩家初始好感（默认 20） |
 | `karma_death_penalty` | 玩家死亡扣的好感（默认 2，0 为不扣） |
@@ -74,8 +75,9 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 | `karma_tool_desc` | `mc_karma` 的工具描述 |
 | `mc_command_cost_param_desc` | `mc_command` 的 **cost 参数说明**。**指令的好感价目表就在这里**（免费放行 / 可以执行 / 按超标程度计价三类 + 具体价格）|
 | `mc_karma_delta_param_desc` | `mc_karma` 的 delta 参数说明 |
-| `template_netherlink_context_qq` / `_game` | 注入给 AI 的系统上下文（两个场景各一份）：来源、管理员名单、当前发起者是不是管理员。游戏侧那份另含「先查一次好感」与「历史里 `[玩家名]` 是说话人」两句 |
-| `template_netherlink_request` | 游戏内对话时，跟玩家那句话一起发出去的**工具使用说明**（含 `{karma_hint}`，必须保留）|
+| `mc_command_cmd_param_desc` | `mc_command` 的 cmd 参数说明（游戏侧与 QQ 侧共用）|
+| `mc_command_server_param_desc` | `mc_command` 的 server 参数说明（仅 QQ 侧有该参数）|
+| `template_netherlink_context_qq` | **QQ 侧注入给 AI 的系统上下文模板**。占位符 `{identity}` `{is_admin}`。空串回退默认值 |
 | `enable_chat` / `enable_join_leave` / `enable_death` / `enable_qq_to_mc` | 各类消息的同步开关 |
 | 其余 `template_*` | 消息模板（QQ→MC 与游戏内回复支持 `§` 染色码） |
 
@@ -84,7 +86,7 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 - **QQ → 游戏**：绑定群里发消息，游戏公屏显示 `⌜群名⌟ <名字> 消息`
 - **QQ 群友与 AI 对话**：AI 会被告知发言者是谁、他是不是管理员、以及好感规则与当前好感（`aiocqhttp` 平台的所有群都生效，不限绑定群）
 - **游戏 → QQ**：游戏内聊天/进服/退服/死亡自动推送
-- **游戏内对话**：发 `ai 你好` 或 `ai 列出在线玩家`，回复显示在游戏里并同步到群（玩家原话也会按聊天模板推群，群里看得到问了什么）
+- **游戏内对话**：发 `ai 你好` 或 `ai 列出在线玩家`，回复显示在游戏里并同步到群（玩家原话也会按聊天模板推群，群里看得到问了什么）。走 AstrBot 原生管线，因此**人格、记忆、工具调用提示都与 QQ 侧一致**；在 WebUI 的「提供商设置」里打开 `show_tool_use_status` / `show_tool_call_result` / `display_reasoning_text` 还能在游戏里看到 AI 的工具调用与思考过程
 - **执行指令**（QQ 或游戏内都行）：
   - 「现在几点了」→ AI 执行 `time` 并回复（纯查询，不消耗好感）
   - 「把 Steve 改成创造模式」→ AI 判断发起者身份与好感是否够，够了才执行
@@ -137,7 +139,7 @@ AI:  （这类请求一律拒绝，不调用指令工具）
 
 - **好感度不可关闭**。想实现「不限制玩家用指令」，请改**提示词**：把 `mc_command_cost_param_desc` 的价目表全部写成免费（或让 AI 永远同意）。
 - **管理员待遇也由提示词决定**：插件只把「谁是管理员」作为事实告诉 AI（写在 `<netherlink_context>` 里），并不规定该怎么对待他。给管理员更宽松的尺度写在 **`mc_command_tool_desc`**（工具描述）里——想收紧或放宽，改那一项即可。
-  上下文那段文本本身可在 `template_netherlink_context_qq` / `_game` 里配置（改措辞、换标签名、增删句子）；游戏内对话另有一段附加说明，在 `template_netherlink_request` 里配置。
+  两侧的上下文文本各自可配：QQ 侧在 `template_netherlink_context_qq`，游戏侧在 `template_netherlink_context_game`（改措辞、增删句子都可以）。
 - **⚠️ 提示词的现值直接决定 AI 行为**：`karma_rules`、两个工具描述与两个参数说明都**每次都注入**（参数说明仅 `skills_like` 模式下延迟加载），且插件**不会告警、也不会自动纠正**——里面若写着占位文案（如「好感度系统已关闭」）或与当前机制冲突的说明，AI 就照它执行。请到 WebUI 确认它们是真规则（留空会回退默认值）。
 - **查询不写盘**：AI 每次对话都会查好感，这类查询只读内存，只有真正增减时才写入文件。
 
