@@ -1,6 +1,6 @@
 name: astrbot_plugin_netherlink
 author: MoeDawn
-version: 0.0.5
+version: 0.1.0
 desc: Minecraft(Paper) 服务器与 QQ 群双向消息互通，支持自然语言执行 MC 指令与游戏内机器人对话
 display_name: NetherLink 群服互通
 main: main.py
