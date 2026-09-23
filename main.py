@@ -368,6 +368,25 @@ class NetherLinkPlugin(Star):
         self.group_names: dict[str, str] = self._parse_group_names(
             config.get("group_names") or []
         )
+        # ⚠️ **存量配置兼容**（2026-09-23 修的真实 bug）：`target_groups` 配置项已删除，
+        # 但**已保存过配置的部署**返回的是当年落盘的那份——里面只有 `target_groups`，
+        # `group_names` 是空的。此时名单解析为空 → `on_group_message` 的第一道闸门
+        # 把**一切** QQ→MC 挡掉，表现为「AI 的回复不进游戏公屏」，而且**完全静默**
+        # （不报错、插件照常回 QQ 群，只有游戏公屏收不到）。
+        # 所以 group_names 为空时回退去读旧键——只取键，值用键自身（群名回退群号）。
+        #
+        # ❌ 为什么不能只是「让用户自己去 WebUI 改」：用户在配置页看到的是一个
+        #    **空列表**，而那不会有任何提示说「你的群号在另一个已废弃的项里」。
+        #    静默失效正是本项目一直在防的失败模式（见 claude.md「五个坑」）。
+        if not self.group_names:
+            legacy = self._parse_csv(config.get("target_groups", []))
+            if legacy:
+                self.group_names = {g: g for g in sorted(legacy)}
+                logger.warning(
+                    "NetherLink: group_names 为空，已回退使用**已废弃**的配置项 "
+                    f"target_groups={sorted(legacy)}。⚠️ 请把群号填进 group_names"
+                    "（该配置项已不再在配置页显示）"
+                )
         # 游戏侧对话的系统提示词拼装：
         # [WebUI 人格（可开关）] + [自定义提示词] + [karma 好感规则（始终注入）]
         self.enable_webui_persona: bool = bool(config.get("enable_webui_persona", True))
