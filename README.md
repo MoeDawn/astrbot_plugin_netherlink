@@ -7,7 +7,11 @@
 - **游戏内机器人对话**：玩家发唤醒词开头的话即可与 AI 对话，玩家的话与 AI 的回复都同步到群
 - **好感度系统**：AI 依对话与请求自主增减好感，好感存在服务端，影响它的态度与是否愿意办事
 
-配套的 MC 服务端插件：[netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)
+配套的 MC 端（**二选一**，都是独立仓库）：
+- [netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server) —— Paper / Purpur / Folia 服务端插件
+- [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric) —— Fabric 服务端模组
+
+> 两者**协议完全相同**，接同一个 AstrBot 插件，服务端不用改配置。
 
 ## 效果示例
 
@@ -44,7 +48,7 @@ AstrBot WebUI → 插件 → 插件市场 → 搜索「NetherLink」安装。
 > `ws_ports` 里写的 `server-name` 要与 MC 端 `config.yml` 的 `server-name` 对应；
 > 只写端口时则直接采用 MC 端上报的那个名字。
 
-还需要：AstrBot 已配好可用的 **LLM 提供商**（对话与指令解析都依赖它），以及 MC 端已装 [netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)。
+还需要：AstrBot 已配好可用的 **LLM 提供商**（对话与指令解析都依赖它），以及 MC 端已装上述两个版本中的**任意一个**。
 
 ## 配置项
 
@@ -146,9 +150,11 @@ AI:  （这类请求一律拒绝，不调用指令工具）
 ## 环境要求
 
 - AstrBot（含可用的 LLM 提供商）
-- Minecraft 服务端：**Paper 26.3 / Purpur 26.3 / Folia**（见下表）
-- 服务端已装并运行 [netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)
-  —— 请用**同版本**的那一份（`0.1.0`）
+- Minecraft **26.3**，服务端二选一：
+  - **Paper / Purpur / Folia** → 装 [netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)
+  - **Fabric** → 装 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)
+
+  两者**协议完全相同**，接同一个本插件，区别只在 MC 端怎么装。
 - AstrBot 只需配置，无需额外依赖
 
 > **支持的服务端核心（Minecraft 26.3）**
