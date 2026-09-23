@@ -129,7 +129,7 @@ class McConn:
 
 # 好感度规则提示词默认值（AI 据此自主决定好感增减；指令的执行尺度见 mc_command 相关项）
 DEFAULT_KARMA_RULES = """[好感度规则]
-你和群友/玩家之间存在一个好感值,初始值 20,最低 -50,最高 100.
+你和群友/玩家之间存在一个好感值,初始值 {karma_initial},最低 {karma_min},最高 {karma_max}.
 你和对方对话时,根据此数值来改变说话方式和态度.
 对方获得成就,和你进行正常/友善的对话,你可以调用好感度工具增加此数值;
 对方发表不友好言论,你也可以调用好感度工具扣除好感.
@@ -262,6 +262,32 @@ DEFAULT_BOT_NAME = "ai"
 
 
 
+def render_karma_rules(tpl: str, lo: int, hi: int, initial: int) -> str:
+    """把 karma_rules 模板里的范围占位符替换成实际数值。
+
+    支持的占位符：`{karma_min}` / `{karma_max}` / `{karma_initial}`。
+
+    ⚠️ **为什么要有这层间接**：范围自 2026-09-23 起可配，而 `DEFAULT_KARMA_RULES`
+    里原本**硬写着**「初始值 20,最低 -50,最高 100」。若把它写死，用户改了
+    `karma_max` 之后提示词里的数字就与实际裁剪范围**脱节**——正是此前
+    「提示词说 999、代码裁到 100」那个静默失效的成因。改成占位符后，
+    插件启动时按实际配置渲染，两者必然一致。
+
+    ⚠️ 抽成**模块级**函数（而不是只做实例方法）是为了让守卫也能算出期望值：
+    测试里 `DEFAULT_KARMA_RULES` 是**模板**，而 `plugin.karma_rules` 是**渲染后**
+    的文本，直接比对必然不等。守卫用同一个函数渲染即可对齐。
+
+    用户自定义的 karma_rules 若不写占位符，原样返回（不做强制注入）。
+    """
+    for ph, val in (
+        ("{karma_min}", lo),
+        ("{karma_max}", hi),
+        ("{karma_initial}", initial),
+    ):
+        tpl = tpl.replace(ph, str(val))
+    return tpl
+
+
 def _render_template(tpl: str, default: str, values: dict, required: tuple, label: str) -> str:
     """渲染注入模板；占位符写坏时回退默认模板并记 warning。
 
@@ -358,8 +384,43 @@ class NetherLinkPlugin(Star):
         # 好感度是强制机制，没有开关：想「不依赖好感度」只能改提示词。
         # ⚠️ 消耗表 2026-09-21 起已不在本项里，而移到了 mc_command 的
         # cost 参数说明（mc_command_cost_param_desc）——改这里的消耗表**不再生效**。
-        self.karma_rules: str = str(
-            config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES
+        # 好感度参数
+        # ⚠️ **范围可配**（karma_min / karma_max，2026-09-23 新增）。
+        # 此前范围硬编码在 karma.py 的 KARMA_MIN/KARMA_MAX：用户在 karma_rules
+        # 提示词里把范围改大，代码却照样裁到 -50~100，且**完全静默**。
+        # 现在范围由配置决定，karma_rules 里的数字由插件按配置渲染
+        # （占位符 {karma_min} / {karma_max}），两者不会再脱节。
+        #
+        # 归一规则：先各自兜底成整数，再**强制 lo < hi**（倒置区间会让
+        # clamp_value 恒返回 lo，等于把所有人的好感钉死，必须挡住）。
+        self.karma_min: int = self._read_int(config, "karma_min", -50)
+        self.karma_max: int = self._read_int(config, "karma_max", 100)
+        if self.karma_min >= self.karma_max:
+            logger.warning(
+                f"NetherLink: karma_min({self.karma_min}) >= karma_max({self.karma_max})，"
+                f"区间非法，已回退默认 -50~100"
+            )
+            self.karma_min, self.karma_max = -50, 100
+        # karma_initial 必须过 clamp_value：KarmaStore.get 在"无记录"路径上把
+        # initial 原样返回（只有已存的值才走 clamp_value），配置里填 500 会让所有
+        # 新玩家拿到越界的初始好感，并被 AI 当作事实报出去。
+        # OverflowError 一并兜底：JSON 里的 1e400 解析成 inf，int(inf) 抛的是
+        # OverflowError 而不是 ValueError，漏掉会直接崩掉插件加载。
+        try:
+            self.karma_initial: int = clamp_value(
+                int(config.get("karma_initial", 20)), self.karma_min, self.karma_max
+            )
+        except (TypeError, ValueError, OverflowError):
+            self.karma_initial = clamp_value(20, self.karma_min, self.karma_max)
+
+        # ⚠️ 范围/初始值占位符：默认值里的 {karma_min} / {karma_max} /
+        # {karma_initial} 在这里按**实际配置**渲染。这样用户改范围时，
+        # 只改 karma_min/karma_max 即可，提示词里写的数字会自动跟上——
+        # 不必再去逐个改提示词（那正是此前「提示词说 999、代码裁到 100」的成因）。
+        #
+        # 用户自定义的 karma_rules 若不写占位符，就原样使用（不做强制注入）。
+        self.karma_rules: str = self._render_karma_rules(
+            str(config.get("karma_rules", DEFAULT_KARMA_RULES) or DEFAULT_KARMA_RULES)
         )
         # 注入给 AI 的系统上下文模板，两场景各一份（见
         # DEFAULT_NETHERLINK_CONTEXT_QQ / DEFAULT_NETHERLINK_CONTEXT_GAME）。
@@ -404,16 +465,6 @@ class NetherLinkPlugin(Star):
         # 用户填 moedawn、游戏里是 MoeDawn 时，区分大小写的比对永远匹配不上，
         # 且完全静默。admin_mc 本身保留原样，用于提示词里展示名单。
         self._admin_mc_lower: set[str] = {k.lower() for k in self.admin_mc}
-        # 好感度参数
-        # karma_initial 必须过 clamp_value：KarmaStore.get 在"无记录"路径上把
-        # initial 原样返回（只有已存的值才走 clamp_value），配置里填 500 会让所有
-        # 新玩家拿到越界的初始好感，并被 AI 当作事实报出去。
-        # OverflowError 一并兜底：JSON 里的 1e400 解析成 inf，int(inf) 抛的是
-        # OverflowError 而不是 ValueError，漏掉会直接崩掉插件加载。
-        try:
-            self.karma_initial: int = clamp_value(int(config.get("karma_initial", 20)))
-        except (TypeError, ValueError, OverflowError):
-            self.karma_initial = clamp_value(20)
         # 这两个数都是"外部输入"（WebUI 手填），必须夹住负值：
         #   karma_death_penalty < 0 会把死亡变成好感**奖励**（-(-2) = +2）；
         #   max_command_cost <= 0 会让 clamp_cost 一律返回 0，所有指令免费。
@@ -492,10 +543,14 @@ class NetherLinkPlugin(Star):
         try:
             self._karma: KarmaStore = KarmaStore(
                 merge_records(
-                    KarmaStore.read(self._karma_path).snapshot(),
+                    KarmaStore.read(self._karma_path, self.karma_min, self.karma_max).snapshot(),
                     self._parse_config_records(),
+                    self.karma_min,
+                    self.karma_max,
                 ),
                 self._karma_path,
+                self.karma_min,
+                self.karma_max,
             )
         except Exception as e:
             logger.error(f"NetherLink: 好感度记录加载失败（磁盘文件不可读）: {e}")
@@ -547,6 +602,25 @@ class NetherLinkPlugin(Star):
     # 整串当成一个元素（如 admin_mc 变成 {"MoeDawn，Steve"}，永远匹配不上）。
     # 统一归一化成半角逗号再切分。
     _SEPARATORS = str.maketrans({"，": ",", "、": ",", "；": ",", ";": ",", "\u3000": ","})
+
+    @staticmethod
+    def _read_int(config, key: str, default: int) -> int:
+        """读一个整数配置项，任何异常都回退默认值。
+
+        与 `_parse_csv` 等解析函数同一口径：配置来自 WebUI 手填，是外部输入，
+        不能因为填了非数字就崩掉插件加载。
+        """
+        try:
+            return int(config.get(key, default))
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(f"NetherLink: 配置项 {key} 不是合法整数，已回退默认值 {default}")
+            return default
+
+    def _render_karma_rules(self, text: str) -> str:
+        """把 karma_rules 里的范围占位符替换成实际配置值。"""
+        return render_karma_rules(
+            text, self.karma_min, self.karma_max, self.karma_initial
+        )
 
     @staticmethod
     def _parse_csv(raw: str) -> set[str]:
@@ -740,7 +814,7 @@ class NetherLinkPlugin(Star):
                 if origin and self.log_karma_changes:
                     logger.info(
                         f"NetherLink: [{origin}] {key} 好感 {old} → {new}"
-                        f"（{delta:+d}，范围 -50~100）"
+                        f"（{delta:+d}，范围 {self.karma_min}~{self.karma_max}）"
                     )
             return old, new
 
@@ -2367,7 +2441,7 @@ class NetherLinkPlugin(Star):
                 key = identity_key("qq", str(event.get_sender_name() or qq), qq)
                 origin = "QQ 对话"
             if not int(delta or 0):
-                return f"[{key}] 当前好感值：{await self._karma_get(key)}（范围 -50~100）。"
+                return f"[{key}] 当前好感值：{await self._karma_get(key)}（范围 {self.karma_min}~{self.karma_max}）。"
             old, new = await self._karma_add(key, int(delta), origin=origin)
             return f"[{key}] 好感值 {old} → {new}（本次 {int(delta):+d}）。"
         except Exception as e:

@@ -19,17 +19,24 @@ KARMA_MAX = 100
 KARMA_MAX_RECORDS = 500
 
 
-def clamp_value(v: object) -> int:
-    """好感值裁剪到 [KARMA_MIN, KARMA_MAX]。
+def clamp_value(v: object, lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> int:
+    """好感值裁剪到 [lo, hi]（默认 KARMA_MIN ~ KARMA_MAX）。
 
+    ⚠️ 范围 2026-09-23 起**可配**（`karma_min` / `karma_max`），所以不再硬编码——
+    此前用户在 `karma_rules` 提示词里把范围改大，代码却照样裁到 -50~100，
+    而且是**静默的**（不报错、不告警）。现在提示词里的数字由插件按配置渲染
+    （占位符 `{karma_min}` / `{karma_max}`），两者不会再脱节。
+
+    `lo > hi` 这类错误配置由调用方归一，本函数只保证「不抛异常」——
+    真的传入倒置区间时，max(lo, min(hi, n)) 会返回 lo，不会崩。
     任何输入都不得抛异常——本函数在插件初始化路径（KarmaStore.read → merge_records）
     上被调用，异常会直接崩掉插件加载。
 
     非数字归 0。溢出按方向夹到边界：JSON 里的 1e400 会被解析成 inf，而
     int(inf) 抛的是 OverflowError（不是 ValueError，不会被降级捕获），
-    所以这里显式分流。inf 视作"极大"夹到 KARMA_MAX，与超大整数 10**400 的处理
-    保持一致；-inf 夹到 KARMA_MIN。nan 无法判断方向，且 min/max 对 nan 的比较
-    恒为 False（会让 nan 意外变成 KARMA_MAX），故显式归 0。
+    所以这里显式分流。inf 视作"极大"夹到 hi，与超大整数 10**400 的处理
+    保持一致；-inf 夹到 lo。nan 无法判断方向，且 min/max 对 nan 的比较
+    恒为 False（会让 nan 意外变成 hi），故显式归 0。
     """
     try:
         n = int(v)
@@ -41,9 +48,9 @@ def clamp_value(v: object) -> int:
         if math.isnan(f):
             return 0
         if math.isinf(f):
-            return KARMA_MAX if f > 0 else KARMA_MIN
+            return hi if f > 0 else lo
         n = int(f)
-    return max(KARMA_MIN, min(KARMA_MAX, n))
+    return max(lo, min(hi, n))
 
 
 def clamp_cost(v: object, cap: int) -> int:
@@ -85,7 +92,8 @@ def identity_key(source: str, initiator: str, qq: str) -> str:
     return f"mc:{initiator}"
 
 
-def merge_records(file_records: dict, config_records: dict) -> dict:
+def merge_records(file_records: dict, config_records: dict,
+                  lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> dict:
     """合并文件与配置里的好感记录。
 
     **配置优先**：`config_records`（WebUI 里 `karma_records` 的值）是管理员手改入口，
@@ -105,7 +113,7 @@ def merge_records(file_records: dict, config_records: dict) -> dict:
         if isinstance(rec, bool) or not isinstance(rec, (int, float)):
             return None
         try:
-            return clamp_value(rec)
+            return clamp_value(rec, lo, hi)
         except (TypeError, ValueError, OverflowError):
             return None
 
@@ -144,20 +152,23 @@ class KarmaStore:
     本类只负责数据正确性与文件原子写。
     """
 
-    def __init__(self, records: dict, path=None):
+    def __init__(self, records: dict, path=None, lo: int = KARMA_MIN, hi: int = KARMA_MAX):
         self._records = records
         self._path = Path(path) if path else None
+        # 好感范围由配置决定（karma_min / karma_max），store 只持有不解释
+        self._lo = lo
+        self._hi = hi
         # 上次 add 淘汰掉的键（供调用方记 warning）；无淘汰时为空列表
         self.last_dropped: list = []
 
     @classmethod
-    def read(cls, path) -> "KarmaStore":
+    def read(cls, path, lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> "KarmaStore":
         """从文件加载；文件不存在或损坏时返回空表。
 
         加载时经 merge_records 归一化：手改过的文件可能有非 dict 条目或越界值，
         不归一化会让 snapshot() 抛 TypeError（插件初始化路径没有 try/except）。
         """
-        return cls(merge_records(read_json(Path(path), {}), {}), path)
+        return cls(merge_records(read_json(Path(path), {}), {}), path, lo, hi)
 
     def get(self, key: str, initial: int) -> int:
         """读取好感值；无记录返回 initial。不写盘。
@@ -171,7 +182,7 @@ class KarmaStore:
         if isinstance(rec, bool) or not isinstance(rec, (int, float)):
             return initial
         try:
-            return clamp_value(rec)
+            return clamp_value(rec, self._lo, self._hi)
         except (TypeError, ValueError, OverflowError):
             return initial
 
@@ -180,7 +191,7 @@ class KarmaStore:
         old = self.get(key, initial)
         if not delta:
             return old, old
-        new = clamp_value(old + int(delta))
+        new = clamp_value(old + int(delta), self._lo, self._hi)
         self._records[key] = new
         self._records, dropped = evict_oldest(self._records, KARMA_MAX_RECORDS)
         self.last_dropped = dropped
