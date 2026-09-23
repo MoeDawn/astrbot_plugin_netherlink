@@ -334,10 +334,10 @@ class NetherLinkPlugin(Star):
         # 多服务器功能落地后已删除（用户 2026-09-19 确认）。
         # 形如 "8765,8766"（server-name 取 MC 端上报值）
         # 或   "survival:8765,creative:8766"（显式指定 server-name，推荐）
-        self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", ""))
+        self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", []))
         self.auth_token: str = config.get("auth_token", "")
-        self.target_groups: set[str] = self._parse_csv(config.get("target_groups", ""))
-        self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", ""))
+        self.target_groups: set[str] = self._parse_csv(config.get("target_groups", []))
+        self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", []))
         # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致。
         # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
         # `type: "list"`（WebUI 的「修改列表项」弹窗），但已部署实例拿到的
@@ -354,13 +354,13 @@ class NetherLinkPlugin(Star):
         # ⚠️ **不要包 str()**：该配置项现在是 list，str(list) 会变成
         # "['a', 'b']" 这种字符串，解析出来全是带引号的怪键（实测踩到）。
         self.server_display_names: dict = self._parse_group_names(
-            config.get("server_display_names") or ""
+            config.get("server_display_names") or []
         )
         self.mc_bot_name: str = str(
             config.get("mc_bot_name", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
         )
         self.group_names: dict[str, str] = self._parse_group_names(
-            config.get("group_names") or ""
+            config.get("group_names") or []
         )
         # 游戏侧对话的系统提示词拼装：
         # [WebUI 人格（可开关）] + [自定义提示词] + [karma 好感规则（始终注入）]
@@ -465,7 +465,7 @@ class NetherLinkPlugin(Star):
             or DEFAULT_KARMA_DELTA_PARAM_DESC
         )
         # 管理员游戏 ID（AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效）
-        self.admin_mc: set[str] = self._parse_csv(config.get("admin_mc", ""))
+        self.admin_mc: set[str] = self._parse_csv(config.get("admin_mc", []))
         # 匹配用的小写副本：MC 登录名不区分大小写，而 getName() 返回**规范拼写**。
         # 用户填 moedawn、游戏里是 MoeDawn 时，区分大小写的比对永远匹配不上，
         # 且完全静默。admin_mc 本身保留原样，用于提示词里展示名单。
