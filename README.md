@@ -16,10 +16,12 @@
 | 项 | 要求 |
 |---|---|
 | **AstrBot** | `>= 4.16, < 5` |
-| **Minecraft** | **26.3**（换版本需重新编译 MC 端） |
+| **Minecraft** | **26.3** |
 | **MC 端** | 二选一：[netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)（Paper / Purpur / Folia）<br>或 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（Fabric 版） |
 
 > 两个 MC 端**协议完全相同**，接同一个 AstrBot 插件，服务端不用改配置。
+
+> ⚠️ MC 端按 Minecraft 26.3 的 API 编译，**其他 MC 版本暂未适配**。
 
 **MC 端支持的服务端核心：**
 
@@ -27,7 +29,7 @@
 |---|---|---|
 | **Paper 26.3** | ✅ 已验证 | 可以正常使用 |
 | **Purpur 26.3** | ✅ 可运行 | Paper 的分支，API 与事件完全一致 |
-| **Fabric 26.3** | ✅ 可用 | 见 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（独立模组） |
+| **Fabric 26.3** | ✅ 可用 | 见 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（fabric核心） |
 | **Folia** | ⚠️ 已适配，未实机验证 | 已改用 Paper/Folia 共用的调度器并声明 `folia-supported`，但没跑过真 Folia |
 | Spigot | ❌ 不支持 | 缺 `Bukkit.createCommandSender`（Paper 专有扩展，用于捕获指令输出） |
 | NeoForge | ❌ 不支持 | 尚未移植 |
