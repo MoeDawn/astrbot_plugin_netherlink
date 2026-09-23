@@ -1952,17 +1952,13 @@ class NetherLinkPlugin(Star):
     async def _bind_game_platform(self) -> None:
         """启动完成时把游戏侧适配器绑到本插件实例（必要时补加载）。
 
-        必须是这个钩子，因为框架的启动顺序是：
-            plugin_manager.reload()         <- 插件加载，__init__ 在这里跑
-            platform_manager.initialize()   <- 平台实例化
-            on_astrbot_loaded 钩子          <- 本方法在这里跑
-        所以插件 __init__ 里去看适配器**必然**看到「尚未实例化」——
-        2026-09-22 实测就是这么踩到的（日志里那句是误导）。
+        必须用这个钩子，因为框架的启动顺序是：插件加载（__init__ 在这里跑）、
+        平台实例化、最后才触发 on_astrbot_loaded。所以插件 __init__ 里去看适配器
+        必然看到「尚未实例化」，日志里那句是误导（2026-09-22 实测踩到）。
 
-        同时做**补加载**：配置里有记录但框架没实例化出来时，由插件自己
-        调 load_platform 拉起来。比只提示用户重启可靠——在 WebUI 里改完
-        配置不重启也能生效。走 load_platform 而不是自己 new 实例，
-        否则会绕过框架的生命周期管理（terminate/reload 都管不到它）。
+        同时做补加载：配置里有记录但框架没实例化出来时，由插件自己调
+        load_platform 拉起来，比只提示用户重启可靠。走 load_platform 而不是自己
+        new 实例，否则会绕过框架的生命周期管理，terminate 与 reload 都管不到它。
         """
         if not self.enable_game_platform:
             return
@@ -2087,16 +2083,15 @@ class NetherLinkPlugin(Star):
 
     @filter.on_plugin_loaded()
     async def _rebind_game_platform_after_reload(self, metadata) -> None:
-        """插件热重载后，把**仍然活着的**适配器重新绑到新插件实例。
+        """插件热重载后，把仍然活着的适配器重新绑到新插件实例。
 
-        为什么需要它：重载会换掉插件对象，但框架只清理注册表里的类型，
-        **不停掉已在运行的平台实例**（star_manager 的 unregister 只动
-        `platform_cls_map`）。于是旧实例继续活着、却还引用着**旧插件对象**：
-        读的是旧配置，写的是旧状态。修法是每次插件加载完都重绑一次。
+        为什么需要：重载会换掉插件对象，但框架只清理注册表里的类型，不停掉已在
+        运行的平台实例。于是旧实例继续活着、却还引用着旧插件对象：读的是旧配置，
+        写的是旧状态。修法是每次插件加载完都重绑一次。
 
-        为什么不走适配器的模块级注册表（`get_adapter`）：重载时
-        `mc_platform` 会被重新导入，那个字典是**新的、空的**，而实例是
-        **老的**——两边对不上。实例存活的位置是 `platform_insts`，从那里找。
+        为什么不查适配器的模块级注册表：重载时 mc_platform 会被重新导入，
+        那个字典是新的、空的，而实例是老的，两边对不上。实例存活的位置是
+        platform_insts，从那里找。
         """
         if not self.enable_game_platform:
             return
@@ -2197,37 +2192,28 @@ class NetherLinkPlugin(Star):
     async def inject_qq_identity(self, event, req) -> None:
         """给 QQ 侧的 LLM 请求补上完整上下文。
 
-        注入的是 `_build_context` 的全部产物：好感规则 + 查好感的引导 +
-        在线服务器清单 + 管理员与来源（`<netherlink_context>`）。
-        方法名保留 `inject_qq_identity` 是历史原因（起初只注身份），
-        改名会牵动 AstrBot 的 handler 注册，收益不大。
+        注入的是 _build_context 的全部产物：好感规则、在线服务器清单、管理员与身份。
+        方法名保留 inject_qq_identity 是历史原因（起初只注身份），改名会牵动 AstrBot
+        的 handler 注册，收益不大。
 
-        为什么需要它：QQ 侧**普通对话**走的是 AstrBot 主 agent，其 system_prompt
-        由框架内建、插件注入不进去（见 claude.md 的权限模型一节）。于是群友只是
-        跟 AI 聊天时，AI 完全不知道对方是谁。此前只有「群友请求执行指令、插件另起
-        内层 agent」那条路径的 system_prompt 归插件管；内层 agent 已于 2026-09-21
-        删除，QQ 侧只剩主 agent 一条路径，本钩子因此是唯一的注入点。它由 AstrBot
-        提供（`astrbot/api/event/filter/__init__.py` 导出，
-        `register_on_llm_request` 定义）。
+        为什么需要：QQ 侧普通对话走 AstrBot 主 agent，其 system_prompt 由框架内建、
+        插件注入不进去。群友只是聊天时，AI 完全不知道对方是谁。QQ 侧曾另起内层 agent
+        处理指令，内层已于 2026-09-21 删除，只剩主 agent 一条路径，本钩子因此是唯一
+        的注入点。
 
-        ⚠️ **这个钩子是全局的**：对**每一个** LLM 请求都会触发（包括其他插件的
-        请求，如用户画像分析、AstrBot 自身的定时任务）。因此必须严格认准来源，
-        绝不污染别人的提示词——只处理 **aiocqhttp 的群消息**（判据见下与
-        `_is_aiocqhttp_event`）：私聊、其他平台、其他插件构造的请求一律不碰。
+        这个钩子是全局的：对每一个 LLM 请求都会触发，包括其他插件的请求（如用户画像
+        分析）。所以必须严格认准来源，只处理 aiocqhttp 的群消息，私聊与其他平台一律
+        不碰，否则会污染别人的提示词。
 
-        幂等：system_prompt 里已有 `<netherlink_context>` 就不再追加。
-        ⚠️ 这不是可有可无的优化：钩子是全局的，同一个 `ProviderRequest` 可能
-        被重复处理，不去重会把整段上下文叠两次——AI 会同时看到两份身份，
-        后一份还带着重复的好感规则。判断点放在**两条分支之前**，两份默认模板
-        都带这个标签（游戏侧 2026-09-22 补回了包裹标签）。
+        幂等：system_prompt 里已有 netherlink_context 标签就不再追加。这不是可有可无
+        的优化——同一个请求可能被重复处理，不去重会把整段上下文叠两次，AI 会同时看到
+        两份身份。判断点必须在两条分支之前。
 
-        游戏侧**不再走自建 agent**（2026-09-22 删除）：它与 QQ 侧同为本钩子
-        的两个分支，game 分支由 `_build_game_context` 拼装、QQ 分支由
-        `_build_context` 拼装。
+        游戏侧也走本钩子（2026-09-22 起不再自建 agent），只是走 game 分支、由
+        _build_game_context 拼装。
 
-        2026-09-20 起**不再看 target_groups**：那项现在只管消息互通（转发与
-        推群），本钩子对所有 aiocqhttp 群生效——未绑定群里的 AI 也认得出
-        发起者与管理员。
+        2026-09-20 起不再看 target_groups：那项只管消息互通，本钩子对所有
+        aiocqhttp 群生效。
         """
         try:
             # 幂等：这个请求已经注入过了就不再追加。见 docstring 里的说明——
@@ -2292,18 +2278,15 @@ class NetherLinkPlugin(Star):
 
         """绑定群的普通消息转发进游戏公屏；游戏侧事件则在此打开 LLM 阀门。
 
-        ⚠️ **`event.is_at_or_wake_command` 必须在这里补上**（2026-09-22 实测定位）。
-        `ProcessStage` 只在它为真时才发起 LLM 请求：
-            if (not event._has_send_oper and event.is_at_or_wake_command
-                    and not event.call_llm):  ->  agent_sub_stage
-        而它**只由 `WakingCheckStage` 的「唤醒词 / @ / 私聊」三条路**置真——
-        插件注册的普通 handler 只会把 `is_wake` 置真，**不碰这个字段**。
-        症状：游戏内消息一路走到 `ProcessStage`、handler 也被调用了，
-        然后管道静默结束（`pipeline execution completed.`），
-        **LLM 请求根本没发起**，日志里连一条报错都没有。
+        event.is_at_or_wake_command 必须在这里补上（2026-09-22 实测定位）。
+        ProcessStage 只在它为真时才发起 LLM 请求，而它只由 WakingCheckStage 的
+        「唤醒词 / @ / 私聊」三条路置真——插件注册的普通 handler 只会把 is_wake
+        置真，不碰这个字段。
 
-        顺序是安全的：`ProcessStage` 先跑 handler（stage.py:37），
-        再检查这个字段（stage.py:56）。
+        症状：游戏内消息一路走到 ProcessStage、handler 也被调用了，然后管道静默
+        结束，LLM 请求根本没发起，日志里连一条报错都没有。
+
+        顺序是安全的：ProcessStage 先跑 handler，再检查这个字段。
         """
         try:
             # 游戏侧（原生平台）的消息不能被 target_groups 拦住——那项只管
