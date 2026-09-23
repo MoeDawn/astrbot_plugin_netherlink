@@ -30,17 +30,11 @@
     "default": "ai",
     "hint": "用于模板里的 {bot} 占位符"
   },
-  "target_groups": {
-    "description": "绑定的 QQ 群号",
-    "type": "list",
-    "default": [],
-    "hint": "【QQ 群互通】\nMC 服务器消息互通的目标群,这些群的消息会转发进 MC,MC 消息也会推送到这些群"
-  },
   "group_names": {
-    "description": "群号与群名映射",
+    "description": "绑定的 QQ 群",
     "type": "list",
     "default": [],
-    "hint": "群号与群名映射,格式为 群号:群名,如 123456:水群\n未配置的群将用群号代替"
+    "hint": "【QQ 群互通】\n消息互通的目标群:这些群的消息会转发进 MC,MC 消息也会推送到这些群\n格式为 群号 或 群号:群名,如 123456 或 123456:水群(不填群名时显示为群号)"
   },
   "enable_chat": {
     "description": "同步游戏聊天 MC→QQ",

@@ -336,7 +336,6 @@ class NetherLinkPlugin(Star):
         # 或   "survival:8765,creative:8766"（显式指定 server-name，推荐）
         self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", []))
         self.auth_token: str = config.get("auth_token", "")
-        self.target_groups: set[str] = self._parse_csv(config.get("target_groups", []))
         self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", []))
         # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致。
         # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
@@ -359,6 +358,13 @@ class NetherLinkPlugin(Star):
         self.mc_bot_name: str = str(
             config.get("mc_bot_name", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
         )
+        # 群号 → 群名。⚠️ 这一项**同时承担两个职责**（2026-09-23 用户要求合并）：
+        #   - **键** 是绑定群号，决定消息互通的范围（MC→QQ 推送、QQ→MC 转发）
+        #   - **值** 是显示名，用于 {group} 占位符
+        # 只填群号（不带冒号）时，值等于键——即「群名回退成群号」，由
+        # _parse_group_names 的 else 分支保证，不是这里补的。
+        # ❌ 曾经还有一个独立的 `target_groups` 配置项，与这一项的键完全重复，
+        #    两个地方各填一遍群号，改一个忘一个就静默失效，故合并删除。
         self.group_names: dict[str, str] = self._parse_group_names(
             config.get("group_names") or []
         )
@@ -587,7 +593,7 @@ class NetherLinkPlugin(Star):
         logger.info(
             f"NetherLink: 配置解析结果 —— 管理员(游戏)={sorted(self.admin_mc) or '未配置'} "
             f"管理员(QQ)={sorted(self.admin_qq) or '未配置'} "
-            f"绑定群={sorted(self.target_groups) or '未配置'} "
+            f"绑定群={sorted(self.group_names) or '未配置'} "
             f"端口绑定={self.ws_bindings}"
         )
 
@@ -1429,7 +1435,7 @@ class NetherLinkPlugin(Star):
             f"[{self._mc_server_display(server_id)}] {self.mc_bot_name}: {text}"
         )
         logger.info(
-            f"NetherLink: Ai 回复已同步到 {len(self.target_groups)} 个绑定群"
+            f"NetherLink: Ai 回复已同步到 {len(self.group_names)} 个绑定群"
         )
 
     def _init_game_platform(self) -> None:
@@ -1728,7 +1734,7 @@ class NetherLinkPlugin(Star):
     def _inject_platform_ids(self) -> set:
         """会走**身份注入**的平台标识集合（aiocqhttp 实例的 meta().id）。
 
-        注入范围自 2026-09-20 起不再由 `target_groups` 界定：绑定群只管消息互通，
+        注入范围自 2026-09-20 起不再由绑定群名单界定：绑定群只管消息互通，
         身份注入与好感度对所有群生效。但仍**必须**限制平台——`on_llm_request`
         钩子是全局的，对每个 LLM 请求都触发；不认平台就会把「MC 群服互通」的
         上下文注入到 Telegram / 网页聊天等其他平台的请求里。
@@ -1867,7 +1873,7 @@ class NetherLinkPlugin(Star):
 
     async def _broadcast(self, text: str):
         """向所有绑定群推送文本。"""
-        if not self.target_groups:
+        if not self.group_names:
             logger.warning("NetherLink: 没有配置绑定群，消息无处推送")
             return
         platform_id = self._resolve_qq_platform_id()
@@ -1877,7 +1883,7 @@ class NetherLinkPlugin(Star):
                 "（请确认 OneBot/aiocqhttp 适配器已启用）"
             )
             return
-        for group in self.target_groups:
+        for group in self.group_names:
             umo = f"{platform_id}:GroupMessage:{group}"
             try:
                 # send_message 在找不到平台时**返回 False 而不抛异常**，
@@ -2212,7 +2218,7 @@ class NetherLinkPlugin(Star):
         游戏侧也走本钩子（2026-09-22 起不再自建 agent），只是走 game 分支、由
         _build_game_context 拼装。
 
-        2026-09-20 起不再看 target_groups：那项只管消息互通，本钩子对所有
+        2026-09-20 起不再看绑定群名单：那份名单只管消息互通，本钩子对所有
         aiocqhttp 群生效。
         """
         try:
@@ -2289,13 +2295,13 @@ class NetherLinkPlugin(Star):
         顺序是安全的：ProcessStage 先跑 handler，再检查这个字段。
         """
         try:
-            # 游戏侧（原生平台）的消息不能被 target_groups 拦住——那项只管
+            # 游戏侧（原生平台）的消息不能被绑定群名单拦住——那份名单只管
             # QQ 群的消息互通。这里放行并打开 LLM 阀门。
             if event.get_platform_id() == GAME_PLATFORM_ID:
                 event.is_at_or_wake_command = True
                 return
             group_id = str(event.get_group_id() or "")
-            if group_id not in self.target_groups:
+            if group_id not in self.group_names:
                 return
             # 记下这条真实会话的 umo，供 _broadcast 主动推送时取首段（平台标识）。
             # 放在开关校验之前：即便 QQ->MC 转发关着，这条信息依然有效且有用。
