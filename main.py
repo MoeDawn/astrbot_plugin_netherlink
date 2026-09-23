@@ -338,24 +338,29 @@ class NetherLinkPlugin(Star):
         self.auth_token: str = config.get("auth_token", "")
         self.target_groups: set[str] = self._parse_csv(config.get("target_groups", ""))
         self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", ""))
-        # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致
-        self.mc_wake_prefixes: list[str] = [
-            p.strip() for p in str(config.get("mc_wake_prefixes", "ai,助手")).split(",") if p.strip()
-        ]
+        # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致。
+        # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
+        # `type: "list"`（WebUI 的「修改列表项」弹窗），但已部署实例拿到的
+        # 仍是旧字符串（AstrBot 只补缺失键、不覆盖已有值）——两种都要认。
+        self.mc_wake_prefixes: list[str] = self._as_str_list(
+            config.get("mc_wake_prefixes", ["ai", "助手"])
+        )
         # 名称与占位符：模板里可用 {server}/{group}/{bot} 分别替换为
         # 服务器名/群名/机器人游戏内名字。
         # 按服务器区分显示名：server_id -> 显示名；没配的服务器回退
         # DEFAULT_SERVER_DISPLAY（"MC"）。以前这里还有一个只能填一个值的
         # `mc_server_name`，多服务器功能落地后已删除（用户 2026-09-19 确认）。
         # 显示名始终由本插件决定——MC 端只上报身份（server_id），不决定显示成什么。
+        # ⚠️ **不要包 str()**：该配置项现在是 list，str(list) 会变成
+        # "['a', 'b']" 这种字符串，解析出来全是带引号的怪键（实测踩到）。
         self.server_display_names: dict = self._parse_group_names(
-            str(config.get("server_display_names", "") or "")
+            config.get("server_display_names") or ""
         )
         self.mc_bot_name: str = str(
             config.get("mc_bot_name", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
         )
         self.group_names: dict[str, str] = self._parse_group_names(
-            str(config.get("group_names", "") or "")
+            config.get("group_names") or ""
         )
         # 游戏侧对话的系统提示词拼装：
         # [WebUI 人格（可开关）] + [自定义提示词] + [karma 好感规则（始终注入）]
@@ -604,6 +609,35 @@ class NetherLinkPlugin(Star):
     _SEPARATORS = str.maketrans({"，": ",", "、": ",", "；": ",", ";": ",", "\u3000": ","})
 
     @staticmethod
+    def _as_str_list(raw) -> "list[str]":
+        """把配置值归一成**字符串列表**。
+
+        ⚠️ **为什么必须同时接受 str 与 list**（2026-09-23）：
+        这几个"可配多个"的配置项已从 `type: "string"`（逗号分隔）改成
+        `type: "list"`（WebUI 里的「修改列表项」弹窗）。但 AstrBot 的
+        `check_config_integrity` **只补缺失的键、不覆盖用户已有的值**
+        （源码里是 `elif key not in conf: new_conf[key] = value`），
+        所以**已部署的实例拿到的仍是旧字符串**，而新装的拿到 list。
+
+        两种都必须能解析，否则升级会直接让这些配置失效——且是静默失效。
+        """
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            # 旧形态：单串，按分隔符切（容错中文分隔符，见 _SEPARATORS）
+            text = raw.translate(NetherLinkPlugin._SEPARATORS)
+            return [s.strip() for s in text.split(",") if s.strip()]
+        if isinstance(raw, (list, tuple, set)):
+            out = []
+            for item in raw:
+                text = str(item).translate(NetherLinkPlugin._SEPARATORS)
+                # 元素内部也可能有分隔符（用户在单个条目里粘了 "a,b"）
+                out.extend(s.strip() for s in text.split(",") if s.strip())
+            return out
+        logger.warning(f"NetherLink: 配置项类型无法识别的 {type(raw).__name__}，按空处理")
+        return []
+
+    @staticmethod
     def _read_int(config, key: str, default: int) -> int:
         """读一个整数配置项，任何异常都回退默认值。
 
@@ -623,13 +657,14 @@ class NetherLinkPlugin(Star):
         )
 
     @staticmethod
-    def _parse_csv(raw: str) -> set[str]:
-        """把 '111, 222' 形式的配置解析成无重复集合。
+    def _parse_csv(raw) -> set[str]:
+        """把配置解析成无重复集合。
 
-        容错中文分隔符（全角逗号 / 顿号 / 分号 / 全角空格）——见 _SEPARATORS。
+        接受三种形态：旧的逗号分隔**字符串**（"111, 222"）、新的 **list**
+        （["111","222"]）、以及 None/空。前者是已部署实例的存量形态，
+        后者是 `type: "list"` 之后的新形态——两者都必须支持，见 _as_str_list。
         """
-        text = str(raw or "").translate(NetherLinkPlugin._SEPARATORS)
-        return {s.strip() for s in text.split(",") if s.strip()}
+        return set(NetherLinkPlugin._as_str_list(raw))
 
     @staticmethod
     def _parse_group_names(raw: str) -> dict[str, str]:
@@ -639,14 +674,9 @@ class NetherLinkPlugin(Star):
         `server_display_names` 与 `group_names` 都走这里，写错一个字符就会
         静默失效。
         """
-        text = (
-            str(raw or "")
-            .translate(NetherLinkPlugin._SEPARATORS)
-            .replace("：", ":")
-        )
         result: dict[str, str] = {}
-        for part in text.split(","):
-            part = part.strip()
+        for part in NetherLinkPlugin._as_str_list(raw):
+            part = part.replace("：", ":")
             if not part:
                 continue
             if ":" in part:
@@ -673,11 +703,7 @@ class NetherLinkPlugin(Star):
         """
         out: list = []
         seen: set = set()
-        text = str(raw or "").translate(NetherLinkPlugin._SEPARATORS)
-        for part in text.split(","):
-            part = part.strip()
-            if not part:
-                continue
+        for part in NetherLinkPlugin._as_str_list(raw):
             part = part.replace("：", ":")
             name, _, port_s = part.rpartition(":")
             if not port_s:

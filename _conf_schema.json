@@ -7,9 +7,9 @@
   },
   "ws_ports": {
     "description": "端口绑定(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "hint": "一台 MC 服务器占一个端口,单台也只填一个.格式 server-name:端口,或只写端口;server-name 为 MC 端配置文件里的 server-name 的值.留空则不监听任何端口,启动时会报错."
+    "type": "list",
+    "default": [],
+    "hint": "端口绑定。在列表里写 server-name:端口 或只写端口,如 survival:8765 或 8765;留空则不监听任何端口,启动时会报错。(可点「添加」逐条填,回车确认)"
   },
   "auth_token": {
     "description": "连接鉴权 Token",
@@ -20,36 +20,36 @@
   },
   "target_groups": {
     "description": "绑定的 QQ 群号(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "obvious_hint": true,
-    "hint": "这些群的消息会转发进 MC,MC 事件也会推送到这些群.注意:本项只管消息互通,不影响身份注入与好感度——那些对所有群生效(未绑定群里的 AI 同样认得出发起者与管理员)"
+    "type": "list",
+    "default": [],
+    "hint": "MC 服务器消息互通的目标群。这些群的消息会转发进 MC,MC 事件也会推送到这些群。注意:本项只管消息互通,不影响身份注入与好感度——那些对所有群生效。(可点「添加」逐条填,回车确认)"
   },
   "admin_qq": {
     "description": "管理员 QQ 白名单(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "obvious_hint": true,
-    "hint": "这些 QQ 会被告知 AI 为管理员"
+    "type": "list",
+    "default": [],
+    "hint": "这些 QQ 会被告知 AI 为管理员。(可点「添加」逐条填,回车确认)"
   },
   "admin_mc": {
     "description": "管理员游戏 ID(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "obvious_hint": true,
-    "hint": "这些游戏 ID 会被告知 AI 为管理员.游戏内管理员只能在这里填,因为 AstrBot 的全局管理员是 QQ 号,对游戏内无效"
+    "type": "list",
+    "default": [],
+    "hint": "这些游戏 ID 会被告知 AI 为管理员。游戏内管理员只能在这里填,因为 AstrBot 的全局管理员是 QQ 号,对游戏内无效。(可点「添加」逐条填,回车确认)"
   },
   "mc_wake_prefixes": {
-    "description": "游戏内机器人唤醒词(逗号分隔)",
-    "type": "string",
-    "default": "ai,助手",
-    "hint": "玩家在游戏里发送以这些词开头的消息会触发机器人对话,回复在游戏内显示并同步到群.必须与 MC 端 config.yml 的 wake-prefixes 一致"
+    "description": "游戏内机器人唤醒词",
+    "type": "list",
+    "default": [
+      "ai",
+      "助手"
+    ],
+    "hint": "玩家在游戏里发送以这些词开头的消息会触发机器人对话,回复在游戏内显示并同步到群。必须与 MC 端 config 的 wake-prefixes 一致。(可点「添加」逐条填,回车确认)"
   },
   "server_display_names": {
     "description": "按服务器区分的显示名(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "hint": "格式 server-name:显示名,如 survival:生存服,creative:创造服.server-name 为 MC 端配置文件里的 server-name 的值.用于模板里的 {server} 占位符,群消息前缀与 AI 上下文.留空则显示为 MC"
+    "type": "list",
+    "default": [],
+    "hint": "按服务器区分的显示名。在列表里写 server-name:显示名,如 survival:生存服;留空则显示为 MC。(可点「添加」逐条填,回车确认)"
   },
   "mc_bot_name": {
     "description": "机器人游戏内名字",
@@ -59,10 +59,9 @@
   },
   "group_names": {
     "description": "群号与群名映射(逗号分隔)",
-    "type": "string",
-    "default": "",
-    "obvious_hint": true,
-    "hint": "格式 群号:群名,如 123456:水群,987654:生存服.用于模板里的 {group} 占位符,未配置的群用群号代替"
+    "type": "list",
+    "default": [],
+    "hint": "群号与群名映射。在列表里写 群号:群名,如 123456:水群;未配置的群用群号代替。(可点「添加」逐条填,回车确认)"
   },
   "enable_webui_persona": {
     "description": "游戏内对话启用 WebUI 配置的人格",
