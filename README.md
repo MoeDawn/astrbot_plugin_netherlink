@@ -7,7 +7,7 @@
 | **消息互通** | 游戏内聊天 / 进服 / 退服 / 死亡推到群里；群消息广播到游戏公屏（支持 `§` 染色码） |
 | **自然语言执行指令** | 说「把 Steve 改成创造模式」，AI 判断身份与好感后以控制台身份执行，服务器真实输出回传 |
 | **游戏内机器人对话** | 玩家发唤醒词开头的话即可与 AI 对话，玩家原话与 AI 回复都同步到群 |
-| **好感度系统** | AI 依对话与请求自主增减好感；好感影响它的态度与是否愿意办事 |
+| **好感度系统** | AI 依对话与请求自主增减好感；好感影响它的态度与指令执行 |
 
 ---
 
@@ -17,7 +17,7 @@
 |---|---|
 | **AstrBot** | `>= 4.16, < 5` |
 | **Minecraft** | **26.3**（换版本需重新编译 MC 端） |
-| **MC 端** | 二选一：[netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)（Paper / Purpur / Folia）<br>或 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（Fabric 模组） |
+| **MC 端** | 二选一：[netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)（Paper / Purpur / Folia）<br>或 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（Fabric 版） |
 
 > 两个 MC 端**协议完全相同**，接同一个 AstrBot 插件，服务端不用改配置。
 
@@ -25,7 +25,7 @@
 
 | 核心 | 状态 | 说明 |
 |---|---|---|
-| **Paper 26.3** | ✅ 已验证 | 当前实机运行的就是它 |
+| **Paper 26.3** | ✅ 已验证 | 可以正常使用 |
 | **Purpur 26.3** | ✅ 可运行 | Paper 的分支，API 与事件完全一致 |
 | **Fabric 26.3** | ✅ 可用 | 见 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（独立模组） |
 | **Folia** | ⚠️ 已适配，未实机验证 | 已改用 Paper/Folia 共用的调度器并声明 `folia-supported`，但没跑过真 Folia |
@@ -40,24 +40,32 @@
 
 ```text
 ⌜水群⌟ <张三> 晚上八点开打末影龙          ← QQ 群消息（群名绿、群友蓝、内容紫）
-⌜ai⌟ : 收到，记得准备好附魔装备哦～        ← 机器人回复
+⌜ai⌟ : 收到，记得准备好附魔装备           ← 机器人回复
 ⌜MC⌟ <Steve>: 大家好                      ← 游戏聊天推送到群
 ```
 
-同一句机器人的回复在 QQ 群里显示为 `⌜MC⌟ ai: 收到，记得准备好附魔装备哦～`。
+同一条机器人回复在 QQ 群里显示为 `⌜MC⌟ ai: 收到，记得准备好附魔装备`。
 
 **指令执行**（QQ 群里或游戏内都可以说）：
 
 ```text
-群友: ai，现在几点了
-AI:   （执行 time，纯查询不消耗好感）现在是游戏时间第 3 天 14:20
+群友：ai，现在几点了
+AI：  time 属纯查询，免费执行 → 现在是游戏时间第 3 天 14:20
 
-群友: ai，把 Steve 改成创造模式
-AI:   （查好感 → 判断付得起 → 执行并扣好感）搞定，Steve 已经是创造模式了
+群友：ai，把 Steve 改成创造模式
+AI：  ① 判定发起者身份（普通玩家 / 管理员）与指令风险等级
+      ② 查询发起者好感，对照价目表判断是否付得起
+      ③ 三项都通过才执行，并扣除对应好感
+      → 搞定，Steve 已经是创造模式了
 
-群友: ai，清空我的成就进度
-AI:   这个不行哦，清空了就能反复刷成就，人家不能帮你做这个
+群友：ai，清空我的成就进度
+AI：  属「一律拒绝」类（清空后可反复刷成就），不调用工具
+      → 这个不行，清空了就能反复刷成就
 ```
+
+> **判定顺序**：先看指令**该不该执行**（高危指令默认配置为一律拒绝，与好感无关），
+> 再看**发起者是不是管理员**（管理员尺度由自定义提示词配置），
+> 最后才看**好感够不够**。三者都过才执行。
 
 ---
 
@@ -74,7 +82,7 @@ AI:   这个不行哦，清空了就能反复刷成就，人家不能帮你做�
 - **Paper / Purpur / Folia** → [netherlink-plugin-server](https://github.com/MoeDawn/netherlink-plugin-server)
 - **Fabric** → [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)
 
-各自的安装步骤见对方仓库的 README。
+各自的安装步骤见对应仓库的 README。
 
 ### 3. 两边填对上
 
@@ -121,8 +129,9 @@ AI:   这个不行哦，清空了就能反复刷成就，人家不能帮你做�
 
 ### 请 AI 执行指令
 
-QQ 群里或游戏内都可以，说人话就行。AI 会自己判断：**该不该执行**（高危请求直接拒绝）、
-**要多少好感**（按价目表报价）、**发起者是不是管理员**（管理员尺度更宽松）。
+QQ 群里或游戏内都可以，用自然语言描述需求即可。AI 会自行判断三件事：
+**该不该执行**（高危请求直接拒绝）、**发起者是不是管理员**（管理员尺度更宽松）、
+**要多少好感**（按价目表报价）。
 
 ### ⚠️ `target_groups` 只管消息互通
 
