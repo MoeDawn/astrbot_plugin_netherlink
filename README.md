@@ -269,12 +269,6 @@ QQ 群或游戏内,用自然语言描述需求即可 AI 会自行判断三件事
 
 ---
 
-## 许可
-
-[MIT License](LICENSE)
-
----
-
 ## 目录结构
 
 ```text
@@ -291,3 +285,10 @@ astrbot_plugin_netherlink/
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## 许可
+
+[MIT License](LICENSE)
+
