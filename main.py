@@ -471,6 +471,10 @@ class NetherLinkPlugin(Star):
         # 或   "survival:8765,creative:8766"（显式指定 server-name，推荐）
         self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", []))
         self.auth_token: str = config.get("auth_token", "")
+        # QQ 侧主动推送用哪个机器人。留空 = 自动（见 _resolve_qq_platform_id）。
+        # ⚠️ 这一项是**显式指定**，多机器人部署下才可控；
+        # 不填时行为与历史一致（用最后发言的那个机器人）。
+        self.qq_platform_id: str = str(config.get("qq_platform_id") or "").strip()
         self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", []))
         # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致。
         # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
@@ -2032,6 +2036,23 @@ class NetherLinkPlugin(Star):
         except Exception:
             return False
 
+    def _list_qq_platform_ids(self) -> list:
+        """列出当前**运行中**的 aiocqhttp 实例标识，供报错时给用户看。
+
+        ⚠️ **已停用的机器人不在这个列表里**——`platform_manager.load_platform`
+        开头就是 `if not platform_config["enable"]: return`。停用的确实发不了消息，
+        所以被判为「不存在」是对的，但提示里要说明，免得用户以为是插件漏列了。
+        """
+        ids = []
+        try:
+            for platform in self.context.platform_manager.platform_insts:
+                meta = platform.meta()
+                if getattr(meta, "name", "") == "aiocqhttp" and meta.id:
+                    ids.append(str(meta.id))
+        except Exception as e:
+            logger.error(f"NetherLink: 枚举 aiocqhttp 实例失败: {e}")
+        return ids
+
     def _platform_inst_is_alive(self, platform_id: str) -> bool:
         """该平台标识此刻是否真的有对应实例（用户可能改名或删掉适配器）。"""
         try:
@@ -2076,6 +2097,24 @@ class NetherLinkPlugin(Star):
         返回空串表示当前没有可用实例（如 OneBot 适配器未启用）——调用方据此
         跳过推送并记日志，而不是发一条注定被丢弃的消息。
         """
+        # ── ① 配置显式指定（最高优先级）──
+        # ⚠️ **找不到时不静默回退**：用户显式指定却对不上，说明配置错了。
+        # 回退到「随便挑一个」会让他以为配置生效了，而消息其实发去了别处。
+        # 响亮报错 + 不推送 比「发到错误的机器人」好。
+        if self.qq_platform_id:
+            if self._platform_inst_is_alive(self.qq_platform_id):
+                return self.qq_platform_id
+            available = self._list_qq_platform_ids()
+            logger.error(
+                f"NetherLink: qq_platform_id 配置的 [{self.qq_platform_id}] 不存在，"
+                f"当前可用的有：{' / '.join(available) or '（一个都没有）'}。\n"
+                f"    → 消息未推送。请到配置里改成上面之一，或留空让插件自动选择。\n"
+                f"    提示：① 已**停用**的机器人不在这个列表里；"
+                f"② 名称含冒号会被 AstrBot 自动改名，以这里的写法为准。"
+            )
+            return ""
+
+        # ── ② 学到的真实会话（未配置时的历史行为）──
         learned = self._qq_umo_seen.split(":", 1)[0] if self._qq_umo_seen else ""
         if learned:
             if self._platform_inst_is_alive(learned):
@@ -2186,6 +2225,30 @@ class NetherLinkPlugin(Star):
         load_platform 拉起来，比只提示用户重启可靠。走 load_platform 而不是自己
         new 实例，否则会绕过框架的生命周期管理，terminate 与 reload 都管不到它。
         """
+        # QQ 推送机器人的解析结果——**这是用户唯一能立刻看出「我配的那个名字
+        # 到底有没有生效」的地方**。platform_insts 要等到这个钩子才填充完毕
+        # （框架是「先加载插件、后初始化平台」），所以不能放在 __init__ 里。
+        try:
+            if self.qq_platform_id:
+                if self._platform_inst_is_alive(self.qq_platform_id):
+                    logger.info(
+                        f"NetherLink: QQ 推送机器人 = {self.qq_platform_id}"
+                        f"（来自 qq_platform_id 配置）"
+                    )
+                else:
+                    logger.error(
+                        f"NetherLink: QQ 推送机器人配置的 [{self.qq_platform_id}] 不存在，"
+                        f"当前可用的有：{' / '.join(self._list_qq_platform_ids()) or '（一个都没有）'}"
+                        f" —— 群消息将无法推送，请到配置里改。"
+                    )
+            else:
+                logger.info(
+                    "NetherLink: QQ 推送机器人 = 自动"
+                    "（未配 qq_platform_id，用最后发言的那个机器人）"
+                )
+        except Exception as e:
+            logger.debug(f"NetherLink: 打印 QQ 推送机器人解析结果失败（忽略）: {e}")
+
         if not self.enable_game_platform:
             return
         try:
