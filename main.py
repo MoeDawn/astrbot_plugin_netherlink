@@ -333,19 +333,56 @@ def load_bundled_schema() -> dict:
         return {}
 
 
+# 非文本组件 → 占位符。⚠️ **缺失的后果是静默的**：群友发张图，
+# 游戏里什么都没发生，发的人以为插件坏了（2026-09-24 用户提出）。
+# 按**类型名**匹配（不 import AstrBot 的组件类）——组件类名稳定，
+# 且本模块要能在 AstrBot 组件体系变化时退化而不是崩。
+_COMPONENT_PLACEHOLDERS = (
+    ("image", "[图片]"),
+    ("face", "[表情]"),
+    ("record", "[语音]"),
+    ("video", "[视频]"),
+    ("file", "[文件]"),
+    ("forward", "[合并转发]"),
+    ("json", "[卡片消息]"),
+    ("xml", "[卡片消息]"),
+    ("reply", "[回复]"),
+    ("poke", "[戳一戳]"),
+)
+
+
+def _component_placeholder(comp) -> str:
+    """给非文本组件找一个占位符；认不出来就返回空串（保持旧行为）。"""
+    name = type(comp).__name__.lower()
+    for key, label in _COMPONENT_PLACEHOLDERS:
+        if key in name:
+            return label
+    return ""
+
+
 def _mc_chain_to_plain(chain) -> str:
     """把消息链压成一行纯文本，供转发进 MC 公屏用。
 
-    MC 公屏放不下图片/文件，At/Json 在公屏上也没有意义——只取 `text` 属性，
-    其余组件**跳过而不是抛错**（抛错会让整条回复消失）。
-    与 `mc_platform._chain_to_plain` 同样的口径；没有直接复用是因为那个函数
-    在 `mc_platform` 里，而本模块要能在没有该适配器的部署里独立工作。
+    MC 公屏放不下图片/文件，所以非文本组件转成 `[图片]` 这类**占位符**——
+    早先是**直接跳过**，结果是「群友发了图，游戏里毫无反应」，看着像坏了。
+
+    ⚠️ 未知组件仍然跳过而不是抛错：抛错会让**整条回复**消失，比丢一个占位符严重得多。
     """
     try:
-        # 兼容两种入参：MessageChain 对象（有 .chain 属性）与已拆好的组件列表。
-        # 调用方很容易把 `result.chain`（本身就是列表）直接传进来——只认 .chain
-        # 会静默返回空串，表现为「钩子跑了但什么都没发」。
-        comps = getattr(chain, "chain", chain) or []
+        # ⚠️ **三种入参都要认**，少一种就静默返回空串（表现为「跑了但什么都没发」）：
+        #   · `MessageChain`   → `.chain`
+        #   · `AstrBotMessage` → `.message`（**不是** `.chain`！字段名不一样）
+        #   · 已拆好的组件列表 → 直接用
+        if isinstance(chain, (list, tuple)):
+            comps = list(chain)
+        else:
+            comps = None
+            for attr in ("chain", "message"):
+                got = getattr(chain, attr, None)
+                if got is not None:
+                    comps = list(got)
+                    break
+            comps = comps or []
     except Exception:
         return ""
     parts = []
@@ -353,6 +390,10 @@ def _mc_chain_to_plain(chain) -> str:
         text = getattr(comp, "text", None)
         if isinstance(text, str) and text:
             parts.append(text)
+            continue
+        ph = _component_placeholder(comp)
+        if ph:
+            parts.append(ph)
     return "\n".join(parts).strip()
 
 
@@ -607,6 +648,10 @@ class NetherLinkPlugin(Star):
             self.karma_death_penalty = 2
         # 对话触发的好感变化是否记一条日志（供运维观察 AI 的增减行为）
         self.log_karma_changes: bool = bool(config.get("log_karma_changes", True))
+        # 指令审计：失败路径本来就有各自的日志，但**成功执行的指令此前一条都不记**，
+        # 出事时（谁用 AI 清了一片地）翻不出来。开这个开关把「谁、在哪台服、
+        # 执行了什么、花了多少」记成一行。
+        self.log_command_audit: bool = bool(config.get("log_command_audit", True))
         # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
         # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
         # 留空则用默认提示词（与其他提示词字段一致：空串不表示"关闭"，用开关关）。
@@ -1764,6 +1809,15 @@ class NetherLinkPlugin(Star):
             # 扣减前的水位，供回滚校验用。spend=0 时不读存储，此值不参与任何判断。
             cur = 0
             key = identity_key(source, initiator, qq)
+            # 审计：**请求**先留痕。放在这里是因为此刻 source/initiator/qq/
+            # 裁剪后的报价/目标服都已确定；而「好感不足」这类拒绝也要留痕，
+            # 所以不能放到执行成功之后。
+            if self.log_command_audit:
+                logger.info(
+                    f"NetherLink: [指令审计] 请求 来源={source} "
+                    f"发起者={initiator!r} qq={qq or '-'} "
+                    f"目标={server_id or '自动'} 报价={spend} 指令={cmd!r}"
+                )
             if spend:
                 cur = await self._karma_get(key)
                 if cur < spend:
@@ -1820,6 +1874,13 @@ class NetherLinkPlugin(Star):
                     )
                     return f"{failure}\n（好感未扣除）"
 
+                # 走过了上面的 failure 分支 ⇒ 这次**成功**了。成功路径此前一条日志
+                # 都没有，审计里只能靠「没有失败日志」反推——补上这一行。
+                if self.log_command_audit:
+                    logger.info(
+                        f"NetherLink: [指令审计] 成功 发起者={initiator!r} "
+                        f"目标={server_id or '自动'} 消耗={spend} 指令={cmd!r}"
+                    )
                 output = result.output
                 if spend:
                     if output:
@@ -2521,8 +2582,13 @@ class NetherLinkPlugin(Star):
                 if not self.config.get("sync_bot_msgs", False):
                     return
             text = (event.message_str or "").strip()
+            # ⚠️ 纯图片/表情等没有 message_str，早先直接 return——**静默丢弃**，
+            # 发的人以为插件坏了。改为取组件占位符（`[图片]` 之类）；
+            # 真的一无所有（比如空消息）才返回。
             if not text:
-                return  # 纯图片/@ 等暂不转发
+                text = _mc_chain_to_plain(getattr(event, "message_obj", None))
+                if not text:
+                    return
             # 群名：配置里优先，未配置退回群号；QQ 消息里的 § 码剥离防止伪造染色
             group_name = self.group_names.get(group_id, group_id)
             clean_text = text.replace("§", "&")

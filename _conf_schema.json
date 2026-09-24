@@ -138,6 +138,12 @@
     "default": true,
     "hint": "AI 因对话内容自主增减好感时,在日志里记一条,标明来源侧与变化量.只记对话触发的,指令消耗与死亡惩罚另有各自的日志"
   },
+  "log_command_audit": {
+    "description": "记录指令执行的审计日志",
+    "type": "bool",
+    "default": true,
+    "hint": "每次通过 AI 执行指令时记一条,含来源侧、发起者、目标服务器、指令与好感消耗。执行失败本来就有各自的日志,本项补的是成功执行的留痕——出事时能查出是谁干的"
+  },
   "enable_advancement": {
     "description": "玩家获得成就时通知 AI",
     "type": "bool",

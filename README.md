@@ -235,6 +235,7 @@ QQ 群或游戏内,用自然语言描述需求即可 AI 会自行判断三件事
 | `max_command_cost` | 单次指令好感消耗上限（默认 80，防止 AI 报价失控） |
 | `karma_death_penalty` | 玩家死亡扣的好感（默认 2，0 为不扣） |
 | `log_karma_changes` | 对话引起的好感变化是否记日志（默认开） |
+| `log_command_audit` | 指令执行的审计日志（默认开）。记录来源侧、发起者、目标服务器、指令与好感消耗 |
 | `enable_advancement` | 玩家获得成就时是否通知 AI（默认开） |
 | `advancement_prompt` | 成就通知用的提示词（默认含好感量级 2~10，按成就难度） |
 | `karma_records` | 好感度记录，格式 `{"qq:12345": 12}`，可直接在 WebUI 改 |
