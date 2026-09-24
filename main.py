@@ -2053,15 +2053,34 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 枚举 aiocqhttp 实例失败: {e}")
         return ids
 
-    def _platform_inst_is_alive(self, platform_id: str) -> bool:
-        """该平台标识此刻是否真的有对应实例（用户可能改名或删掉适配器）。"""
+    def _platform_name_of(self, platform_id: str) -> str:
+        """按标识查该实例的**平台类型名**（如 `aiocqhttp` / `qq_official`）。
+
+        查不到返回空串。用于分辨「标识不存在」与「存在但不是我们要的平台类型」——
+        这两种失败的原因和给用户的提示完全不同，混在一起会让人查错方向。
+        """
         try:
             for platform in self.context.platform_manager.platform_insts:
-                if platform.meta().id == platform_id:
-                    return True
+                meta = platform.meta()
+                if str(getattr(meta, "id", "")) == platform_id:
+                    return str(getattr(meta, "name", ""))
         except Exception as e:
-            logger.error(f"NetherLink: 校验平台实例失败: {e}")
-        return False
+            logger.error(f"NetherLink: 查询平台类型失败: {e}")
+        return ""
+
+    def _qq_platform_inst_is_alive(self, platform_id: str) -> bool:
+        """该标识此刻是否是一个**可用的 aiocqhttp 实例**。
+
+        ⚠️ **必须同时校验平台类型**，只比 id 是错的（2026-09-24 用户实测踩到）：
+        `qq_official` 适配器的 `meta().name` 是 `"qq_official"`，而本插件推送群消息
+        走的是 OneBot 的 umo。把官方机器人的名字填进 `qq_platform_id` 时，
+        只比 id 会「校验通过」，消息发进去后被 qqofficial 适配器**静默丢弃**
+        （它的 `send_by_session` 里直接 `return`，不抛异常），表现为
+        「日志说推送成功，群里看不到消息」。
+
+        所以契约是：**存在 + 是 aiocqhttp**，两者缺一不可。
+        """
+        return self._platform_name_of(platform_id) == "aiocqhttp"
 
     def _resolve_qq_platform_id(self) -> str:
         """解析发群消息要用的**平台标识**（umo 首段）。
@@ -2102,22 +2121,32 @@ class NetherLinkPlugin(Star):
         # 回退到「随便挑一个」会让他以为配置生效了，而消息其实发去了别处。
         # 响亮报错 + 不推送 比「发到错误的机器人」好。
         if self.qq_platform_id:
-            if self._platform_inst_is_alive(self.qq_platform_id):
+            if self._qq_platform_inst_is_alive(self.qq_platform_id):
                 return self.qq_platform_id
             available = self._list_qq_platform_ids()
-            logger.error(
-                f"NetherLink: qq_platform_id 配置的 [{self.qq_platform_id}] 不存在，"
-                f"当前可用的有：{' / '.join(available) or '（一个都没有）'}。\n"
-                f"    → 消息未推送。请到配置里改成上面之一，或留空让插件自动选择。\n"
-                f"    提示：① 已**停用**的机器人不在这个列表里；"
-                f"② 名称含冒号会被 AstrBot 自动改名，以这里的写法为准。"
-            )
+            # ⚠️ 两种失败要**分开报**——「名字填错」与「填成了别的平台」，
+            # 用户的排查方向完全不同（后者会让他一直去核对名字拼写）。
+            actual = self._platform_name_of(self.qq_platform_id)
+            if actual:
+                logger.error(
+                    f"NetherLink: qq_platform_id 填的 [{self.qq_platform_id}] 是 "
+                    f"[{actual}] 平台的适配器，**不是 aiocqhttp（OneBot）**。\n"
+                    f"    本插件只通过 aiocqhttp 推送群消息，其他平台推不了。\n"
+                    f"    可用的 aiocqhttp 机器人有：{' / '.join(available) or '（一个都没有）'}"
+                )
+            else:
+                logger.error(
+                    f"NetherLink: qq_platform_id 配置的 [{self.qq_platform_id}] 不存在，"
+                    f"当前可用的 aiocqhttp 机器人有：{' / '.join(available) or '（一个都没有）'}。\n"
+                    f"    → 消息未推送。请到配置里改成上面之一，或留空让插件自动选择。\n"
+                    f"    提示：① 已停用的机器人不在这个列表里；"
+                    f"② 名称含冒号会被 AstrBot 自动改名，以这里的写法为准。"
+                )
             return ""
-
         # ── ② 学到的真实会话（未配置时的历史行为）──
         learned = self._qq_umo_seen.split(":", 1)[0] if self._qq_umo_seen else ""
         if learned:
-            if self._platform_inst_is_alive(learned):
+            if self._qq_platform_inst_is_alive(learned):
                 return learned
             # 学到的标识已失效（适配器被改名/删除），丢弃后走下面的反查
             self._qq_umo_seen = ""
@@ -2230,7 +2259,7 @@ class NetherLinkPlugin(Star):
         # （框架是「先加载插件、后初始化平台」），所以不能放在 __init__ 里。
         try:
             if self.qq_platform_id:
-                if self._platform_inst_is_alive(self.qq_platform_id):
+                if self._qq_platform_inst_is_alive(self.qq_platform_id):
                     logger.info(
                         f"NetherLink: QQ 推送机器人 = {self.qq_platform_id}"
                         f"（来自 qq_platform_id 配置）"

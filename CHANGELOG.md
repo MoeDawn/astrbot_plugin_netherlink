@@ -6,6 +6,19 @@
 
 ### 修复
 
+- **填错机器人时「推送成功」但群里看不到消息**（`qq_platform_id` 的缺陷）。
+  平台存活校验**只比对标识、不看平台类型**，于是把 **QQ 官方机器人**
+  （`qq_official` 平台）的名字填进去时「校验通过」，消息发进去后被 qqofficial
+  适配器**静默丢弃**——`send_by_session` 里直接 `return`，不抛异常，
+  AstrBot 只留一条 `[QQOfficial] No cached msg_id for session: ..., skip
+  send_by_session`。
+
+  现在校验改为**存在 + 必须是 aiocqhttp（OneBot）**，且报错会**区分**两种情况：
+  「名字填错了」vs「填成了别的平台」——后者的排查方向完全不同（会让人一直去核对名字拼写）。
+
+  > 本插件只能通过 aiocqhttp 推送群消息。QQ 官方机器人（`qq_official`）走的是另一套
+  > API，且默认受「只能被动回复」的限制。
+
 - **AI 反复猜错工具参数**（严重）。`mc_command` 的 docstring 里，描述正文在 **0 列**
   而 `Args:` 段缩进 8 格——`inspect.cleandoc` 取正文的最小缩进去裁剪，正文在 0 列
   就不裁，于是 `Args:` 不在行首，AstrBot 用的 `docstring_parser` **认不出段落头**，
