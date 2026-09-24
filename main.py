@@ -263,6 +263,76 @@ DEFAULT_BOT_NAME = "ai"
 
 
 
+# 已从 schema 删除、但**存量配置里可能还留着**的键。
+# ⚠️ 与 test_every_config_get_key_exists_in_schema 的 LEGACY_READS 是同一份名单：
+#    那里管「代码会读的旧键」，这里管「该提醒用户清理的旧键」。
+_OBSOLETE_CONFIG_KEYS = ("target_groups",)
+
+# 键名 → 模式里的字段名（对不上的直接跳过，不臆造）
+_SCHEMA_KEY_ALIASES: dict = {}
+
+
+def find_stale_config(conf: dict, schema: dict) -> dict:
+    """检查存量配置，分两类返回。
+
+    为什么要它：AstrBot 的 `check_config_integrity` **只补缺失的键、从不覆盖
+    已有的值**（`elif key not in conf: new_conf[key] = value`）。所以插件改了
+    默认值，存量部署那边一点动静都没有——2026-09-23 的两个真 bug 都源于此
+    （价目表没生效、名单被删空导致 QQ→MC 全断）。
+
+    ⚠️ **两类必须分开，不能混成一个警告**：
+
+    | 类别 | 含义 | 处理 |
+    |---|---|---|
+    | `obsolete` | 已废弃的键里**还有值** | **WARNING**——可操作，且正是咬过我们的情形 |
+    | `customized` | 与当前默认值不同 | INFO 计数——**自定义是正常行为**，做成警告就是刷屏 |
+
+    本项目自己的参考配置 40 项里有 17 项与默认不同，全报出来等于噪声。
+
+    这个函数**只报告、不修改**：改配置是用户的事，插件擅自覆盖更危险。
+
+    返回 `{"obsolete": [(键, 说明)], "customized": [(键, 说明)]}`。
+    """
+    obsolete: list = []
+    customized: list = []
+    for key in _OBSOLETE_CONFIG_KEYS:
+        try:
+            if conf.get(key):
+                obsolete.append((key, f"已废弃，值为 {conf[key]!r:.60}——插件不再读取，可清空"))
+        except Exception:
+            pass
+
+    for key, item in (schema or {}).items():
+        if key in _OBSOLETE_CONFIG_KEYS:
+            continue
+        try:
+            if key not in conf:
+                continue
+            cur, default = conf[key], item.get("default")
+            if cur == default:
+                continue
+        except Exception:
+            continue
+        if isinstance(cur, str) and isinstance(default, str):
+            customized.append((key, f"你的 {len(cur)} 字符 / 默认 {len(default)} 字符"))
+        else:
+            customized.append((key, f"你的 {cur!r:.60} / 默认 {default!r:.60}"))
+    return {"obsolete": obsolete, "customized": customized}
+
+
+def load_bundled_schema() -> dict:
+    """读取**插件目录里**的 _conf_schema.json（默认值的权威来源）。
+
+    读不到就返回空 dict——`find_stale_config` 对空 schema 自然只报废弃键，
+    不会因为读文件失败而连累插件启动。
+    """
+    try:
+        path = Path(__file__).resolve().parent / "_conf_schema.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _mc_chain_to_plain(chain) -> str:
     """把消息链压成一行纯文本，供转发进 MC 公屏用。
 
@@ -639,6 +709,31 @@ class NetherLinkPlugin(Star):
             f"绑定群={sorted(self.group_names) or '未配置'} "
             f"端口绑定={self.ws_bindings}"
         )
+
+        # 存量配置检查：AstrBot 只补缺失键、**从不覆盖已有值**，所以插件改默认值
+        # 对已部署实例毫无动静。这里把**可操作**的那一类变成启动时一眼可见——
+        # 2026-09-23 那天「名单被删空导致 QQ→MC 全断」就属于这一类。
+        try:
+            stale = find_stale_config(dict(self.config), load_bundled_schema())
+            if stale["obsolete"]:
+                logger.warning(
+                    "NetherLink: 检测到 %d 个已废弃的配置项仍有值（插件不再读取）：\n%s",
+                    len(stale["obsolete"]),
+                    "\n".join(f"    · {k}：{why}" for k, why in stale["obsolete"]),
+                )
+            # 「与默认值不同」只报计数：自定义是正常行为，逐项列出会刷屏。
+            # 详情降到 debug——要排查时把它调出来看。
+            if stale["customized"]:
+                logger.info(
+                    "NetherLink: 另有 %d 项配置与默认值不同（多为你的自定义，属正常）",
+                    len(stale["customized"]),
+                )
+                logger.debug(
+                    "NetherLink: 与默认值不同的项：\n%s",
+                    "\n".join(f"    · {k}：{why}" for k, why in stale["customized"]),
+                )
+        except Exception as e:
+            logger.debug(f"NetherLink: 配置差异检查失败（忽略）: {e}")
 
         asyncio.create_task(self._start_ws_server())
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
