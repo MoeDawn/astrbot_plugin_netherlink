@@ -476,6 +476,11 @@ class NetherLinkPlugin(Star):
         # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
         # `type: "list"`（WebUI 的「修改列表项」弹窗），但已部署实例拿到的
         # 仍是旧字符串（AstrBot 只补缺失键、不覆盖已有值）——两种都要认。
+        # 忽略名单：这些名字产生的 MC 事件一律丢弃。
+        # 通用能力（排除机器人账号 / 小号），**不认识任何具体项目**。
+        self.mc_ignored_players: set = self._parse_csv(
+            config.get("mc_ignored_players", [])
+        )
         self.mc_wake_prefixes: list[str] = self._as_str_list(
             config.get("mc_wake_prefixes", ["ai", "助手"])
         )
@@ -1277,6 +1282,8 @@ class NetherLinkPlugin(Star):
                     pass
                 elif mtype == "bot_chat":
                     # 游戏内唤醒词消息：走 LLM，回复只发回游戏，QQ 不可见
+                    if self._is_ignored_player(data.get("player")):
+                        continue
                     asyncio.create_task(self._handle_bot_chat(data, server_id))
                 else:
                     await self._dispatch_mc_event(mtype, data, server_id)
@@ -1293,6 +1300,17 @@ class NetherLinkPlugin(Star):
             logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
         return ws
 
+    def _is_ignored_player(self, name) -> bool:
+        """这个名字是否在忽略名单里？（是则它产生的 MC 事件全部丢弃）
+
+        通用能力：用来排除机器人账号、小号，或任何不该出现在群里的角色。
+        按名字**精确**匹配——包含匹配会把 `bot` 误伤成 `robot`，
+        静默吞掉真人消息。
+        """
+        if not name:
+            return False
+        return str(name) in self.mc_ignored_players
+
     def _conn_closed(self, server_id: str) -> bool:
         conn = self._mc_conns.get(server_id)
         return conn is None or conn.closed
@@ -1302,6 +1320,9 @@ class NetherLinkPlugin(Star):
 
         `server_id` 来自连接（端口绑定或握手上报），决定 `{server}` 显示成什么。
         """
+        # 忽略名单里的名字：所有事件直接丢弃（见 _is_ignored_player）
+        if self._is_ignored_player(data.get("player")):
+            return
         try:
             srv = self._mc_server_display(server_id)
             if mtype == "chat" and self.config.get("enable_chat", True):
