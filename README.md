@@ -181,6 +181,8 @@ QQ 群或游戏内,用自然语言描述需求即可 AI 会自行判断三件事
 ## 配置项
 
 > 配置界面里已按模块分组，下面是同样的顺序。
+> 📁 **你的实际配置**存在 `data/config/astrbot_plugin_netherlink_config.json`，
+> 插件目录里的 `_conf_schema.json` **只是默认值模板**、从不写入你的值。
 > 提示词类配置项**留空都会回退默认值**——想「不注入」请删掉内容，别清空。
 
 ### 连接与服务器
@@ -242,7 +244,7 @@ QQ 群或游戏内,用自然语言描述需求即可 AI 会自行判断三件事
 | 配置项 | 说明 |
 |---|---|
 | `mc_command_tool_desc` | `mc_command` 的工具描述。**决定 AI 该拒绝哪些请求**（清空成就进度、召末影龙、破坏他人建筑…），以及给管理员多宽松的尺度 |
-| `mc_command_cost_param_desc` | `mc_command` 的 **cost 参数说明**。**指令的好感价目表就在这里**（免费放行 / 可以执行 / 按超标程度计价三类 + 具体价格） |
+| `mc_command_cost_param_desc` | `mc_command` 的 **cost 参数说明**。**指令的好感价目表就在这里**（免费放行 / 趣味指令 / 按超标程度计价三类 + 具体价格） |
 | `mc_command_cmd_param_desc` | `mc_command` 的 cmd 参数说明（游戏侧与 QQ 侧共用） |
 | `mc_command_server_param_desc` | `mc_command` 的 server 参数说明（仅 QQ 侧有该参数） |
 | `karma_tool_desc` | `mc_karma` 的工具描述 |
