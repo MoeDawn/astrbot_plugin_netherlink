@@ -262,6 +262,29 @@ DEFAULT_BOT_NAME = "ai"
 
 
 
+def _mc_chain_to_plain(chain) -> str:
+    """把消息链压成一行纯文本，供转发进 MC 公屏用。
+
+    MC 公屏放不下图片/文件，At/Json 在公屏上也没有意义——只取 `text` 属性，
+    其余组件**跳过而不是抛错**（抛错会让整条回复消失）。
+    与 `mc_platform._chain_to_plain` 同样的口径；没有直接复用是因为那个函数
+    在 `mc_platform` 里，而本模块要能在没有该适配器的部署里独立工作。
+    """
+    try:
+        # 兼容两种入参：MessageChain 对象（有 .chain 属性）与已拆好的组件列表。
+        # 调用方很容易把 `result.chain`（本身就是列表）直接传进来——只认 .chain
+        # 会静默返回空串，表现为「钩子跑了但什么都没发」。
+        comps = getattr(chain, "chain", chain) or []
+    except Exception:
+        return ""
+    parts = []
+    for comp in comps:
+        text = getattr(comp, "text", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
 def render_karma_rules(tpl: str, lo: int, hi: int, initial: int) -> str:
     """把 karma_rules 模板里的范围占位符替换成实际数值。
 
@@ -2297,6 +2320,74 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             # 注入失败不能连累对话本身
             logger.error(f"NetherLink: 注入 QQ 侧身份上下文失败: {e}")
+
+    @filter.on_decorating_result()
+    async def forward_qq_reply_to_mc(self, event) -> None:
+        """把 QQ 群里的 AI 回复转发进游戏公屏。
+
+        为什么需要这个钩子（2026-09-24 实测定位的真实 bug）：
+        原先只有一条路——等机器人自己发进群的那条消息回环成一个群消息事件，
+        再由 on_group_message 按 qq_to_mc 模板转发。而实测 NapCat
+        根本不上报机器人自己发的消息：玩家发言在日志里有 event_bus 记录，
+        机器人自己的回复一条都没有。
+
+        也就是说那条路从来就不可能工作——sync_bot_msgs 打开也只是放行了
+        一个永远收不到的事件。用户报的「QQ 侧 AI 回复不进游戏公屏」即此。
+
+        本钩子在 result_decorate.stage 触发，直接拿到即将发出的消息链，
+        不经过 NapCat，因此不受上述限制。
+
+        AstrBot 在调用本类钩子时会警告「依赖发送前钩子的插件在流式输出下
+        可能不工作」——QQ 侧的回复不是流式，但为稳妥仍跳过流式事件。
+
+        幂等：同一条回复只转发一次。原回环路径在「会上报自身消息」的部署里
+        （别的 OneBot 实现）仍可能生效，两条路都活着就会重复发。
+        """
+        try:
+            # 与 on_group_message 同样的两道判据：只认 aiocqhttp 的**群**消息
+            if not self._is_aiocqhttp_event(event):
+                return
+            # ⚠️ 游戏侧（netherlink_mc）的回复已经由适配器直发 `bot_reply`
+            #    （见 mc_platform.deliver_chain），这里再发一次就是重复。
+            #    `_is_aiocqhttp_event` 已按平台判据挡住了它，这行是双保险。
+            if event.get_platform_id() == GAME_PLATFORM_ID:
+                return
+            # 开关：沿用 sync_bot_msgs（它现在的语义就是「机器人消息进游戏」）
+            if not self.config.get("sync_bot_msgs", False):
+                return
+            if not self.config.get("enable_qq_to_mc", True):
+                return
+            group_id = str(event.get_group_id() or "")
+            if group_id not in self.group_names:
+                return
+            # 幂等：转发过的回复不再转发
+            if getattr(event, "_netherlink_forwarded", False):
+                return
+            result = event.get_result()
+            chain = getattr(result, "chain", None)
+            if not chain:
+                return
+            text = _mc_chain_to_plain(chain)
+            if not text:
+                return
+            # 群名：配置里优先，未配置退回群号（与 on_group_message 一致）
+            group_name = self.group_names.get(group_id, group_id)
+            line = (
+                self.templates["qq_to_mc"]
+                .replace("{group}", group_name)
+                .replace("{sender}", self.mc_bot_name)
+                .replace("{text}", text.replace("§", "&"))
+            )
+            try:
+                event._netherlink_forwarded = True
+            except Exception:
+                # 事件对象不允许挂属性时不影响转发，只是失去幂等——宁可
+                # 重复也不要不发（重复只影响观感，不发是功能缺失）。
+                pass
+            await self._broadcast_to_mc({"type": "chat", "line": line})
+        except Exception as e:
+            # 转发失败不能连累回复本身
+            logger.error(f"NetherLink: QQ 侧 AI 回复转发进游戏失败: {e}")
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event):
