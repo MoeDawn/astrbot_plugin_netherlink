@@ -17,9 +17,9 @@
 |---|---|
 | **AstrBot** | `>= 4.16, < 5` |
 | **Minecraft** | **26.3** |
-| **MC服务端** | 二选一：[netherlink-plugin](https://github.com/MoeDawn/netherlink-plugin)（Paper / Purpur / Folia）<br>或 [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（Fabric 版） |
+| **MC服务端** | 三选一：[netherlink-plugin](https://github.com/MoeDawn/netherlink-plugin)（Paper / Purpur / Folia）<br>[netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)（Fabric 版）<br>[netherlink-neoforge](https://github.com/MoeDawn/netherlink-neoforge)（NeoForge 版） |
 
-> 以上不同 MC 端**协议完全相同**，接同一个 AstrBot 插件，服务端不用改配置。
+> 以上三个 MC 端**协议完全相同**，接同一个 AstrBot 插件，服务端不用改配置。
 
 > ⚠️ MC 端按 Minecraft 26.3 的 API 编译，**其他 MC 版本暂未适配**。
 
@@ -28,7 +28,7 @@
 |项|状况|原因|
 |---|---|---|
 | Spigot | ❌ 不支持 | 缺 `Bukkit.createCommandSender`（Paper 专有扩展，无法快速移植） |
-| NeoForge | ❌ 不支持 | 尚未移植 |
+| 其他 MC 版本 | ❌ 未适配 | MC 26.1 起取消了代码混淆，三端都按 26.3 重写过，不是改个版本号就能跑 |
 
 ---
 
