@@ -2567,10 +2567,16 @@ class NetherLinkPlugin(Star):
         # ⚠️ 除了「没群号」，「群号不在绑定群名单里」同样要放行——见 docstring。
         if not group_id or group_id not in self.group_names:
             return False
-        code = binding_flow.new_code(random.randrange)
+        # ⚠️ `binding_code_length` / `binding_code_ttl` 必须**真的传下去**：
+        # 它们曾被读进 self 却没有任何调用点使用（`binding_flow` 内部只认自己的
+        # 模块常量），于是「配了 60 秒 TTL、结果还是 5 分钟」静默发生。
+        # ⚠️ 位数也要传给 `match`（下一处），否则发 8 位码、按 6 位判形状 =
+        # 码永远兑不上 = 全体锁死。
+        code = binding_flow.new_code(random.randrange, self.binding_code_length)
         async with self._bind_code_lock:
             self._bind_codes = binding_flow.issue(
-                binding_flow.prune(self._bind_codes, time.monotonic()),
+                binding_flow.prune(self._bind_codes, time.monotonic(),
+                                   self.binding_code_ttl),
                 player, code, time.monotonic(),
             )
         # 走到这里 `group_id` 必非空（上面那道门禁），所以不再需要 else 分支。
@@ -2700,7 +2706,8 @@ class NetherLinkPlugin(Star):
         already_bound = False
         async with self._bind_code_lock:
             player, already = binding_flow.match(
-                self._bind_codes, self._binding_table, text, now
+                self._bind_codes, self._binding_table, text, now,
+                self.binding_code_length, self.binding_code_ttl,
             )
             if not player:
                 return False

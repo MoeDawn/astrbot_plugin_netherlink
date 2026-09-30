@@ -23,6 +23,34 @@ _ALPHABET = "".join(c for c in (string.ascii_uppercase + string.digits)
                     if c not in "OI")
 
 
+def _positive_int(value, default: int) -> int:
+    """配置来的**正整数**；非整数或非正数一律回退 `default`。
+
+    ⚠️ 为什么不能「原样用」：`binding_code_length: 0` 会让码变成空串，
+    而 `match` 那侧的 `is_code_shaped("")` 恒为假 —— 症状是**所有人都被踢、
+    且永远绑不上**，正是门禁最怕的那种静默锁死。既然 0 在语义上没有意义，
+    就回退默认值，宁可「配了没用」也不要「把全服新人挡在门外」。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+def _positive_ttl(value, default: float) -> float:
+    """配置来的**正数秒数**；非数字或非正数一律回退 `default`。
+
+    同上：`binding_code_ttl: 0` 会让每个码「发放即过期」（`now - issued_at >= 0`
+    恒真），同样是全体锁死。**它不等于「永不过期」**——想长一点就填个大数。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
 def normalize_code(text: str) -> str:
     """归一化：去空白 → 全角转半角 → 转大写。
 
@@ -56,9 +84,14 @@ def is_code_shaped(text: str, length: int = CODE_LENGTH) -> bool:
     return all(c in string.ascii_uppercase or c in string.digits for c in up)
 
 
-def new_code(rand_below) -> str:
-    """生成一个新码。`rand_below(n)` 返回 `[0, n)` 的整数（注入以便测试）。"""
-    return "".join(_ALPHABET[rand_below(len(_ALPHABET))] for _ in range(CODE_LENGTH))
+def new_code(rand_below, length: int = CODE_LENGTH) -> str:
+    """生成一个新码。`rand_below(n)` 返回 `[0, n)` 的整数（注入以便测试）。
+
+    `length` 由调用方传配置值（`binding_code_length`），缺省用模块常量。
+    ⚠️ 非法值回退常量，见 `_positive_int`——**别**把它当成「可选的优化」删掉。
+    """
+    n = _positive_int(length, CODE_LENGTH)
+    return "".join(_ALPHABET[rand_below(len(_ALPHABET))] for _ in range(n))
 
 
 def issue(codes: dict, player: str, code: str, now: float) -> dict:
@@ -73,24 +106,31 @@ def issue(codes: dict, player: str, code: str, now: float) -> dict:
     return out
 
 
-def match(codes: dict, table: dict, text: str, now: float) -> tuple:
+def match(codes: dict, table: dict, text: str, now: float,
+          length: int = CODE_LENGTH, ttl: float = CODE_TTL_SECONDS) -> tuple:
     """在码簿里找 `text`。返回 `(player, qq)`。
 
     - 未命中 / 已过期 → `("", "")`
     - 命中且该玩家**已绑定** → `(player, 他已绑的 QQ)`，供调用方提示「你绑过了」
     - 命中且未绑定 → `(player, "")`
 
+    ⚠️ `length` / `ttl` 由调用方传配置值，缺省用模块常量。**两者必须与
+    发码时用的那套一致**——否则会出现「码发得出来、却永远兑不上」：
+    `new_code(length=8)` 发 8 位码，而这里按 6 位判形状，那就是**全体锁死**。
+    所以 `length` 也要喂给 `is_code_shaped`，不能只用在发码那一侧。
+
     ⚠️ 本函数**只读**：过期的码只是**不参与匹配**，清除是 `prune` 的活
     （调用方发新码前先 `prune` 一次，否则码簿只增不减）。
     """
     norm = normalize_code(text)
-    if not is_code_shaped(norm):
+    if not is_code_shaped(norm, _positive_int(length, CODE_LENGTH)):
         return ("", "")
+    ttl = _positive_ttl(ttl, CODE_TTL_SECONDS)
     hit_player = ""
     for player, rec in list(codes.items()):
         if not isinstance(rec, dict):
             continue
-        if float(now) - float(rec.get("issued_at") or 0) >= CODE_TTL_SECONDS:
+        if float(now) - float(rec.get("issued_at") or 0) >= ttl:
             continue
         if str(rec.get("code") or "") == norm:
             hit_player = str(player)
@@ -102,12 +142,19 @@ def match(codes: dict, table: dict, text: str, now: float) -> tuple:
     return (hit_player, bound_qq)
 
 
-def prune(codes: dict, now: float) -> dict:
-    """丢掉所有过期条目，返回新字典。"""
+def prune(codes: dict, now: float, ttl: float = CODE_TTL_SECONDS) -> dict:
+    """丢掉所有过期条目，返回新字典。
+
+    `ttl` 由调用方传配置值（与 `match` 用**同一个**），缺省用模块常量。
+    ⚠️ 两侧口径必须一致：`prune` 若按默认 300 清理，而 `match` 按配置的 30 判过期，
+    清理就只是**提前**丢掉一些本来就兑不上的条目（后果轻）；反过来则会把
+    `match` 认为还有效的条目清掉。**保持同步**是这里的唯一要求。
+    """
+    ttl = _positive_ttl(ttl, CODE_TTL_SECONDS)
     return {
         p: r for p, r in codes.items()
         if isinstance(r, dict)
-        and float(now) - float(r.get("issued_at") or 0) < CODE_TTL_SECONDS
+        and float(now) - float(r.get("issued_at") or 0) < ttl
     }
 
 
