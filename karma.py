@@ -178,7 +178,11 @@ class KarmaStore:
         """从文件加载；文件不存在或损坏时返回空表。
 
         加载时经 merge_records 归一化：手改过的文件可能有非 dict 条目或越界值，
-        不归一化会让 snapshot() 抛 TypeError（插件初始化路径没有 try/except）。
+        不归一化会让 snapshot() 抛 TypeError。
+
+        ⚠️ 2026-09-30 起**插件不再从这条路径加载**（启动只读 `karma_records`
+        配置项），当前只有单测在调用它。它保留是给第二轮「从镜像恢复」用的
+        （设计规范 §4.4）。
         """
         return cls(merge_records(read_json(Path(path), {}), {}), path, lo, hi)
 
