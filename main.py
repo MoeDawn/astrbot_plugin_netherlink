@@ -32,6 +32,7 @@ from aiohttp import web
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
+from astrbot.api.web import error_response, json_response
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 # ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
@@ -80,6 +81,11 @@ try:
     from . import binding_flow
 except ImportError:  # 插件以顶层模块方式加载时
     import binding_flow
+
+try:
+    from . import panel
+except ImportError:  # 插件以顶层模块方式加载时
+    import panel
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
@@ -954,6 +960,23 @@ class NetherLinkPlugin(Star):
         # 游戏侧平台适配器：补写配置项 + 把适配器重新绑到本实例。
         # 放在最后：它依赖上面的配置解析结果（server_display_names 等）。
         self._init_game_platform()
+        # ---- 管理面板：Web API 路由 ----
+        # ⚠️ 路由必须带插件名前缀（panel.ROUTE_PREFIX = 插件名），且只认
+        #    `<name>` / `<path:name>`——匹配走**正则**，不是 FastAPI 的 `{name}`。
+        #    写错/写漏都**不报错**，只表现为永远 404。注册只在插件加载时发生，
+        #    **改完要重启**（热重载不会重新注册）。
+        # ⚠️ handler 写成**绑定方法**、闭包在 self 上——官方文档给的唯一写法
+        #    （handler 只收路径参数，没有 request 形参；request 是 ContextVar 代理）。
+        # ⚠️ 无上下文时静默跳过，口径同 _init_game_platform：测试替身不算错误。
+        #    try/except 另有用处——旧版 AstrBot 可能没有 register_web_api，
+        #    缺了它只是面板不可用，不该连累插件加载。
+        if self.context is not None:
+            try:
+                self.context.register_web_api(
+                    panel.route("servers"), self._api_servers, ["GET"], "在线服务器列表"
+                )
+            except Exception as e:
+                logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
         logger.info("NetherLink 已加载")
 
     # ------------------------------------------------------------------
@@ -2019,6 +2042,24 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             # 平台注册失败不能让插件加载失败——其余功能（QQ 侧、好感度）照常
             logger.error(f"NetherLink: 初始化游戏侧平台失败: {e}")
+
+    # ------------------------------------------------------------------
+    # 管理面板 Web API（AstrBot Plugin Pages）
+    # ------------------------------------------------------------------
+    async def _api_servers(self):
+        """GET 在线服务器列表。
+
+        路由注册在 __init__ 末尾。本方法只做「取运行期状态 → 整形 → JSON」，
+        整形逻辑全在 panel.servers_view 里（那部分脱离 AstrBot 可单测）。
+        """
+        try:
+            return json_response(panel.servers_view(
+                self._mc_conns, self._mc_server_display, time.monotonic()
+            ))
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取服务器列表失败: {e}")
+            return error_response("读取服务器列表失败")
+
 
 
 
