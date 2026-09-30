@@ -1707,20 +1707,28 @@ class NetherLinkPlugin(Star):
         两侧取值方式不同：
           · 游戏侧：`identity` 就是游戏 ID，直接查表；
           · QQ 侧：`identity` 是群昵称，靠 `qq_id`（发起者的 QQ 号）**反查**
-            出他绑的游戏账号；`qq_id` 缺省时退回用 `identity` 当号码匹配
-            （`_admin_context` 被直接调用时惯例传 QQ 号当 identity）。
+            出他绑的**全部**游戏账号（规格 §7 允许「一个 QQ → 不限个游戏
+            ID」，所以这里是**列举**而不是取第一个）；`qq_id` 缺省时退回用
+            `identity` 当号码匹配（`_admin_context` 被直接调用时惯例传
+            QQ 号当 identity）。
         未绑定 / 表里有坏条目 / 号码为空，一律返回空串。
         """
         if source == "qq":
             target = str(qq_id or identity)
             if not target:
                 return ""
-            for player, rec in self._binding_table.items():
-                if not isinstance(rec, dict):
-                    continue
-                if str(rec.get("qq") or "") == target:
-                    return "，已绑定游戏账号：%s" % str(player)
-            return ""
+            # ⚠️ **必须收全，不能碰到第一个就 return**：规格明确允许
+            # 「一个 QQ → 不限个游戏 ID」（§7），只报一个会把另一个
+            # （很可能是他真正在用的那个）藏起来，AI 由此认错人。
+            # 顺序 = 绑定表的插入顺序；多个 ID 之间用中文顿号列举。
+            players = [
+                str(player)
+                for player, rec in self._binding_table.items()
+                if isinstance(rec, dict) and str(rec.get("qq") or "") == target
+            ]
+            if not players:
+                return ""
+            return "，已绑定游戏账号：%s" % "、".join(players)
         rec = self._binding_table.get(identity)
         if isinstance(rec, dict) and str(rec.get("qq") or ""):
             qq = str(rec["qq"])
