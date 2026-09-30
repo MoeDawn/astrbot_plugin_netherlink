@@ -1104,9 +1104,9 @@ class NetherLinkPlugin(Star):
 
         `log_command_audit` 是唯一开关：关掉则日志与落盘都不写（口径与既有日志一致）。
         """
-        if not self.log_command_audit:
-            return
         try:
+            if not self.log_command_audit:
+                return
             rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event}
             rec.update(fields)
             audit.append_audit(self._audit_path, rec)
