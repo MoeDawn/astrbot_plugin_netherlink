@@ -48,13 +48,11 @@
           在线服务器
         </button>
         <button type="button" class="tab" data-target="karma">好感度</button>
-        <button type="button" class="tab" data-target="bindings" disabled>
+        <button type="button" class="tab" data-target="bindings">
           绑定管理
         </button>
-        <button type="button" class="tab" data-target="audit" disabled>
-          指令审计
-        </button>
-        <button type="button" class="tab" data-target="commands" disabled>
+        <button type="button" class="tab" data-target="audit">指令审计</button>
+        <button type="button" class="tab" data-target="commands">
           快捷指令
         </button>
       </nav>
@@ -146,31 +144,211 @@
           </div>
         </section>
 
-        <!-- ============ 以下三节由 C2 实现（本任务只留位置） ============ -->
+        <!-- ================= 绑定管理（C2） ================= -->
         <section class="panel" id="section-bindings" hidden>
           <div class="panel__head">
             <h2 class="panel__title">绑定管理</h2>
+            <span class="panel__hint">
+              表里的键是游戏 ID；一个 QQ 可以挂多个游戏 ID。
+              未绑定的玩家进服会被拦下并要求到群里发验证码。
+            </span>
           </div>
-          <p class="placeholder">
-            待实现（C2）：QQ ↔ 游戏账号的改绑 / 解绑 / 好感迁移。
-          </p>
+
+          <div class="toolbar">
+            <input
+              type="search"
+              class="input"
+              id="bindings-query"
+              placeholder="按游戏 ID / QQ / 昵称 / 服务器过滤"
+              autocomplete="off"
+            />
+            <button type="button" class="btn" id="bindings-search">过滤</button>
+            <button type="button" class="btn" id="bindings-reload">重新加载</button>
+          </div>
+
+          <p class="msg" id="bindings-msg" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>游戏 ID</th>
+                  <th>QQ</th>
+                  <th>QQ 昵称</th>
+                  <th>上过的服务器</th>
+                  <th>绑定时间</th>
+                  <th>方式</th>
+                  <th class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="bindings-body"></tbody>
+            </table>
+          </div>
+
+          <div class="add-row">
+            <h3 class="add-row__title">改绑 / 新建绑定</h3>
+            <div class="add-row__fields">
+              <input
+                type="text"
+                class="input"
+                id="bindings-rebind-player"
+                placeholder="游戏 ID"
+                autocomplete="off"
+              />
+              <input
+                type="text"
+                class="input"
+                id="bindings-rebind-qq"
+                placeholder="QQ 号（5~13 位纯数字）"
+                autocomplete="off"
+              />
+              <input
+                type="text"
+                class="input"
+                id="bindings-rebind-name"
+                placeholder="QQ 昵称（可留空）"
+                autocomplete="off"
+              />
+              <button type="button" class="btn btn--primary" id="bindings-rebind-submit">
+                改绑
+              </button>
+            </div>
+            <p class="add-row__hint">
+              改绑按游戏 ID 覆盖：该 ID 从此指向这里填的 QQ。
+              QQ 号与昵称一律由服务端校验，前端不自己编造——填错会拿到具体报错。
+            </p>
+          </div>
+
+          <div class="danger-zone">
+            <h3 class="add-row__title">好感迁移</h3>
+            <p class="add-row__hint">
+              这是本页唯一会<strong>改动玩家数据</strong>的操作，所以它不直接执行：
+              点下面的按钮只会打开确认对话框，看清楚要改什么之后再确认。
+            </p>
+            <button type="button" class="btn btn--danger" id="bindings-migrate">
+              迁移好感记录…
+            </button>
+            <p class="msg" id="bindings-migrate-result" role="status"></p>
+          </div>
         </section>
 
+        <!-- ================= 指令审计（C2） ================= -->
         <section class="panel" id="section-audit" hidden>
           <div class="panel__head">
             <h2 class="panel__title">指令审计</h2>
+            <span class="panel__hint">
+              AI 替人执行指令的落盘留痕（新的在前）。关掉 log_command_audit 时不写。
+            </span>
           </div>
-          <p class="placeholder">待实现（C2）：指令审计记录查询。</p>
+
+          <div class="toolbar">
+            <input
+              type="search"
+              class="input"
+              id="audit-query"
+              placeholder="按发起者 / 指令 / 结局过滤"
+              autocomplete="off"
+            />
+            <input
+              type="text"
+              class="input input--num"
+              id="audit-limit"
+              value="100"
+              placeholder="条数"
+              autocomplete="off"
+              aria-label="最多显示多少条"
+            />
+            <button type="button" class="btn" id="audit-search">查询</button>
+            <button type="button" class="btn" id="audit-reload">重新加载</button>
+          </div>
+
+          <p class="msg" id="audit-msg" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>结局</th>
+                  <th>发起者</th>
+                  <th>来源</th>
+                  <th>服务器</th>
+                  <th>好感</th>
+                  <th>指令</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody id="audit-body"></tbody>
+            </table>
+          </div>
         </section>
 
+        <!-- ================= 快捷指令（C2） ================= -->
         <section class="panel" id="section-commands" hidden>
           <div class="panel__head">
             <h2 class="panel__title">快捷指令</h2>
+            <span class="panel__hint">
+              来自插件配置项 quick_commands，格式 名称|指令|服务器
+            </span>
           </div>
-          <p class="placeholder">待实现（C2）：配置项驱动的快捷指令按钮。</p>
+
+          <p
+            class="note note--security"
+            id="commands-security-note"
+            role="note"
+          ></p>
+
+          <p class="msg" id="commands-msg" role="status"></p>
+
+          <div class="cmd-list" id="commands-list"></div>
+
+          <div class="cmd-output" id="commands-output" hidden>
+            <h3 class="cmd-output__title" id="commands-output-title">执行结果</h3>
+            <p class="cmd-output__detail" id="commands-output-detail"></p>
+            <pre class="cmd-output__body" id="commands-output-body"></pre>
+          </div>
         </section>
       </main>
     </div>
+
+    <!--
+      🔴 好感迁移的二次确认对话框。**这是 C2 存在的主要理由**：
+         `bindings/migrate` 会合并并删除玩家的好感记录，而后端刻意不收
+         `confirm` 之类的形式参数（那种布尔值总能被绕开），拦人的责任因此
+         整个落在这一块 markup + 那颗按钮上。
+         结构上必须保证「触发器」与「确认按钮」是两颗不同的按钮，且下发请求的
+         函数只挂在后者身上——见 app.js 的 `runMigrateConfirm`。
+    -->
+    <dialog
+      class="dialog"
+      id="bindings-migrate-dialog"
+      aria-labelledby="bindings-migrate-dialog-title"
+    >
+      <h3 class="dialog__title" id="bindings-migrate-dialog-title">
+        确认迁移好感记录？
+      </h3>
+      <p class="dialog__text">
+        这一步会把每个已绑定玩家的 <code>mc:</code> 好感记录并入他对应的
+        <code>qq:</code> 记录——也就是把同一个人「在游戏里的那份」与
+        「在群里的那份」合成一份（同一个人不再有两份好感）。
+      </p>
+      <p class="dialog__text">
+        合并之后，那些 <code>mc:</code> 记录会被<strong>删除</strong>。
+        已经没有任何 <code>mc:</code> 记录的玩家不受影响。
+      </p>
+      <p class="dialog__text dialog__text--warn">
+        这会改动玩家数据，且没有撤销按钮。没有可迁移项时重复点击是安全的
+        （迁移是幂等的，第二次会直接告诉你「无可迁移项」）。
+      </p>
+      <div class="dialog__actions">
+        <button type="button" class="btn" id="bindings-migrate-cancel">
+          取消
+        </button>
+        <button type="button" class="btn btn--danger" id="bindings-migrate-confirm">
+          确认迁移
+        </button>
+      </div>
+    </dialog>
 
     <script type="module" src="./app.js"></script>
   </body>

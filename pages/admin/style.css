@@ -336,3 +336,155 @@ body {
   color: var(--text-dim);
   font-size: 12px;
 }
+
+.add-row__hint code,
+.dialog__text code,
+.note code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ---------------- 危险操作区（迁移） ---------------- */
+
+.danger-zone {
+  margin-top: var(--gap);
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+/* ---------------- 二次确认对话框 ---------------- */
+
+.dialog {
+  max-width: 560px;
+  padding: var(--gap);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.dialog__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dialog__text {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.dialog__text--warn {
+  color: var(--error);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ---------------- 安全说明 ---------------- */
+
+.note {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  background: var(--surface-alt);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* ---------------- 快捷指令 ---------------- */
+
+.cmd-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cmd-btn {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.cmd-output {
+  margin-top: var(--gap);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-dim);
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+
+/* 四个结局各有各的颜色——**不合并**：把「服务器回了失败」渲染成成功
+   是本项目第一轮修过的跨端 bug，颜色是它最后一道人眼可见的防线。 */
+.cmd-output--ok {
+  border-left-color: var(--ok);
+}
+
+.cmd-output--error {
+  border-left-color: var(--error);
+}
+
+.cmd-output--warn {
+  border-left-color: var(--warn);
+}
+
+.cmd-output__title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cmd-output--ok .cmd-output__title {
+  color: var(--ok);
+}
+
+.cmd-output--error .cmd-output__title {
+  color: var(--error);
+}
+
+.cmd-output--warn .cmd-output__title {
+  color: var(--warn);
+}
+
+.cmd-output__detail {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.cmd-output__body {
+  max-height: 320px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------------- 审计结局着色 ---------------- */
+
+.mono--event {
+  font-weight: 600;
+}
