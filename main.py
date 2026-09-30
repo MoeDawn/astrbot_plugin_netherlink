@@ -32,8 +32,26 @@ from aiohttp import web
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
-from astrbot.api.web import error_response, json_response
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+# ⚠️ `astrbot.api.web`（Plugin Pages 的响应 helper）**必须守卫式导入**：
+#    它比 metadata.yaml 声明的 `astrbot_version: ">=4.16,<5"` 新得多
+#    （Plugin Pages 本身需 AstrBot ≥ 4.28.2），旧版 AstrBot 里这个模块
+#    **根本不存在**。写成裸顶层导入的话，旧版上 import 阶段就抛 ImportError
+#    → 插件**整个加载失败**——不是「面板不可用」，而是 QQ↔MC 互通、好感度、
+#    指令执行全部一起消失。HANDOFF.md 的要求是「低版本**安静禁用**面板
+#    + 记一条 warning」。
+# ⚠️ 这个 try/except 与注册处那个是**两件事**：这里挡的是「模块不存在」，
+#    那里挡的是「方法不存在 / 签名变了」。两个都得有。
+try:
+    from astrbot.api.web import error_response, json_response
+except ImportError:  # 旧版 AstrBot：没有 Plugin Pages
+    error_response = None
+    json_response = None
+
+# 面板是否可用。注册路由与 handler 兜底两处都要用这条事实，
+# 起个名字，免得两处判据各写一份、日后漂移。
+PANEL_AVAILABLE = json_response is not None
 
 # ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
 # `mc_platform` 用 `@register_platform_adapter` 把适配器类注册进
@@ -970,13 +988,25 @@ class NetherLinkPlugin(Star):
         # ⚠️ 无上下文时静默跳过，口径同 _init_game_platform：测试替身不算错误。
         #    try/except 另有用处——旧版 AstrBot 可能没有 register_web_api，
         #    缺了它只是面板不可用，不该连累插件加载。
+        # ⚠️ 先判 `PANEL_AVAILABLE`（模块在不在）、再 try/except（方法在不在）：
+        #    模块整个缺席时要说清「面板不可用、插件其余照常」，而这句话只有在
+        #    拿到「模块不在」这个前提时才讲得准确——从 except 里讲会像一条错误。
+        # ⚠️ 这条 warning 只在这里打（构造期一次），**不在 handler 里打**——
+        #    否则每条面板请求都会刷一遍。
         if self.context is not None:
-            try:
-                self.context.register_web_api(
-                    panel.route("servers"), self._api_servers, ["GET"], "在线服务器列表"
+            if not PANEL_AVAILABLE:
+                logger.warning(
+                    "NetherLink: 当前 AstrBot 没有 astrbot.api.web（Plugin Pages 需 "
+                    "AstrBot ≥ 4.28.2），管理面板不可用；"
+                    "插件其余功能（QQ↔MC 消息互通、好感度、指令执行）不受影响。"
                 )
-            except Exception as e:
-                logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
+            else:
+                try:
+                    self.context.register_web_api(
+                        panel.route("servers"), self._api_servers, ["GET"], "在线服务器列表"
+                    )
+                except Exception as e:
+                    logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
         logger.info("NetherLink 已加载")
 
     # ------------------------------------------------------------------
@@ -2051,7 +2081,19 @@ class NetherLinkPlugin(Star):
 
         路由注册在 __init__ 末尾。本方法只做「取运行期状态 → 整形 → JSON」，
         整形逻辑全在 panel.servers_view 里（那部分脱离 AstrBot 可单测）。
+
+        ⚠️ `PANEL_AVAILABLE` 为假时这条路由**根本不会被注册**，所以下面那段
+        兜底是防御性的：handler 是普通绑定方法，别处（测试、将来的内部调用）
+        仍可能直接 await 它，那时 `json_response` / `error_response` 都是 None，
+        裸调会抛 'NoneType' object is not callable。返回**普通 dict**——
+        AstrBot 允许 handler 直接返回 dict，不必依赖缺席的 helper。
         """
+        if not PANEL_AVAILABLE:
+            return {
+                "status": "error",
+                "message": "管理面板不可用：当前 AstrBot 没有 astrbot.api.web"
+                           "（Plugin Pages 需 ≥ 4.28.2）",
+            }
         try:
             return json_response(panel.servers_view(
                 self._mc_conns, self._mc_server_display, time.monotonic()
