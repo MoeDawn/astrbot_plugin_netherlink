@@ -29,8 +29,8 @@ def clamp_value(v: object, lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> int:
 
     `lo > hi` 这类错误配置由调用方归一，本函数只保证「不抛异常」——
     真的传入倒置区间时，max(lo, min(hi, n)) 会返回 lo，不会崩。
-    任何输入都不得抛异常——本函数在插件初始化路径（KarmaStore.read → merge_records）
-    上被调用，异常会直接崩掉插件加载。
+    任何输入都不得抛异常——本函数在插件初始化路径（merge_records 归一化配置项）上
+    被调用，异常会直接崩掉插件加载。
 
     非数字归 0。溢出按方向夹到边界：JSON 里的 1e400 会被解析成 inf，而
     int(inf) 抛的是 OverflowError（不是 ValueError，不会被降级捕获），
@@ -105,8 +105,12 @@ def merge_records(file_records: dict, config_records: dict,
        AstrBot 那个对象本身，直接交给 `KarmaStore` 会让一次 `_karma_add`
        绕开 `save_config` 就地改内存配置。
     2. **并集**（`KarmaStore.read` 用，读镜像 / 从镜像恢复）：配置优先，
-       文件只在配置没有该键时兜底。⚠️ **插件启动时不再做这个并集**——
-       那正是「从配置项删一条会被文件带回来」的成因。文件现在只作镜像。
+       文件只在配置没有该键时兜底。⚠️ **当前没有任何调用点两侧都非空**——
+       `KarmaStore.read` 给的是空配置表（`merge_records(file, {})`），插件启动给的是
+       空文件表，所以「配置覆盖文件」这半边**只是契约**，实装于第二轮「从镜像恢复」
+       （单测 `test_merge_records_config_overrides_file_and_unions` 直接钉住它）。
+       ⚠️ **插件启动时不再做这个并集**——那正是「从配置项删一条会被文件带回来」
+       的成因。文件现在只作镜像。
 
     记录形态是「键 -> 好感值」，值为纯数字。非数字条目（含 bool、字符串、None、
     缺失）按损坏丢弃，让 get() 回退到 initial——与历史上非 dict 条目的口径一致。
