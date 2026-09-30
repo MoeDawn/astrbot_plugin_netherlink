@@ -2546,6 +2546,108 @@ class NetherLinkPlugin(Star):
         return sent
 
     # ------------------------------------------------------------------
+    # 群内发码完成绑定（QQ -> 绑定表）
+    # ------------------------------------------------------------------
+    async def _reply_to_group(self, group_id: str, text: str) -> None:
+        """向**单个**群推送一段文本（绑定流程的回话用）。
+
+        与 `_broadcast` 的分工：那个是「推给所有绑定群」（死亡/进退服这类天然
+        属于全体的消息），本方法只推一个指定的群——绑定码只在某一个群里兑换，
+        回话跟着发到那个群即可。
+
+        ⚠️ 三件事逐条照抄 `_broadcast`（见「坑 2」），一件都不能省：
+        ① 平台标识必须 `_resolve_qq_platform_id()` 解析，**不能写死 `aiocqhttp`**
+           ——umo 首段是用户在 WebUI 里填的「机器人名称」，写死只在恰好那么命名的
+           部署上成立，其余部署下全部主动推送静默失效；
+        ② umo 必须是 `f"{platform_id}:GroupMessage:{group_id}"`；
+        ③ **必须接住 `send_message` 的返回值**——找不到平台时它**返回 False
+           而不抛异常**（只由 AstrBot 自己记一条 warning），不看返回值就是静默丢弃。
+        """
+        platform_id = self._resolve_qq_platform_id()
+        if not platform_id:
+            logger.warning(
+                "NetherLink: 未找到 aiocqhttp 平台实例，消息无法推送到 QQ 群"
+                "（请确认 OneBot/aiocqhttp 适配器已启用）"
+            )
+            return
+        umo = f"{platform_id}:GroupMessage:{group_id}"
+        try:
+            ok = await self.context.send_message(umo, MessageChain().message(text))
+            if not ok:
+                logger.warning(f"NetherLink: 推送到群 {group_id} 未被接受，消息已丢弃")
+        except Exception as e:
+            logger.error(f"NetherLink: 推送到群 {group_id} 失败: {e}")
+
+    async def _broadcast_to_game(self, text: str) -> None:
+        """把一段文本按 `template_bot_reply_game` 渲染后**广播给所有在线服务器**。
+
+        ⚠️ 与 `send_game_line` 的唯一区别是**广播 vs 定向**：那个带 server_id、
+        只发给一台；群内绑定这条路径**不知道玩家在哪台服**，所以只能广播。
+        这是刻意的取舍——宁可多广播一台，也不猜一台、更不因为「不知道去哪台」
+        就干脆不发。渲染口径与 `send_game_line` 逐字一致（含 `§` -> `&`），
+        免得两条路各写一套、日后漂移。
+        """
+        line = self.templates["bot_reply_game"].replace(
+            "{bot}", self.mc_bot_name
+        ).replace("{text}", str(text).replace("§", "&"))
+        await self._broadcast_to_mc({"type": "bot_reply", "line": line})
+
+    async def _try_bind_with_code(self, event, group_id: str, text: str) -> bool:
+        """把一条群消息当作绑定码试试。**吞下即返回 True**（调用方 return，不再转发）。
+
+        ⚠️ 形状判据在 `binding_flow.match` 内部（它先 `is_code_shaped` 再遍历码簿，
+        非码形状一律返回 `("", "")`）——所以普通群聊原样落到本方法返回 False 那条路，
+        照旧被转发进游戏。**先判形状再查码簿**的顺序也在那里，几百人的群下这不是
+        白白的遍历开销。
+
+        ⚠️ `servers` 传空串（`upsert` 的第 5 个参数）是**已知取舍**：这条路径只拿到
+        一个群消息，**不知道玩家在哪台服**（码簿里只存 code/issued_at，见
+        `binding_flow.issue`）。不影响绑定本身（键是游戏 ID），他下次进服时
+        `_dispatch_mc_event` 的 `note_server` 会把当时那台服补进 `servers`。
+
+        ⚠️ 落盘失败**必须让用户知道**：内存里的表已经改了，重启后却会没掉——不回话
+        的话他会以为绑好了。这条路上 `return True`（吞掉这条消息）也是刻意的：
+        码不该因为一次写盘失败而被原样转发进游戏公屏。
+        """
+        now = time.monotonic()
+        async with self._bind_code_lock:
+            player, already = binding_flow.match(
+                self._bind_codes, self._binding_table, text, now
+            )
+            if not player:
+                return False
+            if already:
+                # 已经绑过了：不覆盖，但回一句（免得他以为没生效）
+                await self._reply_to_group(group_id, "你已经绑定过游戏账号了；如需换绑请在管理面板操作")
+                return True
+            self._bind_codes.pop(player, None)
+
+        qq = str(event.get_sender_id() or "")
+        qq_name = str(event.get_sender_name() or "")
+        self._binding_table = bindings.upsert(
+            self._binding_table, player, qq, qq_name, "", "code",
+            datetime.now().isoformat(timespec="seconds"),
+        )
+        try:
+            bindings.save(self._bindings_path, self._binding_table)
+        except Exception as e:
+            # ⚠️ 落盘失败要让用户知道——否则重启后绑定就没了，而他以为成功了
+            logger.error(f"NetherLink: 绑定表落盘失败: {e}")
+            await self._reply_to_group(group_id, "绑定写入失败，请稍后重试或联系管理员")
+            return True
+
+        await self._broadcast_to_game(
+            self._fmt(self.templates["bind_success_game"], player=player,
+                      qq=qq, qq_name=qq_name)
+        )
+        await self._reply_to_group(
+            group_id,
+            self._fmt(self.templates["bind_success_qq"], player=player,
+                      qq=qq, qq_name=qq_name),
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # QQ 群消息 -> MC
     # ------------------------------------------------------------------
     @filter.on_astrbot_loaded()
@@ -3008,6 +3110,18 @@ class NetherLinkPlugin(Star):
                 text = _mc_chain_to_plain(getattr(event, "message_obj", None))
                 if not text:
                     return
+            # 绑定码：群友把游戏里拿到的码发进群即完成绑定。
+            # ⚠️ 位置有两条讲究，一条都不能挪：
+            #   ① 必须在**文本提取全部结束之后**——纯图片消息的占位符也要能参与
+            #      匹配，而且 `text` 到这里已保证非空；
+            #   ② 必须在**群白名单判据之后**（上面那行 `group_id not in
+            #      self.group_names`）——否则任意群里的随机 6 位文本都会被当码处理。
+            #      绑定群 ⊆ 群名单，门禁也只会把码发到「能被插件处理的」群里
+            #      （见 _gate_unbound_player 的 fail-open）。
+            # ⚠️ 这里**刻意不再加一道群判据**：`binding_group` 允许与 `group_names`
+            #    不同（用户选了独立配置项），两条判据叠起来会把合法的绑定群挡掉。
+            if self.enable_binding and await self._try_bind_with_code(event, group_id, text):
+                return
             # 群名：配置里优先，未配置退回群号；QQ 消息里的 § 码剥离防止伪造染色
             group_name = self.group_names.get(group_id, group_id)
             clean_text = text.replace("§", "&")
