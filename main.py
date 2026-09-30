@@ -1490,11 +1490,14 @@ class NetherLinkPlugin(Star):
                     enabled=self.enable_binding and self.binding_join_gate,
                     exempt=self.binding_exempt_players,
                 ):
-                    await self._gate_unbound_player(player, server_id)
-                    # ⚠️ **continue 的逻辑**：门禁已把这个人踢了，就不再走下面的
-                    # 推群/公屏——否则群里会看到一条「Steve 进入了服务器」，
-                    # 紧接着又看到他被踢，纯噪声。
-                    return
+                    if await self._gate_unbound_player(player, server_id):
+                        # ⚠️ **continue 的逻辑**：门禁已把这个人踢了，就不再走下面的
+                        # 推群/公屏——否则群里会看到一条「Steve 进入了服务器」，
+                        # 紧接着又看到他被踢，纯噪声。
+                        return
+                    # 门禁**没有生效**（拿不到群号，见 `_gate_unbound_player`）：
+                    # 放行。这里刻意**不** `return`——静默把玩家丢掉是最糟的结局
+                    # （他既没被踢、也没在任何群里出现过，等于凭空消失）。
                 # 已绑定（或门禁关闭）：顺手记下他出现过的服务器。
                 # ⚠️ 只在**真新增**一台服时才落盘——进服是高频道，
                 # 每次都写盘既慢又没意义（规范 §3.1：「只在见到新的服务器时才追加」）。
@@ -2411,7 +2414,7 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 发送到 MC [{target}] 失败: {e}")
             return False
 
-    async def _gate_unbound_player(self, player: str, server_id: str) -> None:
+    async def _gate_unbound_player(self, player: str, server_id: str) -> bool:
         """未绑定玩家进服：发码 + 公屏提示 + 踢出（踢出原因即提示）。
 
         ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
@@ -2420,15 +2423,32 @@ class NetherLinkPlugin(Star):
            四个 MC 端通用，且踢出界面上显示的原因就是那份说明
         3. **提示同时用 `bot_reply` 发一遍**：它进公屏，于是以 `System chat: ...`
            落进服务端日志（项目已实测）——「码写进日志」因此不必改 MC 端
+
+        **返回值**：`True` = 已经把他拦下了，调用方应当 `return`（不要再推群）；
+        `False` = 门禁**没有生效**（当前只有「拿不到群号」这一种情形），
+        调用方要照常走后面的推群逻辑——**静默把玩家丢掉是最糟的结局**。
+
+        ⚠️ **拿不到群号就放行（fail-open），不踢也不发码**：那种情况下踢人等于
+        把玩家**锁死**——他进不来，而提示里也没有任何地方能告诉他去哪绑。
+        这条判据放在**本方法里**而不是 `_binding_group_id()` 里：那个函数是
+        「拿群号」，拿不到就返回空串是它的契约；「该不该因此放行」是**门禁的策略**，
+        而且下一轮的群侧发码匹配还要复用它。
+
+        ⚠️ 这里**不额外记 warning**：多个群却没配时 `_binding_group_id()` 已经记过；
+        而「一个群都没配」是很可能出现的状态（`group_names` 的 schema 默认就是空），
+        进服又是高频事件，逐次刷日志只会把别的东西淹掉。要提示应当在**启动**时提示。
         """
         group_id = self._binding_group_id()
+        if not group_id:
+            return False
         code = binding_flow.new_code(random.randrange)
         async with self._bind_code_lock:
             self._bind_codes = binding_flow.issue(
                 binding_flow.prune(self._bind_codes, time.monotonic()),
                 player, code, time.monotonic(),
             )
-        group_name = self.group_names.get(group_id, group_id) if group_id else "（未配置绑定群）"
+        # 走到这里 `group_id` 必非空（上面那道门禁），所以不再需要 else 分支。
+        group_name = self.group_names.get(group_id, group_id)
         reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
                            player=player, code=code, group=group_name)
         # ⚠️ § 染色码**两条路都要去掉**（实测结论，别「优化」回去）：
@@ -2443,6 +2463,7 @@ class NetherLinkPlugin(Star):
             {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {reason}"},
             server_id,
         )
+        return True
 
     def _binding_group_id(self) -> str:
         """哪个群接受验证码：配了就用配置，没配就取 `group_names` 里唯一那个。
