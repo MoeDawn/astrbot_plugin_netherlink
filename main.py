@@ -889,6 +889,22 @@ class NetherLinkPlugin(Star):
                 f"请把 {self.binding_group} 填进 group_names，或把 binding_group 改成绑定群里的某一个。"
             )
 
+        # 🔴 **`enable_qq_to_mc` 关着 + 门禁开着 = 每个未绑定玩家都被锁死。**
+        # `on_group_message` 在「QQ -> MC 转发」关闭时**直接 return**，而群内兑换
+        # 验证码的那条分支在它**之后**——玩家于是被踢、拿到一个码，而那个码
+        # **永远兑换不了**：他进不来，也没人能在群里帮他。全程静默。
+        # ⚠️ 刻意**不**把兑换分支挪到那个开关之前：那会改变「关掉转发就什么都不
+        #    转发」这条语义，代价比一条启动告警大得多。这里只把陷阱摆到运维
+        #    已经在看的地方（配置解析结果那几行就在上面）。
+        if self.enable_binding and not self.config.get("enable_qq_to_mc", True):
+            logger.warning(
+                "NetherLink: enable_binding 开着、但 enable_qq_to_mc 关着——"
+                "进服门禁会把未绑定玩家踢出、让他去群里发验证码，"
+                "而群里的码**永远不会被处理**（兑换分支在 enable_qq_to_mc 那关之后）。"
+                "结果是未绑定玩家全部进不来。"
+                "请二选一：打开 enable_qq_to_mc，或关掉进服门禁(binding_join_gate)。"
+            )
+
         # 迁移探测：绑定了的人若还有 mc: 记录，提示可迁移。
         # ⚠️ **只算不写**——规范 §4.3 要求迁移由用户在面板手动触发，
         # 免得插件升级时静默改掉玩家数据。
@@ -1826,6 +1842,24 @@ class NetherLinkPlugin(Star):
             player, server_id, text,
             display_name=self._mc_server_display(server_id),
         )
+    def _render_bot_reply(self, text: str) -> str:
+        """把一段文本按 `template_bot_reply_game` 渲染成**整行**（含 § 染色码）。
+
+        ⚠️ **唯一的渲染点**：`send_game_line`（定向）与 `_broadcast_to_game`（广播）
+        都调它。这两个方法此前各自抄了一份替换链，而本项目的 docstring 只写了
+        「逐字一致」——代码里没有任何东西保证它一致。本项目已经被「同一条规则存成
+        两份然后漂移」咬过两次（见 claude.md 的「schema 与代码常量分叉风险」与
+        「两份拼装必然漂移」），所以把一致性做成**结构**而不是**承诺**。
+
+        口径（两条路都依赖，改动前先想清楚）：
+          · `{bot}` 换成机器人名；
+          · 正文里的 `§` 换成 `&`（防伪造染色的既有约定）——正文可能含**不可信**
+            输入（QQ 昵称、LLM 输出、绑定的成功回话模板），不能让它们自带染色码。
+        """
+        return self.templates["bot_reply_game"].replace(
+            "{bot}", self.mc_bot_name
+        ).replace("{text}", str(text).replace("§", "&"))
+
     async def send_game_line(self, text: str, server_id: str = "") -> None:
         """把一行文本按 `template_bot_reply_game` 渲染后发到**指定**服务器。
 
@@ -1833,10 +1867,10 @@ class NetherLinkPlugin(Star):
         `sync_bot_reply_to_qq`）——早先把两件事塞进一个 `sync_qq` 布尔、
         让它穿过「事件 → 适配器 → 插件」三层，结果漏传两次（2026-09-22）。
         拆成两个方法后，**没有可以被忘记传的参数**。
+
+        渲染走 `_render_bot_reply`（与广播那条路共用同一份替换链）。
         """
-        line = self.templates["bot_reply_game"].replace(
-            "{bot}", self.mc_bot_name
-        ).replace("{text}", str(text).replace("§", "&"))
+        line = self._render_bot_reply(text)
         await self._send_to_mc({"type": "bot_reply", "line": line}, server_id)
 
     async def sync_bot_reply_to_qq(self, text: str, server_id: str = "") -> None:
@@ -2584,13 +2618,12 @@ class NetherLinkPlugin(Star):
         ⚠️ 与 `send_game_line` 的唯一区别是**广播 vs 定向**：那个带 server_id、
         只发给一台；群内绑定这条路径**不知道玩家在哪台服**，所以只能广播。
         这是刻意的取舍——宁可多广播一台，也不猜一台、更不因为「不知道去哪台」
-        就干脆不发。渲染口径与 `send_game_line` 逐字一致（含 `§` -> `&`），
-        免得两条路各写一套、日后漂移。
+        就干脆不发。渲染与 `send_game_line` **共用** `_render_bot_reply`——
+        一致性因此是结构上的，而不是 docstring 里的一句承诺。
         """
-        line = self.templates["bot_reply_game"].replace(
-            "{bot}", self.mc_bot_name
-        ).replace("{text}", str(text).replace("§", "&"))
-        await self._broadcast_to_mc({"type": "bot_reply", "line": line})
+        await self._broadcast_to_mc(
+            {"type": "bot_reply", "line": self._render_bot_reply(text)}
+        )
 
     async def _try_bind_with_code(self, event, group_id: str, text: str) -> bool:
         """把一条群消息当作绑定码试试。**吞下即返回 True**（调用方 return，不再转发）。
@@ -2610,6 +2643,7 @@ class NetherLinkPlugin(Star):
         码不该因为一次写盘失败而被原样转发进游戏公屏。
         """
         now = time.monotonic()
+        already_bound = False
         async with self._bind_code_lock:
             player, already = binding_flow.match(
                 self._bind_codes, self._binding_table, text, now
@@ -2617,10 +2651,20 @@ class NetherLinkPlugin(Star):
             if not player:
                 return False
             if already:
-                # 已经绑过了：不覆盖，但回一句（免得他以为没生效）
-                await self._reply_to_group(group_id, "你已经绑定过游戏账号了；如需换绑请在管理面板操作")
-                return True
-            self._bind_codes.pop(player, None)
+                # 已经绑过了：不覆盖。这里**只置标记**，回话挪到锁外（见下）。
+                already_bound = True
+            else:
+                self._bind_codes.pop(player, None)
+
+        if already_bound:
+            # ⚠️ **回话必须在锁外**：`_reply_to_group` 是一次 QQ 网络发送，而
+            #    `_gate_unbound_player` 需要**同一把锁**——在锁里 await 会把并发的
+            #    进服门禁一起拖住（适配器卡住时尤其明显）。回话不碰任何共享状态，
+            #    没有理由占着锁。
+            await self._reply_to_group(
+                group_id, "你已经绑定过游戏账号了；如需换绑请在管理面板操作"
+            )
+            return True
 
         qq = str(event.get_sender_id() or "")
         qq_name = str(event.get_sender_name() or "")
