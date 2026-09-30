@@ -101,6 +101,28 @@ def upsert(table: dict, player: str, qq: str, qq_name: str, server_id: str,
     return out
 
 
+def remove(table: dict, player: str) -> tuple:
+    """删掉一条绑定，返回 `(新表, 被删掉的那条记录)`。
+
+    与 `upsert` 同风格：**返回新表、不改入参**。第二个返回值让调用方能分辨：
+    - `None` —— 表里**本来就没有**这个玩家（此时第一个返回值是**入参对象本身**，
+      不是副本，调用方据此跳过写盘）；
+    - dict —— 删掉了，内容是 `record_for` 口径的**副本**（`servers` 是重建的
+      list，改它不会穿回表里）。
+
+    ⚠️ 按**游戏 ID**（表的键）删。一个 QQ 可以挂多个游戏 ID（规范 §3.1）——
+    它们各自是独立的键，解绑其中一个，兄弟条目分毫不动。
+    ⚠️ 与本模块其余函数一致，这里**不碰盘**：落盘由调用方负责（`main.py`
+    在整体替换运行期那份表之后调 `save`）。
+    """
+    if player not in table:
+        return table, None
+    removed = record_for(table, player)
+    out = dict(table)
+    del out[player]
+    return out, removed
+
+
 def note_server(table: dict, player: str, server_id: str) -> tuple:
     """记下「这个**已绑定**玩家在某台服上出现过」。返回 `(新表, 是否变了)`。
 

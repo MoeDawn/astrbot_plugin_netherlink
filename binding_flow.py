@@ -203,6 +203,35 @@ def is_gated(table: dict, player: str, ignored: set, enabled: bool,
     return True
 
 
+def _num_value(v) -> int:
+    """取好感值；非数字（含 bool）按 0。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return int(v)
+    return 0
+
+
+def migrated_keys(table: dict, records: dict) -> list:
+    """本次迁移会**消费掉**的那些 `mc:` 键（已绑定玩家的），按字符串序返回。
+
+    ⚠️ 单独成函数是**防漂移**：执行点（`main.py` 的 `_karma_migrate`）要按这份
+    名单去删键，如果它自己再写一遍「谁算已绑定」，两处迟早分叉——而分叉的表现
+    是**删错/漏删**，`plan_migration` 那边照样算得好好的，全程静默。
+    ⚠️ 只认「表里有这个玩家、且 `qq` 非空」。未绑定者的 `mc:` 是他的家，不动。
+    """
+    out = []
+    for key in records:
+        name = str(key)
+        if not name.startswith("mc:"):
+            continue
+        rec = table.get(name[3:])
+        if not isinstance(rec, dict):
+            continue
+        if not str(rec.get("qq") or "").strip():
+            continue
+        out.append(name)
+    return sorted(out)
+
+
 def plan_migration(table: dict, records: dict, lo: int = -50, hi: int = 100) -> dict:
     """算出「绑定了的玩家，其 `mc:X` 该怎么并进 `qq:Q`」。**只算不写。**
 
@@ -211,31 +240,22 @@ def plan_migration(table: dict, records: dict, lo: int = -50, hi: int = 100) -> 
     ⚠️ **基线必须取「已存在的那份 `qq:<QQ>` 值」**：规范 §4.3 写的是
     `qq:Q = clamp((qq:Q 或 mc:X 的值) + mc:X 的值)` —— 所以群里 60 + 游戏 70
     的结果是 100（夹到上限），不是 70。踩过一次：漏取基线时它只返回 mc 那一半。
+    ⚠️ **求和是对「该 QQ 名下所有游戏 ID」求和**（规范 §3.1：一个 QQ 可以不限个
+    游戏 ID）。早期实现是逐条 `out[qq_key] = 基线 + 这一条`，于是同一个 QQ 的
+    第二条会把第一条**覆盖掉**——而执行点会删掉**所有**参与合并的 `mc:` 键，
+    被覆盖掉的那份就永久丢了。所以这里先累加、**最后夹一次**范围。
+    ⚠️ `lo` / `hi` 由调用方传配置值（`karma_min` / `karma_max`）。默认值只是
+    兜底，执行点**必须显式传**——否则改了范围的部署会被静默夹到 -50~100。
 
     为什么不在这里写：迁移会**改动玩家数据**，规范明确要求「不自动做」——
     启动时只记一条 info，真正的执行点留给第三轮的面板按钮。这个函数就是
-    那个按钮将来要调的东西。
+    那个按钮要调的东西。
     """
-    out = {}
-
-    def _num(v):
-        """取好感值；非数字（含 bool）按 0。"""
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return int(v)
-        return 0
-
-    for key, value in records.items():
-        if not str(key).startswith("mc:"):
-            continue
-        player = str(key)[3:]
-        rec = table.get(player)
-        if not isinstance(rec, dict):
-            continue
-        qq = str(rec.get("qq") or "").strip()
-        if not qq:
-            continue
-        qq_key = "qq:%s" % qq
-        # 基线：该 QQ 已有的那份（可能来自群里聊出来的好感）
-        merged = _num(records.get(qq_key)) + _num(value)
-        out[qq_key] = max(lo, min(hi, merged))
-    return out
+    merged = {}   # qq_key -> **尚未夹范围**的累加值
+    for key in migrated_keys(table, records):
+        qq_key = "qq:%s" % str(table[key[3:]].get("qq") or "").strip()
+        if qq_key not in merged:
+            # 基线：该 QQ 已有的那份（可能来自群里聊出来的好感）——**只取一次**
+            merged[qq_key] = _num_value(records.get(qq_key))
+        merged[qq_key] += _num_value(records.get(key))
+    return dict((k, max(lo, min(hi, v))) for k, v in merged.items())

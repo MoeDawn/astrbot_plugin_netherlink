@@ -151,6 +151,46 @@ def _panel_karma_value(raw, lo: int, hi: int) -> Optional[int]:
     return raw
 
 
+def _panel_player_name(raw) -> str:
+    """归一面板给的游戏 ID：必须是**非空字符串**（去首尾空白）；非法返回空串。
+
+    ⚠️ **大小写原样保留**：MC 上报的是规范拼写（`MoeDawn`），而绑定表以它为键。
+    在这里做大小写归一等于造出一个表里不存在的键——绑完当场「没绑上」，面板却
+    显示成功。（`admin_mc` 那边大小写不敏感是**匹配**语义，与这里拿它当**键**
+    是两回事，别照抄。）
+    ⚠️ 只去首尾空白，不碰别的：玩家名里的非 ASCII 字符是合法的。
+    """
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
+def _panel_qq_number(raw) -> str:
+    """归一面板给的 QQ 号：必须**纯 ASCII 数字**、长度 5~13；非法返回空串。
+
+    ⚠️ **为什么不满足于「非空字符串」**：QQ 号是纯数字的，一条带字母的绑定
+    **永远不会**被 `qq:<QQ号>` 形式的身份键命中，也不会与群消息的 `sender_id`
+    对上——它会安静地躺在表里，面板上看着像绑好了，实际谁也认不出来。
+    宁可当场拒收，也不要制造一条「看起来成功」的死绑定。
+    ⚠️ **长度 5~13**：QQ 号历史上 5 位起，现在最长到 13 位（`binding_flow` 的
+    测试数据用的就是 13 位）。这是**面板边界**的一道粗筛，不是权威校验——
+    要放宽只改这两个数字。
+    ⚠️ **必须 ASCII**：`str.isdigit()` 对全角数字（`１２３４５`）也为真，而全角
+    QQ 号与 `sender_id` 永远对不上（与 `_SEPARATORS` 处理全角逗号同一类坑，
+    只是这里的正确处理是**拒绝**而不是归一）。
+    ⚠️ **拒绝数字类型**（JSON 里发成 `12345`）：面板该发字符串——猜错了是静默
+    的（「12345」与 12345 长得一模一样），报错不是。与 `_panel_karma_key` 同一口径。
+    """
+    if not isinstance(raw, str):
+        return ""
+    s = raw.strip()
+    if not (5 <= len(s) <= 13):
+        return ""
+    if not all(c in "0123456789" for c in s):
+        return ""
+    return s
+
+
 # ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
 # `mc_platform` 用 `@register_platform_adapter` 把适配器类注册进
 # `platform_cls_map`——AstrBot 是「先加载插件、后初始化平台」，
@@ -1034,7 +1074,8 @@ class NetherLinkPlugin(Star):
         # 免得插件升级时静默改掉玩家数据。
         try:
             pending = binding_flow.plan_migration(
-                self._binding_table, self._karma.snapshot()
+                self._binding_table, self._karma.snapshot(),
+                self.karma_min, self.karma_max,
             )
             if pending:
                 logger.info(
@@ -1128,6 +1169,18 @@ class NetherLinkPlugin(Star):
                     self.context.register_web_api(
                         panel.route("karma/delete"), self._api_karma_delete, ["POST"],
                         "删除好感度记录"
+                    )
+                    self.context.register_web_api(
+                        panel.route("bindings/rebind"), self._api_bindings_rebind,
+                        ["POST"], "改绑 QQ ↔ 游戏账号"
+                    )
+                    self.context.register_web_api(
+                        panel.route("bindings/unbind"), self._api_bindings_unbind,
+                        ["POST"], "解绑 QQ ↔ 游戏账号"
+                    )
+                    self.context.register_web_api(
+                        panel.route("bindings/migrate"), self._api_bindings_migrate,
+                        ["POST"], "把 mc: 好感并入 qq:（一次性迁移）"
                     )
                 except Exception as e:
                     logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
@@ -1470,6 +1523,98 @@ class NetherLinkPlugin(Star):
                 return "write_failed", old
             return "deleted", old
 
+    async def _karma_migrate(self) -> tuple:
+        """把已绑定玩家的 `mc:` 好感并入其 `qq:<QQ>`，返回 `(结果, 明细, 警告)`。
+
+        结果四选一（与 `_karma_delete` 同一套风格，调用方按它决定回什么给面板）：
+        - `"migrated"`：已并入并**写回了配置项**；
+        - `"nothing"`：没有可迁移项，**一个字节都没动**（幂等的第二次点击走这里）；
+        - `"degraded"`：内存表没能从配置项播种，**整类操作被拒**（什么都没动）；
+        - `"write_failed"`：内存已改、**配置项没写成**——重启后回落到迁移前的状态。
+
+        🔴 **为什么「算」与「写」分开、且只落一次盘**：
+        任务书原稿建议「先写 `qq:` 的新值、再删 `mc:` 的旧键，中途失败要能重入」。
+        那两句**不能同时成立**——两步各落各的盘时，第二次重入会拿**已经合并过的**
+        `qq:` 当基线再加一次 `mc:`（10 + 20 变成 50 而不是 30）；反过来「先删后写」
+        则是丢数据。
+
+        这里改成：**从同一份快照算出完整目标，在内存里一次做完，最后只写一次
+        配置项**。于是配置项（唯一权威来源）要么没动、要么是完整结果，两种都可
+        安全重试；而重入时 `plan_migration` 会从**当前**状态重算——`mc:` 键已经
+        没了，它返回空表，所以第二次点击是「无可迁移项」，绝不会再加一遍。
+
+        ⚠️ `plan_migration` 的 lo/hi **必须传配置值**（`self.karma_min` /
+        `self.karma_max`）：它的默认值写死 -50/100，而好感范围是可配的——用默认值
+        会把改了范围的部署**静默**夹到错误的上限——面板显示的数字于是与规则里的
+        范围对不上。
+        ⚠️ 逐键写入走 `KarmaStore.add` / `remove`（与 `_karma_add` 同一个入口：
+        **先改内存、后落盘**）。所以某一步的**镜像**写失败时，内存里的目标值已经
+        到位——这里记一条 error 继续走完，让内存终态完整（真正的权威落点是最后
+        那一次配置项写入，那一步失败才是 `write_failed`）。
+        """
+        async with self._karma_lock:
+            if self._karma_degraded:
+                logger.error(
+                    "NetherLink: 好感记录处于降级态，拒绝迁移 —— "
+                    "写回会清掉管理员手填的 karma_records"
+                )
+                return "degraded", [], []
+            snapshot = self._karma.snapshot()
+            plan = binding_flow.plan_migration(
+                self._binding_table, snapshot, self.karma_min, self.karma_max
+            )
+            if not plan:
+                return "nothing", [], []
+            # ⚠️ 要删哪些 `mc:` 键**由 binding_flow 给**，不在这里重写一遍判据：
+            #    两处各写一份迟早分叉，而分叉的表现是删错/漏删、全程静默。
+            consumed = binding_flow.migrated_keys(self._binding_table, snapshot)
+
+            changes = []
+            for qq_key in sorted(plan):
+                qq = qq_key[len("qq:"):]
+                players = [
+                    k[3:] for k in consumed
+                    if bindings.lookup(self._binding_table, k[3:]) == qq
+                ]
+                changes.append({
+                    "key": qq_key,
+                    "qq": qq,
+                    "old": self._karma.get(qq_key, self.karma_initial),
+                    "value": plan[qq_key],
+                    "players": players,
+                    "removed": ["mc:%s" % p for p in players],
+                })
+
+            warnings = []
+            for qq_key in sorted(plan):
+                current = self._karma.get(qq_key, self.karma_initial)
+                try:
+                    self._karma.add(
+                        qq_key, int(plan[qq_key]) - int(current), self.karma_initial
+                    )
+                except Exception as e:
+                    warnings.append("镜像写入失败：%s" % qq_key)
+                    logger.error(f"NetherLink: 迁移写 {qq_key} 时镜像落盘失败: {e}")
+            for mc_key in consumed:
+                try:
+                    self._karma.remove(mc_key)
+                except Exception as e:
+                    warnings.append("镜像写入失败：%s" % mc_key)
+                    logger.error(f"NetherLink: 迁移删 {mc_key} 时镜像落盘失败: {e}")
+
+            if not self._write_karma_config():
+                logger.error(
+                    "NetherLink: 好感迁移已改内存，但写回 karma_records 失败 —— "
+                    "重启后会回落到迁移前的状态，请修好后重启再试"
+                )
+                return "write_failed", changes, warnings
+
+            logger.info(
+                f"NetherLink: 好感迁移完成 —— {len(plan)} 个 qq: 键、"
+                f"{len(consumed)} 条 mc: 记录并入"
+            )
+            return "migrated", changes, warnings
+
     def _sync_karma_to_config(self) -> None:
         """把好感度快照写回配置项，WebUI 刷新即可见。失败仅告警。
 
@@ -1503,6 +1648,26 @@ class NetherLinkPlugin(Star):
     def bindings_snapshot(self) -> dict:
         """绑定表的只读快照。工具在协程里读它，不直接读可变属性。"""
         return dict(self._binding_table)
+
+    def _commit_binding_table(self, new_table: dict, old_table: dict) -> bool:
+        """把新绑定表**整体替换**进运行期那份并落盘；落盘失败则**回滚内存**。
+
+        ⚠️ 必须整体替换 `self._binding_table`（不是就地改）——`bindings.upsert` /
+        `bindings.remove` 都返回新表，而运行期那份是**唯一真源**，两处必须同步换掉。
+        ⚠️ 落盘失败时**把内存也退回去**：内存改了、文件没改，等于面板显示改好了、
+        重启后回到旧值——那是最难查的一种「成功」。退回去之后内存与磁盘始终一致，
+        调用方只需据返回值如实报错。
+        """
+        self._binding_table = new_table
+        try:
+            bindings.save(self._bindings_path, self._binding_table)
+            return True
+        except Exception as e:
+            self._binding_table = old_table
+            logger.error(
+                f"NetherLink: 绑定表落盘失败（已回滚内存，两边保持一致）: {e}"
+            )
+            return False
 
     def _karma_identity_key(self, source: str, initiator: str, qq: str) -> str:
         """好感身份键的唯一入口——把绑定表填进 `karma.karma_identity_key`。
@@ -2440,6 +2605,150 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 面板读取绑定表失败: {e}")
             return error_response("读取绑定表失败")
+
+    async def _api_bindings_rebind(self):
+        """POST 改绑：把一个游戏 ID 改到另一个 QQ。body：`{player, qq, qq_name?}`。
+
+        ⚠️ body 走 `await request.json(default={})`——`request` 是 **ContextVar
+        代理**，不是 handler 形参（handler 只收路径参数，见 plugin-pages.md）。
+        ⚠️ 入参**全部在这里校验完再动手**：非法立即 `error_response`，绝不让一个
+        带字母的 QQ 号落进绑定表（那是条永远对不上的死绑定）。
+        ⚠️ `method` 记成 `"manual"`：绑定表里这一栏就是「怎么绑上的」，人工改绑与
+        群内发码（`"code"`）要能分辨。
+        ⚠️ `server_id` 传空串：`upsert` 的 `servers` 取**并集**，传空串即保留原有的
+        那串「他上过哪些服」——改绑 QQ 不该把这段既成事实抹掉。
+        ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
+        但 handler 是普通绑定方法，别处仍可能直接 await 它。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            player = _panel_player_name(payload.get("player"))
+            if not player:
+                return error_response("player 必须是非空字符串")
+            qq = _panel_qq_number(payload.get("qq"))
+            if not qq:
+                return error_response("qq 必须是 5~13 位的纯数字 QQ 号")
+            qq_name = payload.get("qq_name")
+            if qq_name is None:
+                qq_name = ""
+            if not isinstance(qq_name, str):
+                return error_response("qq_name 必须是字符串")
+            qq_name = qq_name.strip()
+
+            old_table = self._binding_table
+            new_table = bindings.upsert(
+                old_table, player, qq, qq_name, "", "manual",
+                datetime.now().isoformat(timespec="seconds"),
+            )
+            if not self._commit_binding_table(new_table, old_table):
+                return error_response(
+                    "绑定表写入失败（数据目录不可写？），改动未生效"
+                )
+            return json_response({
+                "player": player,
+                "qq": qq,
+                "qq_name": qq_name,
+                "method": "manual",
+                "message": "已改绑：该游戏 ID 现在对应 QQ %s" % qq,
+            })
+        except Exception as e:
+            logger.error(f"NetherLink: 面板改绑失败: {e}")
+            return error_response("改绑失败")
+
+    async def _api_bindings_unbind(self):
+        """POST 解绑一个游戏 ID。body：`{player}`。
+
+        ⚠️ 解绑按**游戏 ID** 删。一个 QQ 可以挂多个游戏 ID（规范 §3.1），删掉其中
+        一个不该动到兄弟条目——这正是 `bindings.remove` 按键删的语义。
+        ⚠️ 解一个本来就没绑的 ID **不是错误**（删除是幂等的），返回 `removed: false`
+        的正常响应；渲染成红色故障会让管理员对着一份过期的面板反复重试。
+        ⚠️ **不动好感记录**：解绑只改绑定关系，`mc:` / `qq:` 的好感键一个都不碰
+        （迁移是另一个按钮的活）。解绑之后这个人的好感仍留在原来的键上，
+        只是不再与那个 QQ 共享。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            player = _panel_player_name(payload.get("player"))
+            if not player:
+                return error_response("player 必须是非空字符串")
+
+            old_table = self._binding_table
+            new_table, removed = bindings.remove(old_table, player)
+            if removed is None:
+                return json_response({
+                    "player": player,
+                    "removed": False,
+                    "message": "该游戏 ID 本来就没有绑定，未做任何改动",
+                })
+            if not self._commit_binding_table(new_table, old_table):
+                return error_response(
+                    "绑定表写入失败（数据目录不可写？），改动未生效"
+                )
+            qq = str(removed.get("qq") or "")
+            return json_response({
+                "player": player,
+                "removed": True,
+                "qq": qq,
+                "message": "已解绑：该游戏 ID 不再关联 QQ %s" % qq,
+            })
+        except Exception as e:
+            logger.error(f"NetherLink: 面板解绑失败: {e}")
+            return error_response("解绑失败")
+
+    async def _api_bindings_migrate(self):
+        """POST 触发一次性好感迁移（把已绑定玩家的 `mc:` 并入 `qq:<QQ>`）。
+
+        🔴 这是面板上**唯一会改动玩家数据**的操作（规范 §4.3），所以：
+        - 前端**必须**先做二次确认再发这个请求。本路由刻意**不收** `confirm` 之类
+          的形式参数——那只是把「确认」变成一个总能被绕过的布尔值，真正该拦人的
+          是对话框本身；
+        - 返回体里**说清改了哪几条**（`changes`），管理员点完要能核对；
+        - **幂等**：迁完 `mc:` 就没了，再点一次返回 `migrated: false` 与
+          「无可迁移项」——重复点击不会把好感加两遍。
+        - 请求体**根本不读**：这个操作没有参数。一个「可以传点东西进去」的入口
+          只会让人以为传点什么能改行为。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            outcome, changes, warnings = await self._karma_migrate()
+            if outcome == "degraded":
+                return error_response(
+                    "好感记录处于降级态（内存表没能从配置项播种），拒绝迁移——"
+                    "写回会清掉管理员手填的 karma_records"
+                )
+            if outcome == "write_failed":
+                return error_response(
+                    "迁移已改内存，但写回配置项失败——重启后会回落到迁移前的状态。"
+                    "请检查数据目录的权限与磁盘空间，请勿重复点击，重启后再试"
+                )
+            if outcome == "nothing":
+                return json_response({
+                    "migrated": False,
+                    "changes": [],
+                    "message": "无可迁移项：没有已绑定玩家还留着 mc: 记录",
+                })
+            payload = {
+                "migrated": True,
+                "changes": changes,
+                "message": "已迁移 %d 个 qq: 键（并入 %d 条 mc: 记录）"
+                           % (len(changes),
+                              sum(len(c["removed"]) for c in changes)),
+            }
+            if warnings:
+                payload["warnings"] = warnings
+            return json_response(payload)
+        except Exception as e:
+            logger.error(f"NetherLink: 面板触发好感迁移失败: {e}")
+            return error_response("好感迁移失败")
 
     async def _api_diagnostics(self):
         """GET 配置**解析之后**的四项：管理员名单 / 绑定群 / 端口绑定。
