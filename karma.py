@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """好感度纯算法与本地存储。
 
-身份空间刻意分成两个互不相关的键空间——游戏内玩家用游戏 ID，QQ 群友用 QQ 号，
-同一个人在两边是两份独立好感，不做任何映射。
+身份空间有两个入口：`identity_key` 是纯函数（游戏侧恒用游戏 ID）；
+`karma_identity_key` 会查绑定表——**已绑定的玩家改用其 QQ 号**，于是同一个人在
+游戏内与群里共享一份好感（2026-09-30 第二轮起）。未绑定者仍用 `mc:<游戏ID>`。
 """
 
 import math
@@ -92,6 +93,28 @@ def identity_key(source: str, initiator: str, qq: str) -> str:
     if source == "qq":
         return f"qq:{qq}"
     return f"mc:{initiator}"
+
+
+def karma_identity_key(source: str, initiator: str, qq: str, table: dict) -> str:
+    """好感身份键——**需要查绑定表**的入口。
+
+    与 `identity_key` 的区别只有一个：**游戏侧发起者若已绑定，键改成 `qq:<QQ号>`**。
+    于是同一个人在游戏内与 QQ 群里是**同一个键 → 一份好感**（规范 §4.1）。
+
+    - `source == "qq"`：本来就用 QQ 号，`table` 不参与（QQ 侧无需换算）
+    - `source == "game"`：`initiator` 在 `table` 里且 `qq` 非空 → `qq:<QQ>`；
+      否则退回 `mc:<游戏ID>`（未绑定者的兜底，否则他没有任何记录可落）
+
+    ⚠️ `table` 传空 dict 时本函数**等价于** `identity_key`——旧的
+    `test_exec_identity_key_follows_source` 因此仍应通过（无绑定 → 键不变）。
+    """
+    if source == "qq":
+        return identity_key(source, initiator, qq)
+    rec = table.get(initiator) if isinstance(table, dict) else None
+    bound = str(rec.get("qq") or "") if isinstance(rec, dict) else ""
+    if bound:
+        return "qq:%s" % bound
+    return identity_key(source, initiator, qq)
 
 
 def merge_records(file_records: dict, config_records: dict,
