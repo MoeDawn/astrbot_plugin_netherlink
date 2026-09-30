@@ -1232,6 +1232,45 @@ class NetherLinkPlugin(Star):
         return []
 
     @staticmethod
+    def _quick_command_entries(raw) -> list:
+        """`quick_commands` 配置项 → 「一条条目一个字符串」的列表。
+
+        🔴 **这里刻意不走 `_as_str_list` 的列表分支**——全仓库唯一一处这样做的地方，
+        理由必须写下来，否则将来会有人把它「修」回去：
+
+        `_as_str_list` 对**每一条列表项**还会再按半角逗号切一刀（它的注释写着
+        「元素内部也可能有分隔符（用户在单个条目里粘了 "a,b"）」）。那条约定对
+        `admin_mc` / `ws_ports` / `group_names` 是对的——那些项装的是**简单值**，
+        多出来的逗号没有意义。而 `quick_commands` 的每一条是**任意指令文本**，
+        逗号在指令里**有意义**：
+
+            setblock 1 2 3 minecraft:chest{Items:[{id:"minecraft:diamond",count:1b}]}
+
+        按逗号切不是「少一条」，而是**劈出来的两段各自都还带着名称与指令段**，
+        于是双双被当成**合法按钮**注册进面板——管理员点下去执行的是一条他从没写过
+        的（截断的）命令，而面板上看不出任何异常。切成两段都还合法的情形更糟：
+        `tp @s 100 64 100, 200 64 200` 会静默跑成 `tp @s 100 64 100`。
+
+        两种形态的数据形状**本来就不一样**，所以分开处理：
+
+        - **str**（旧形态：逗号分隔的单串）→ 仍交 `_as_str_list`，兼容存量配置。
+          单串形态里写不下带逗号的指令，那是它的固有限制。
+        - **list / tuple / set**（`type: "list"` 的新形态）→ 每条**原样**取用，
+          只去掉首尾空白，**不切逗号**。
+        """
+        if isinstance(raw, str):
+            return NetherLinkPlugin._as_str_list(raw)
+        if isinstance(raw, (list, tuple, set)):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        if raw is None:
+            return []
+        logger.warning(
+            f"NetherLink: quick_commands 配置项类型无法识别的 "
+            f"{type(raw).__name__}，按空处理"
+        )
+        return []
+
+    @staticmethod
     def _read_int(config, key: str, default: int) -> int:
         """读一个整数配置项，任何异常都回退默认值。
 
@@ -2849,7 +2888,7 @@ class NetherLinkPlugin(Star):
         两条路由各解析一次就会出现「点第 2 个按钮、跑了第 3 条指令」，且不报错。
         """
         return panel.quick_commands_view(
-            self._as_str_list(self.config.get("quick_commands"))
+            self._quick_command_entries(self.config.get("quick_commands"))
         )
 
     @staticmethod

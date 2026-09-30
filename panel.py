@@ -244,8 +244,10 @@ QUICK_COMMAND_SECURITY_NOTE = (
 def quick_commands_view(entries) -> list:
     """`quick_commands` 配置项 → `[{"index", "name", "cmd", "server"}]`。
 
-    ⚠️ 入参是**已经过 `NetherLinkPlugin._as_str_list` 归一**的字符串列表
-    （全角逗号 / 顿号那些归它管，本模块不重复实现一份，免得两处漂移）。
+    ⚠️ 入参是 `NetherLinkPlugin._quick_command_entries` 归一后的字符串列表——
+    **一条条目一个字符串**（列表形态**不按逗号切**：这里每一条是任意指令文本，
+    逗号在指令里有意义；理由与取舍都写在那个函数上）。本模块不重复实现那套
+    归一，免得两处漂移。
     配置项形态是 `名称|指令|服务器`，**一条记录塞在一个字符串里**——AstrBot 的
     `type: "list"` 没有对象列表控件，全项目的列表项都是纯字符串（8 项无一例外）。
 
