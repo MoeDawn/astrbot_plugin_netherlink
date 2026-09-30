@@ -284,13 +284,14 @@ DEFAULT_BOT_NAME = "ai"
 
 # 绑定功能的三个模板默认值。
 # 占位符：{player} 玩家名、{code} 验证码、{group} 群名、{server} 服务器名、
-#        {qq} 群友 QQ 号、{qq_name} 群友昵称。
+#        {qq} 群友 QQ 号、{qq_name} 群友昵称、
+#        {ttl} 有效期的人话（如「5 分钟」，由 binding_flow.describe_ttl 渲染）。
 # ⚠️ 默认值只许用**半角**标点：有守卫扫 schema 的 default，全角标点直接判红
 #    （test_schema_defaults_use_halfwidth_punctuation）。
 # ⚠️ 这三份与 _conf_schema.json 的 default 必须逐字一致——另有守卫按整串相等
 #    断言，分叉会让「改代码不生效而测试全绿」（见 claude.md 的
 #    「schema 与代码常量分叉风险」）。
-DEFAULT_BIND_HINT = "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定(5 分钟内有效)"
+DEFAULT_BIND_HINT = "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定({ttl}内有效)"
 DEFAULT_BIND_SUCCESS_GAME = "玩家 {player} 已完成 QQ 绑定"
 DEFAULT_BIND_SUCCESS_QQ = "{qq_name} ({qq}) 已绑定游戏账号 {player}"
 
@@ -1883,11 +1884,13 @@ class NetherLinkPlugin(Star):
                 "（首次启用请重启一次 AstrBot 让框架加载平台）"
             )
             await self._send_to_mc(
+                # ⚠️ 走 `_render_bot_reply`，**不要**在这里再手抄一份替换链：
+                #   手抄那份会漏掉正文的 `§ -> &` 净化（此处文本是常量、今天没事，
+                #   但两处一旦漂移就没人拦得住），而 `_render_bot_reply` 的
+                #   「唯一渲染点」正是靠「没有第二份」成立的。
                 {
                     "type": "bot_reply",
-                    "line": self.templates["bot_reply_game"]
-                    .replace("{bot}", self.mc_bot_name)
-                    .replace("{text}", "（我暂时没法回答，请检查机器人配置）"),
+                    "line": self._render_bot_reply("（我暂时没法回答，请检查机器人配置）"),
                 },
                 server_id,
             )
@@ -1899,8 +1902,9 @@ class NetherLinkPlugin(Star):
     def _render_bot_reply(self, text: str) -> str:
         """把一段文本按 `template_bot_reply_game` 渲染成**整行**（含 § 染色码）。
 
-        ⚠️ **唯一的渲染点**：`send_game_line`（定向）与 `_broadcast_to_game`（广播）
-        都调它。这两个方法此前各自抄了一份替换链，而本项目的 docstring 只写了
+        ⚠️ **唯一的渲染点**：`send_game_line`（定向）、`_broadcast_to_game`（广播）
+        与 `_handle_bot_chat` 的「适配器不可用」回退分支都调它。此前这三处各自抄了
+        一份替换链（回退分支那份还漏了 `§ -> &` 净化），而本项目的 docstring 只写了
         「逐字一致」——代码里没有任何东西保证它一致。本项目已经被「同一条规则存成
         两份然后漂移」咬过两次（见 claude.md 的「schema 与代码常量分叉风险」与
         「两份拼装必然漂移」），所以把一致性做成**结构**而不是**承诺**。
@@ -2582,7 +2586,8 @@ class NetherLinkPlugin(Star):
         # 走到这里 `group_id` 必非空（上面那道门禁），所以不再需要 else 分支。
         group_name = self.group_names.get(group_id, group_id)
         reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
-                           player=player, code=code, group=group_name)
+                           player=player, code=code, group=group_name,
+                           ttl=binding_flow.describe_ttl(self.binding_code_ttl))
         # ⚠️ § 染色码**两条路都要去掉**（实测结论，别「优化」回去）：
         #   · `kick` 的 reason 是 `MessageArgument`——服务端接受 § 但**不解释**它，
         #     踢出界面上会原样显示「§e请到 QQ 群…§bABC123」；

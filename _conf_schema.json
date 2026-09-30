@@ -294,8 +294,8 @@
   "template_bind_hint": {
     "description": "进服提示(也是踢出原因)",
     "type": "string",
-    "default": "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定(5 分钟内有效)",
-    "hint": "占位符 {group} 群名 {code} 验证码 {player} 玩家名 {server} 服务器名。留空回退默认值"
+    "default": "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定({ttl}内有效)",
+    "hint": "占位符 {group} 群名 {code} 验证码 {player} 玩家名 {server} 服务器名 {ttl} 有效期人话(如 5 分钟，跟随「验证码有效期」)。留空回退默认值"
   },
   "template_bind_success_game": {
     "description": "绑定成功时游戏内广播",

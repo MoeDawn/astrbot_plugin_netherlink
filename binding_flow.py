@@ -51,6 +51,21 @@ def _positive_ttl(value, default: float) -> float:
     return v if v > 0 else default
 
 
+def describe_ttl(value) -> str:
+    """有效期说成人话，供进服提示的 `{ttl}` 占位符使用（如 `5 分钟`）。
+
+    ⚠️ **必须走 `_positive_ttl` 而不是直接用配置里那个值**：
+    配 0 / 负数会被 `_positive_ttl` 回退成默认的 300 秒，真实有效期就是 5 分钟。
+    若这里原样把 0 渲染成「0 秒」，提示语会对着玩家**说反话**——正是
+    `render_karma_rules` 要消灭的那类「提示词与实际值脱节」。
+    与它同理：一处渲染、一个来源，不靠「记得同步改两处」。
+    """
+    secs = _positive_ttl(value, CODE_TTL_SECONDS)
+    if secs >= 60 and secs % 60 == 0:
+        return "%d 分钟" % int(secs // 60)
+    return "%d 秒" % int(secs)
+
+
 def normalize_code(text: str) -> str:
     """归一化：去空白 → 全角转半角 → 转大写。
 
