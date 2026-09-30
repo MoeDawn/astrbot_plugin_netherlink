@@ -16,7 +16,9 @@ CODE_LENGTH = 6
 # 有效期 5 分钟；过期重新进服即可
 CODE_TTL_SECONDS = 300
 
-# 码表用**大写字母 + 数字**。⚠️ 排除容易混淆的 0/O/1/I/L，减少「看错了」的扯皮。
+# 码表用**大写字母 + 数字**，实测 34 个字符。
+# ⚠️ 排除 `O` 与 `I`（与 `0`/`1` 最容易看混的那两个字母）。
+#   注意 `L`/`0`/`1` 是**保留**的——注释与代码必须一致，别照抄「排除 0/O/1/I/L」那种说法。
 _ALPHABET = "".join(c for c in (string.ascii_uppercase + string.digits)
                     if c not in "OI")
 
@@ -44,6 +46,8 @@ def is_code_shaped(text: str, length: int = CODE_LENGTH) -> bool:
     ⚠️ **本函数只判形状，不查码簿**。调用方先用它挡掉绝大多数群聊消息，
     再去查表——顺序反了会让每条群消息都去遍历码簿。
     """
+    if length <= 0 or not text:
+        return False          # `all()` 对空串是真空真——不挡掉的话 `is_code_shaped("", 0)` 会是 True
     if len(text) != length:
         return False
     # 大小写不敏感：`new_code` 只产大写，但群友手打可能是小写——
@@ -63,7 +67,9 @@ def issue(codes: dict, player: str, code: str, now: float) -> dict:
     同一个玩家只留一个待用码——积压一堆待用码只会让「哪个还有效」变成谜。
     """
     out = dict(codes)
-    out[str(player)] = {"code": str(code).upper(), "issued_at": float(now)}
+    # ⚠️ 存**归一化后**的码（与 `match` 的判据一致）——否则调用方若把群里
+    # 原样的全角/小写码交给本函数，存进去的码永远匹配不上。
+    out[str(player)] = {"code": normalize_code(code), "issued_at": float(now)}
     return out
 
 
@@ -74,7 +80,8 @@ def match(codes: dict, table: dict, text: str, now: float) -> tuple:
     - 命中且该玩家**已绑定** → `(player, 他已绑的 QQ)`，供调用方提示「你绑过了」
     - 命中且未绑定 → `(player, "")`
 
-    ⚠️ 顺手清掉过期条目，否则码簿只增不减。
+    ⚠️ 本函数**只读**：过期的码只是**不参与匹配**，清除是 `prune` 的活
+    （调用方发新码前先 `prune` 一次，否则码簿只增不减）。
     """
     norm = normalize_code(text)
     if not is_code_shaped(norm):
@@ -109,14 +116,24 @@ def is_gated(table: dict, player: str, ignored: set, enabled: bool,
     """这个人是否该被挡在门外。
 
     四道判据缺一不可：开关打开、有玩家名、未绑定、不在忽略名单也不在豁免名单。
-    ⚠️ 忽略名单与豁免名单都按**精确**名字匹配（不做包含匹配——`bot` 不该误伤 `robot`）。
+
+    ⚠️ **按精确名字匹配，不做包含匹配**——`bot` 不该误伤 `robot`
+    （与 `main.py` 的 `_is_ignored_player` 同口径）。
+    ⚠️ **但比较时不区分大小写**：MC 上报的是**规范拼写**（`MoeDawn`），而配置项
+    是手打的（可能写成 `moedawn`）。本项目的 `admin_mc` 就栽过这个坑
+    （「填 `moedawn` 永远匹配不上」），修法是 `_admin_mc_lower` 统一小写比较。
+    这里取同一口径——**豁免名单是管理员用途**，认不出来就会把管理员
+    **踢出他自己的服务器**，比「事件被广播」严重得多。
     """
     if not enabled:
         return False
     name = str(player or "").strip()
     if not name:
         return False
-    if name in ignored or name in exempt:
+    low = name.lower()
+    ignored_low = {str(x).strip().lower() for x in ignored}
+    exempt_low = {str(x).strip().lower() for x in exempt}
+    if low in ignored_low or low in exempt_low:
         return False
     rec = table.get(name)
     if isinstance(rec, dict) and str(rec.get("qq") or ""):
