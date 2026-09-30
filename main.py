@@ -726,19 +726,35 @@ class NetherLinkPlugin(Star):
             # 现在：配置项为空 ⇒ 记录为空（这就是"配置为准"的含义）。
             # 磁盘文件仍然照写（KarmaStore._save），降级为**镜像**：
             # 供人查看与手工恢复，不再参与启动加载。
+            #
+            # ⚠️ 仍然必须过一遍 `merge_records`：这里传空文件表，它退化成
+            # **「归一化配置项」**——丢损坏条目、拆旧 {"value":N} 形态、夹到
+            # [karma_min, karma_max]。少了这一步，WebUI 手改的越界值会原样留在
+            # snapshot 里被写回配置与镜像（显示值与实际生效值不一致，且
+            # `evict_oldest` 按值淘汰会被它带偏），`KarmaStore.snapshot` 那句
+            # 「内存里只有合法值」也会失真。它同时**返回新 dict**——
+            # `_parse_config_records` 在配置项已是 dict 时返回的是 AstrBot 那个
+            # 对象本身，直接交给 store 会绕开 save_config 就地改内存配置。
             self._karma: KarmaStore = KarmaStore(
-                self._parse_config_records(),
+                merge_records(
+                    {}, self._parse_config_records(), self.karma_min, self.karma_max
+                ),
                 self._karma_path,
                 self.karma_min,
                 self.karma_max,
             )
         except Exception as e:
-            logger.error(f"NetherLink: 好感度记录加载失败（磁盘文件不可读）: {e}")
+            logger.error(f"NetherLink: 好感度记录加载失败（配置项不可读或存储初始化失败）: {e}")
             # 降级：path=None 的纯内存 store，磁盘文件因此不会被覆写。
             # 但仍要用配置项里的记录播种——否则下一次 delta!=0 的 _karma_add 会把
             # 只含本次改动这一条的快照写回 karma_records，把管理员手改的条目全清掉。
             try:
-                self._karma = KarmaStore(self._parse_config_records(), None)
+                self._karma = KarmaStore(
+                    merge_records(
+                        {}, self._parse_config_records(), self.karma_min, self.karma_max
+                    ),
+                    None,
+                )
             except Exception as e2:
                 logger.error(f"NetherLink: 降级加载好感记录失败（按空表继续）: {e2}")
                 self._karma = KarmaStore({}, None)  # path=None：纯内存，不再落盘
