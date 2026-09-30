@@ -19,6 +19,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -59,6 +60,11 @@ except ImportError:  # 插件以顶层模块方式加载时
         identity_key,
         merge_records,
     )
+
+try:
+    from . import audit
+except ImportError:  # 插件以顶层模块方式加载时
+    import audit
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
@@ -705,6 +711,11 @@ class NetherLinkPlugin(Star):
         # 同一个人在两边是两份独立好感，不做映射。
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
+        # 指令审计落盘位置，与 karma.json 同目录（便于整体备份）。
+        # ⚠️ `audit_path` 收的是**插件数据根**，会自己拼上 `netherlink/`。
+        # `_karma_dir` 已经含 `netherlink/` 那一层，所以取它的 `.parent`；
+        # 直接传 `_karma_dir` 会得到 .../netherlink/netherlink/audit.jsonl。
+        self._audit_path: Path = audit.audit_path(self._karma_dir.parent)
         self._karma_lock = asyncio.Lock()
         # 配置项是唯一权威来源（管理员在 WebUI 手改的 karma_records
         # 优先级最高）；磁盘文件只写不读，降级为镜像。
@@ -1087,6 +1098,20 @@ class NetherLinkPlugin(Star):
             self.config.save_config()
         except Exception as e:
             logger.error(f"NetherLink: 写回 karma_records 配置失败: {e}")
+
+    def _write_audit(self, event: str, **fields) -> None:
+        """写一条审计记录。**旁路功能，绝不抛异常**——写不进去也不能连累指令执行。
+
+        `log_command_audit` 是唯一开关：关掉则日志与落盘都不写（口径与既有日志一致）。
+        """
+        if not self.log_command_audit:
+            return
+        try:
+            rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event}
+            rec.update(fields)
+            audit.append_audit(self._audit_path, rec)
+        except Exception as e:
+            logger.warning(f"NetherLink: 指令审计落盘失败（已忽略）: {e}")
 
     def _mc_connected(self, server_id: str = "") -> bool:
         """是否有可用的 MC 连接。
@@ -1859,11 +1884,20 @@ class NetherLinkPlugin(Star):
                     f"发起者={initiator!r} qq={qq or '-'} "
                     f"目标={server_id or '自动'} 报价={spend} 指令={cmd!r}"
                 )
+                self._write_audit(
+                    "request", source=source, initiator=initiator, qq=qq or "",
+                    server=server_id or "auto", cmd=cmd, quoted=spend, spent=0, note="",
+                )
             if spend:
                 cur = await self._karma_get(key)
                 if cur < spend:
                     logger.info(
                         f"NetherLink: 好感不足拒绝执行 [{key}] 需要 {spend} 现有 {cur}: {cmd}"
+                    )
+                    self._write_audit(
+                        "rejected", source=source, initiator=initiator, qq=qq or "",
+                        server=server_id or "auto", cmd=cmd, quoted=spend, spent=0,
+                        note=f"好感不足（需要 {spend} 现有 {cur}）",
                     )
                     return (
                         f"好感不足：本次需要 {spend}，发起者当前好感为 {cur}，"
@@ -1878,6 +1912,11 @@ class NetherLinkPlugin(Star):
             # 也不留任何痕迹，是唯一一条「扣了钱且无迹可查」的路径。
             try:
                 if not self._mc_connected():
+                    self._write_audit(
+                        "failed", source=source, initiator=initiator, qq=qq or "",
+                        server=server_id or "auto", cmd=cmd, quoted=spend, spent=0,
+                        note="MC 未连接",
+                    )
                     if spend and not await self._rollback_karma(
                         key, spend, cur, "MC 未连接", cmd
                     ):
@@ -1904,6 +1943,11 @@ class NetherLinkPlugin(Star):
                     failure = f"指令执行失败。服务器输出：\n{result.output}"
                     reason = "服务器回报执行失败"
                 if failure is not None:
+                    self._write_audit(
+                        "failed", source=source, initiator=initiator, qq=qq or "",
+                        server=server_id or "auto", cmd=cmd, quoted=spend, spent=0,
+                        note=reason,
+                    )
                     if not spend:
                         return failure
                     if not await self._rollback_karma(key, spend, cur, reason, cmd):
@@ -1922,6 +1966,10 @@ class NetherLinkPlugin(Star):
                         f"NetherLink: [指令审计] 成功 发起者={initiator!r} "
                         f"目标={server_id or '自动'} 消耗={spend} 指令={cmd!r}"
                     )
+                self._write_audit(
+                    "success", source=source, initiator=initiator, qq=qq or "",
+                    server=server_id or "auto", cmd=cmd, quoted=spend, spent=spend, note="",
+                )
                 output = result.output
                 if spend:
                     if output:
