@@ -15,8 +15,6 @@ from pathlib import Path
 
 from store import atomic_write_json, read_json
 
-_FIELDS = ("qq", "qq_name", "servers", "bound_at", "method")
-
 
 def bindings_path(data_dir: Path) -> Path:
     """绑定表的位置：`<插件数据根>/netherlink/bindings.json`。
@@ -64,9 +62,17 @@ def lookup(table: dict, player: str) -> str:
 
 
 def record_for(table: dict, player: str) -> dict:
-    """玩家名的完整记录；未绑定返回空 dict。"""
+    """玩家名的完整记录（**与表脱钩**的副本）；未绑定返回空 dict。
+
+    ⚠️ `servers` 是 list，而 `dict(rec)` 只拷顶层——浅拷贝会让调用方经由返回值的
+    列表就地改到表内数据。这里显式重建 `servers`，使返回值与表互不影响。
+    """
     rec = table.get(player)
-    return dict(rec) if isinstance(rec, dict) else {}
+    if not isinstance(rec, dict):
+        return {}
+    out = dict(rec)
+    out["servers"] = list(rec.get("servers") or [])
+    return out
 
 
 def upsert(table: dict, player: str, qq: str, qq_name: str, server_id: str,
