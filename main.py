@@ -44,14 +44,76 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 # ⚠️ 这个 try/except 与注册处那个是**两件事**：这里挡的是「模块不存在」，
 #    那里挡的是「方法不存在 / 签名变了」。两个都得有。
 try:
-    from astrbot.api.web import error_response, json_response
+    from astrbot.api.web import error_response, json_response, request
 except ImportError:  # 旧版 AstrBot：没有 Plugin Pages
     error_response = None
     json_response = None
+    request = None
 
 # 面板是否可用。注册路由与 handler 兜底两处都要用这条事实，
 # 起个名字，免得两处判据各写一份、日后漂移。
-PANEL_AVAILABLE = json_response is not None
+# ⚠️ **三个都要在**，不是「有一个就行」：只读面（karma/bindings/diagnostics/
+#    players/audit）全都要经 `request` 读 query 参数，而真机里 `request` 是
+#    **ContextVar 代理**、不是 handler 形参（见 plugin-pages.md）。少判它的话，
+#    一个只有两个 helper 的 AstrBot 能通过注册分支，然后每条带 `?q=` 的请求
+#    都在 handler 里抛 `AttributeError` —— 那不是「面板不可用」，是一堆 500。
+#    ⚠️ 三者同属一个模块，缺一个基本就是整个模块的版本不对，所以判成整体缺席
+#    是**准确**的，不是过度保守。
+PANEL_AVAILABLE = (
+    json_response is not None and error_response is not None and request is not None
+)
+
+# 面板一次最多回多少条审计。显式写出来（而不是依赖 `read_audit` 的默认值），
+# 是因为面板要**夹**这个数：`?limit=` 是外部输入，不夹就会被 `<=0` 弄成空表。
+PANEL_AUDIT_LIMIT = 100
+
+
+def _panel_unavailable() -> dict:
+    """面板不可用时的兜底返回体。
+
+    ⚠️ 返回**普通 dict**，不依赖缺席的 helper：AstrBot 允许 handler 直接返回
+    dict，所以这段在缺 helper 时也成立（换 `error_response(...)` 会在缺 helper
+    时再炸一次——那名字恰好是 None）。
+    ⚠️ 收成一个函数是为了**只有一份文案**：六条路由各抄一遍，改一句就会漂，
+    而这句要同时被 `tests/test_panel_optional_api.py` 断言。
+    """
+    return {
+        "status": "error",
+        "message": "管理面板不可用：当前 AstrBot 没有 astrbot.api.web"
+                   "（Plugin Pages 需 ≥ 4.28.2）",
+    }
+
+
+def _panel_query(name: str, default: str = "") -> str:
+    """读一个面板 query 参数（字符串），**任何异常都回退默认值**。
+
+    ⚠️ query 是**外部输入**（地址栏里手打的）。真机的 `request.query.get` 在
+    类型转换失败时是**抛异常**的，所以这里整段包住——一个打错的参数不该让
+    面板 500。
+    """
+    try:
+        return str(request.query.get(name, default) or "")
+    except Exception:
+        return default
+
+
+def _panel_limit(maximum: int) -> int:
+    """读 `?limit=`，**任何异常/越界都回退 `PANEL_AUDIT_LIMIT`**。
+
+    ⚠️ 真机的 `request.query.get("limit", 100, type=int)` 对 `"abc"` **抛
+    `ValueError`**（不是回退默认值）——不接住就是「地址栏打错一个字 → 面板 500」。
+    ⚠️ `<= 0` 特别处理：`audit.read_audit(limit <= 0)` 会**直接返回空表**，
+    照单全收会让面板「莫名其妙空了」，而这几乎总是笔误，不是「我要看 0 条」。
+    ⚠️ 上限夹到调用方给的值：审计文件本身就没那么多条，更大的值没有意义。
+    """
+    try:
+        value = request.query.get("limit", PANEL_AUDIT_LIMIT, type=int)
+    except Exception:
+        return PANEL_AUDIT_LIMIT
+    if value is None or value <= 0:
+        return PANEL_AUDIT_LIMIT
+    return min(int(value), maximum)
+
 
 # ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
 # `mc_platform` 用 `@register_platform_adapter` 把适配器类注册进
@@ -1004,6 +1066,24 @@ class NetherLinkPlugin(Star):
                 try:
                     self.context.register_web_api(
                         panel.route("servers"), self._api_servers, ["GET"], "在线服务器列表"
+                    )
+                    self.context.register_web_api(
+                        panel.route("karma"), self._api_karma, ["GET"], "好感度记录"
+                    )
+                    self.context.register_web_api(
+                        panel.route("bindings"), self._api_bindings, ["GET"],
+                        "QQ↔游戏账号绑定表"
+                    )
+                    self.context.register_web_api(
+                        panel.route("diagnostics"), self._api_diagnostics, ["GET"],
+                        "配置解析结果（管理员/绑定群/端口）"
+                    )
+                    self.context.register_web_api(
+                        panel.route("players"), self._api_players, ["GET"],
+                        "在线玩家（现场下发 list 指令）"
+                    )
+                    self.context.register_web_api(
+                        panel.route("audit"), self._api_audit, ["GET"], "指令审计"
                     )
                 except Exception as e:
                     logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
@@ -2087,13 +2167,11 @@ class NetherLinkPlugin(Star):
         仍可能直接 await 它，那时 `json_response` / `error_response` 都是 None，
         裸调会抛 'NoneType' object is not callable。返回**普通 dict**——
         AstrBot 允许 handler 直接返回 dict，不必依赖缺席的 helper。
+        ⚠️ 那段文案收在 `_panel_unavailable()` 里——六条路由共用一份，
+        各抄一遍的话改一句就会漂。下面五条 handler 的兜底都走它。
         """
         if not PANEL_AVAILABLE:
-            return {
-                "status": "error",
-                "message": "管理面板不可用：当前 AstrBot 没有 astrbot.api.web"
-                           "（Plugin Pages 需 ≥ 4.28.2）",
-            }
+            return _panel_unavailable()
         try:
             return json_response(panel.servers_view(
                 self._mc_conns, self._mc_server_display, time.monotonic()
@@ -2101,6 +2179,121 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 面板读取服务器列表失败: {e}")
             return error_response("读取服务器列表失败")
+
+    async def _api_karma(self):
+        """GET 好感度记录（可选 `?q=` 子串过滤，大小写不敏感）。
+
+        整形逻辑全在 `panel.karma_view` 里（脱离 AstrBot 可单测）。
+        ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
+        但 handler 是普通绑定方法，别处仍可能直接 await 它。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            return json_response(
+                panel.karma_view(self._karma.snapshot(), _panel_query("q"))
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取好感记录失败: {e}")
+            return error_response("读取好感记录失败")
+
+    async def _api_bindings(self):
+        """GET QQ ↔ 游戏账号绑定表（可选 `?q=`）。
+
+        ⚠️ 读的是**运行期那一份** `self._binding_table`（第二轮定的：全项目只有
+        这一份，绑定成功时整体替换）。不要在这里重新 `bindings.load` 一遍——
+        那会造出第二个真源，面板显示的可能与实际生效的不是同一份。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            return json_response(
+                panel.bindings_view(self._binding_table, _panel_query("q"))
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取绑定表失败: {e}")
+            return error_response("读取绑定表失败")
+
+    async def _api_diagnostics(self):
+        """GET 配置**解析之后**的四项：管理员名单 / 绑定群 / 端口绑定。
+
+        这是启动日志里那条「配置解析结果」的可视化版本——排查「我配的东西到底
+        生效没有」时，**先看这里**，再看 AI 收到的 system 消息。
+        ⚠️ 给的是**解析结果**而不是原始配置项：中文分隔符、大小写、`list` 与
+        `string` 两种形态这些坑，全都发生在解析这一步，看原始值看不出来。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            return json_response(panel.diagnostics_view(
+                self.admin_mc, self.admin_qq, self.group_names, self.ws_bindings
+            ))
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取配置诊断失败: {e}")
+            return error_response("读取配置诊断失败")
+
+    async def _api_players(self):
+        """GET 在线玩家——**现场下发 `list` 指令问服务端**，不是本地状态。
+
+        ⚠️ 本插件**不追踪在线玩家**：join/leave 事件只按模板广播出去，从不累加
+        （见 `_dispatch_mc_event`）。所以这份数据只能现场问。
+
+        ⚠️ **不扣好感**：`_run_console_cmd` 只管执行与等回执，扣费在
+        `exec_command_for` 里。面板是管理员功能（规范 §5.3），这条不经 AI 判断、
+        也不计价——面板本身要登录，等同管理员权限。
+
+        ⚠️ **拿不到回执不是错误**：未连接、多台服务器在线（`_send_to_mc` 会拒发，
+        绝不猜是哪台）、或超时，都返回 `connected: False` 的**正常响应**。
+        这是最常见的情形，用 `error_response` 会让前端把它渲染成红色故障。
+
+        ⚠️ `count` / `max` **解析不出来就是 `None`**，且**原始输出一律带上**：
+        解析只认实测见过的那一种写法（见 `panel.players_view`），界面要能把
+        「看不懂的输出」原样交给管理员，而不是显示一个编出来的数字。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            result = await self._run_console_cmd("list", timeout=8.0, server_id="")
+            if result is None:
+                return json_response({
+                    "connected": False,
+                    "ok": None,
+                    "count": None,
+                    "max": None,
+                    "output": "",
+                    "message": "MC 服务器未连接、未回执，或在线服务器不止一台"
+                               "（面板暂不支持多服选择）",
+                })
+            payload = dict(panel.players_view(result.output))
+            payload.update({
+                "connected": True,
+                "ok": bool(result.ok),
+                "output": result.output,
+                "message": "",
+            })
+            return json_response(payload)
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取在线玩家失败: {e}")
+            return error_response("读取在线玩家失败")
+
+    async def _api_audit(self):
+        """GET 指令审计（最近 N 条，**新的在前**；可选 `?q=` 过滤）。
+
+        ⚠️ `?limit=` 经 `_panel_limit` 夹过：非法值回退默认、`<=0` 回退默认
+        （`read_audit` 对 `<=0` 直接返回空表，照单全收会让面板莫名清空）。
+        ⚠️ 过滤在**整形层**做（`panel.audit_view`），不在这里筛——面板的筛选
+        规则要能脱离 AstrBot 单测。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            records = audit.read_audit(
+                self._audit_path, limit=_panel_limit(audit.AUDIT_MAX_ENTRIES)
+            )
+            return json_response(panel.audit_view(records, _panel_query("q")))
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取指令审计失败: {e}")
+            return error_response("读取指令审计失败")
 
 
 
