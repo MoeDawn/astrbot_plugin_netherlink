@@ -292,10 +292,17 @@
             </span>
           </div>
 
+          <!--
+            ⚠️ 初始就带 `hidden`：这一段文字只有**成功拿到 security_note** 之后才有内容
+               （app.js 的 loadCommands 里才第一次赋值）。没有这个初始态的话，首屏
+               与「GET 失败」两种情况下都会显示一个空心的警示边框盒子——
+               看着像「有一条需要注意的安全说明」而其实一个字都没有。
+          -->
           <p
             class="note note--security"
             id="commands-security-note"
             role="note"
+            hidden
           ></p>
 
           <p class="msg" id="commands-msg" role="status"></p>

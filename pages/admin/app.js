@@ -28,9 +28,6 @@
 
 const bridge = window.AstrBotPluginPage;
 
-/** 审计条数的默认值，与后端 `PANEL_AUDIT_LIMIT` 一致。 */
-const DEFAULT_AUDIT_LIMIT = 100;
-
 /** 迁移对话框相关元素。抽成常量是为了让「哪颗按钮下发请求」一眼可读。 */
 const MIGRATE_DIALOG_ID = "bindings-migrate-dialog";
 
@@ -577,6 +574,14 @@ async function runMigrateConfirm() {
  *    以为审计功能坏了。
  *
  * 返回 `null` 表示非法——调用方据此**放弃这一趟请求**，绝不发一个负数出去。
+ *
+ * ⚠️ 页面默认值（100）**住在 markup**（`index.html` 里 `#audit-limit` 的
+ *    `value`），本文件**不再声明第二份常量**：曾经有一个
+ *    `DEFAULT_AUDIT_LIMIT = 100` 并自称「与后端 PANEL_AUDIT_LIMIT 一致」，
+ *    但它没有任何读取点——有效默认值一直是 markup 里那个，常量只是摆着好看，
+ *    还给了一个「改了它会生效」的假承诺。两个真源迟早分叉，删掉那个才是对的。
+ *    ⚠️ 本页**总是**显式带 `limit` 参数，所以后端的 `PANEL_AUDIT_LIMIT` 默认值
+ *    在这里根本不会被走到——两者**不需要**一致。
  */
 function auditLimit() {
   const raw = byId("audit-limit").value.trim();
@@ -617,9 +622,16 @@ async function loadAudit(quiet) {
   renderAudit();
   if (!quiet) {
     const list = state.audit || [];
+    // 🔴 措辞不能声称「上限 N 就是生效的那个 N」：后端 `_panel_limit` 会
+    //    `min(请求值, AUDIT_MAX_ENTRIES)` 夹一次，前端**拿不到**这个上限是多少
+    //    （写死一个 1000 就是又一处分叉）。所以这里只说两件**确知**的事：
+    //    实际回来几条、这次请求的 limit 是多少，并点明服务端可能夹得更小。
     setMessage(
       msg,
-      list.length ? "显示最近 " + list.length + " 条（上限 " + limit + "）。" : "",
+      list.length
+        ? "显示最近 " + list.length + " 条（本次请求 limit=" + limit +
+          "，服务端会按自己的上限夹取，实际可能更少）。"
+        : "",
       "ok",
     );
   }
@@ -663,6 +675,22 @@ function auditNumber(value) {
 /* 快捷指令                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 空列表时显示什么——**两种原因两句话，不能共用一句**。
+ *
+ * 🔴 曾经失败路径也走「配置格式」那句：GET 挂了的时候，页面上会写一句
+ *    「配置项 quick_commands 的格式是 名称|指令|服务器；缺少名称或指令的条目会被
+ *    服务端跳过」——那是在**拿配置背请求失败的锅**。管理员会去改一个本来没问题的
+ *    配置项，而真正的原因（红字就在上面）被这句话盖过去了。
+ */
+const COMMANDS_EMPTY_CONFIG =
+  "没有可用的快捷指令（配置项 quick_commands 的格式是 名称|指令|服务器；" +
+  "缺少名称或指令的条目会被服务端跳过）。";
+
+const COMMANDS_EMPTY_UNREADABLE =
+  "快捷指令列表没能读出来（原因见上面的红字），这一块因此是空的——" +
+  "这不是配置为空，先别去改 quick_commands。";
+
 async function loadCommands() {
   const msg = byId("commands-msg");
   setMessage(msg, "读取中…", "busy");
@@ -671,7 +699,7 @@ async function loadCommands() {
     payload = await bridge.apiGet("commands");
   } catch (error) {
     state.commands = [];
-    renderCommands();
+    renderCommands(COMMANDS_EMPTY_UNREADABLE);
     setMessage(msg, "读取快捷指令失败：" + errorText(error), "error");
     return;
   }
@@ -680,6 +708,8 @@ async function loadCommands() {
   //    管理员权限。后端把它放进响应体正是为了让前端没有理由漏掉它——原文只有
   //    `panel.QUICK_COMMAND_SECURITY_NOTE` 一份，前端**不自己编**（编一份就会
   //    与服务端那份漂移，而这正是安全边界的表述）。
+  // ⚠️ 空串就隐藏：`.note` 有警示边框，留一个空盒子在页面上会被读成
+  //    「有一条需要注意的说明」（markup 里也带 `hidden` 初始态，同一件事的两端）。
   byId("commands-security-note").textContent =
     (payload && payload.security_note) || "";
   byId("commands-security-note").hidden = !(payload && payload.security_note);
@@ -692,16 +722,18 @@ async function loadCommands() {
   );
 }
 
-function renderCommands() {
+/**
+ * 渲染按钮列表。`emptyText` 只在**列表为空**时用到，由调用方给出**原因**——
+ * 这是为了让「配置里没有」与「请求失败」在页面上是两句不同的话（见上面两个常量）。
+ */
+function renderCommands(emptyText) {
   const list = byId("commands-list");
   list.replaceChildren();
   const rows = state.commands || [];
   if (!rows.length) {
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent =
-      "没有可用的快捷指令（配置项 quick_commands 的格式是 名称|指令|服务器；" +
-      "缺少名称或指令的条目会被服务端跳过）。";
+    p.textContent = emptyText || COMMANDS_EMPTY_CONFIG;
     list.appendChild(p);
     return;
   }
@@ -732,6 +764,11 @@ function commandButton(item) {
 async function runQuickCommand(item, button) {
   const msg = byId("commands-msg");
   setBusy([button], true);
+  // 🔴 **先清掉上一张结果卡，再下发。**
+  //    不清的话，一次失败会在红字旁边**留着一张上一次的成功卡**（「执行成功」），
+  //    而那正是本任务红线要防的形状：失败读起来像成功（claude.md 坑 4）。
+  //    清在这里而不是 catch 里，是因为「执行中…」那一段同样不该顶着一张陈旧的成功卡。
+  clearCommandResult();
   setMessage(msg, "执行中…", "busy");
   try {
     const result = await bridge.apiPost("commands/run", { index: item.index });
@@ -739,9 +776,34 @@ async function runQuickCommand(item, button) {
     setMessage(msg, "", "");
   } catch (error) {
     // 这条是**请求本身**失败（越界、断网）——与「指令没生效」不同，红色。
+    // ⚠️ 这里**不重画**结果卡（也不清空它以外的任何东西）：上面已经清过一次，
+    //    失败时页面上只剩这条红字，不会与任何旧结局并排。
     setMessage(msg, "执行失败：" + errorText(error), "error");
   } finally {
     setBusy([button], false);
+  }
+}
+
+/** 收起并清空执行结果卡（`.cmd-output`）。四个结局都从这里重新长出来。 */
+function clearCommandResult() {
+  const box = byId("commands-output");
+  if (box) {
+    box.hidden = true;
+    // 连结局配色一起复位，免得下一次渲染前残留上一次的 --ok / --error 边框。
+    box.className = "cmd-output";
+  }
+  const title = byId("commands-output-title");
+  if (title) {
+    title.textContent = "";
+  }
+  const detail = byId("commands-output-detail");
+  if (detail) {
+    detail.textContent = "";
+  }
+  const body = byId("commands-output-body");
+  if (body) {
+    body.textContent = "";
+    body.hidden = true;
   }
 }
 
