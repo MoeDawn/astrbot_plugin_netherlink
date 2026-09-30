@@ -73,6 +73,11 @@ try:
 except ImportError:  # 插件以顶层模块方式加载时
     import bindings
 
+try:
+    from . import binding_flow
+except ImportError:  # 插件以顶层模块方式加载时
+    import binding_flow
+
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
 
@@ -799,6 +804,21 @@ class NetherLinkPlugin(Star):
             f"绑定群={sorted(self.group_names) or '未配置'} "
             f"端口绑定={self.ws_bindings}"
         )
+
+        # 迁移探测：绑定了的人若还有 mc: 记录，提示可迁移。
+        # ⚠️ **只算不写**——规范 §4.3 要求迁移由用户在面板手动触发，
+        # 免得插件升级时静默改掉玩家数据。
+        try:
+            pending = binding_flow.plan_migration(
+                self._binding_table, self._karma.snapshot()
+            )
+            if pending:
+                logger.info(
+                    f"NetherLink: 检测到 {len(pending)} 条可迁移的好感记录"
+                    f"（已绑定玩家的 mc: 键）— 迁移需在管理面板手动触发"
+                )
+        except Exception as e:
+            logger.warning(f"NetherLink: 迁移探测失败（忽略）: {e}")
 
         # 存量配置检查：AstrBot 只补缺失键、**从不覆盖已有值**，所以插件改默认值
         # 对已部署实例毫无动静。这里把**可操作**的那一类变成启动时一眼可见——
