@@ -98,7 +98,7 @@ def match(codes: dict, table: dict, text: str, now: float) -> tuple:
     if not hit_player:
         return ("", "")
     rec = table.get(hit_player)
-    bound_qq = str(rec.get("qq") or "") if isinstance(rec, dict) else ""
+    bound_qq = str(rec.get("qq") or "").strip() if isinstance(rec, dict) else ""
     return (hit_player, bound_qq)
 
 
@@ -136,7 +136,7 @@ def is_gated(table: dict, player: str, ignored: set, enabled: bool,
     if low in ignored_low or low in exempt_low:
         return False
     rec = table.get(name)
-    if isinstance(rec, dict) and str(rec.get("qq") or ""):
+    if isinstance(rec, dict) and str(rec.get("qq") or "").strip():
         return False
     return True
 
@@ -169,7 +169,7 @@ def plan_migration(table: dict, records: dict, lo: int = -50, hi: int = 100) -> 
         rec = table.get(player)
         if not isinstance(rec, dict):
             continue
-        qq = str(rec.get("qq") or "")
+        qq = str(rec.get("qq") or "").strip()
         if not qq:
             continue
         qq_key = "qq:%s" % qq

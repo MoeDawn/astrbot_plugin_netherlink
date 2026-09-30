@@ -868,8 +868,26 @@ class NetherLinkPlugin(Star):
             f"NetherLink: 配置解析结果 —— 管理员(游戏)={sorted(self.admin_mc) or '未配置'} "
             f"管理员(QQ)={sorted(self.admin_qq) or '未配置'} "
             f"绑定群={sorted(self.group_names) or '未配置'} "
+            # ⚠️ `binding_group` 必须和 `绑定群` 印在同一行：这一项配错时
+            # 单独看任何一半都判断不出来，而它决定「验证码发到哪个群」。
+            f"验证码群(binding_group)={self.binding_group or '未配置(单群时自动取绑定群)'} "
             f"端口绑定={self.ws_bindings}"
         )
+
+        # ⚠️ **`binding_group` 填了一个不在 `group_names` 里的群号 = 门禁静默失效**。
+        # 两个群号都会被观察者当成「配对」的正常写法，实际却永远不会碰面：
+        # 门禁会拿它去发码，而 `on_group_message` / `on_decorating_result` 都以
+        # 「群号 ∈ group_names」为门槛——那个群的消息插件根本不处理。
+        # 木已成舟前唯一能拦住它的就是这一条启动日志（配置解析全是静默的）。
+        # 只报**一次**，不按事件报：进服是高频事件，逐次刷只会淹没别的东西。
+        if self.binding_group and self.binding_group not in self.group_names:
+            logger.warning(
+                f"NetherLink: binding_group={self.binding_group} "
+                f"不在绑定群名单里（当前绑定群={sorted(self.group_names) or '空'}）——"
+                f"这个群的消息插件不会处理，玩家拿到的验证码无法兑换。"
+                f"进服门禁因此**不生效**（不会踢人也不会发码）。"
+                f"请把 {self.binding_group} 填进 group_names，或把 binding_group 改成绑定群里的某一个。"
+            )
 
         # 迁移探测：绑定了的人若还有 mc: 记录，提示可迁移。
         # ⚠️ **只算不写**——规范 §4.3 要求迁移由用户在面板手动触发，
@@ -1490,13 +1508,24 @@ class NetherLinkPlugin(Star):
                     enabled=self.enable_binding and self.binding_join_gate,
                     exempt=self.binding_exempt_players,
                 ):
-                    if await self._gate_unbound_player(player, server_id):
+                    # ⚠️ 门禁整体包在 try 里，**一旦出错一律降级成「未拦截」**：
+                    # 让它抛出去会落到本方法末尾那个 `except Exception`，而那条路
+                    # 会跳过下面的推群——玩家进了服却在群里查无此人，正是 fail-open
+                    # 要防的「凭空消失」，只不过是从错误路径到达的。
+                    # （`_fmt` 只兜 KeyError/IndexError，用户把模板写成 `{code:d}`
+                    #   这类格式错误会抛 ValueError，是真实可达的。）
+                    try:
+                        gated = await self._gate_unbound_player(player, server_id)
+                    except Exception as e:
+                        logger.error(f"NetherLink: 进服门禁执行失败，按未拦截处理: {e}")
+                        gated = False
+                    if gated:
                         # ⚠️ **continue 的逻辑**：门禁已把这个人踢了，就不再走下面的
                         # 推群/公屏——否则群里会看到一条「Steve 进入了服务器」，
                         # 紧接着又看到他被踢，纯噪声。
                         return
-                    # 门禁**没有生效**（拿不到群号，见 `_gate_unbound_player`）：
-                    # 放行。这里刻意**不** `return`——静默把玩家丢掉是最糟的结局
+                    # 门禁**没有生效**（拿不到可用群号，或执行出错）：放行。
+                    # 这里刻意**不** `return`——静默把玩家丢掉是最糟的结局
                     # （他既没被踢、也没在任何群里出现过，等于凭空消失）。
                 # 已绑定（或门禁关闭）：顺手记下他出现过的服务器。
                 # ⚠️ 只在**真新增**一台服时才落盘——进服是高频道，
@@ -2425,21 +2454,30 @@ class NetherLinkPlugin(Star):
            落进服务端日志（项目已实测）——「码写进日志」因此不必改 MC 端
 
         **返回值**：`True` = 已经把他拦下了，调用方应当 `return`（不要再推群）；
-        `False` = 门禁**没有生效**（当前只有「拿不到群号」这一种情形），
+        `False` = 门禁**没有生效**（拿不到可用群号，或执行出错），
         调用方要照常走后面的推群逻辑——**静默把玩家丢掉是最糟的结局**。
 
-        ⚠️ **拿不到群号就放行（fail-open），不踢也不发码**：那种情况下踢人等于
-        把玩家**锁死**——他进不来，而提示里也没有任何地方能告诉他去哪绑。
-        这条判据放在**本方法里**而不是 `_binding_group_id()` 里：那个函数是
-        「拿群号」，拿不到就返回空串是它的契约；「该不该因此放行」是**门禁的策略**，
+        ⚠️ **拿不到一个「能被插件处理的」群号，就放行（fail-open）：不踢、不发码**。
+        两种情形：
+          1. 压根没有群号——没配 `binding_group`，且 `group_names` 为空或多于一个；
+          2. `binding_group` 填了一个**不在 `group_names` 里**的群号。
+        后果完全一样，而且很重：`on_group_message` 与 `on_decorating_result` 都以
+        「群号 ∈ `group_names`」为门槛，**那个群的消息插件根本不处理**——玩家拿到的
+        是一张永远兑换不了的码。若还把他踢了，他连进来喊一声都做不到。
+        所以这里必须放行：**一个字段打错，不该让全服新人被挡在门外**。
+
+        ⚠️ 这条判据放在**本方法里**而不是 `_binding_group_id()` 里：那个函数的契约
+        就是「配了 `binding_group` 就原样返回，否则取唯一的那个绑定群，都不行才返回
+        空串」，它**不做**成员校验；「群号可不可用、该不该因此放行」是**门禁的策略**，
         而且下一轮的群侧发码匹配还要复用它。
 
-        ⚠️ 这里**不额外记 warning**：多个群却没配时 `_binding_group_id()` 已经记过；
-        而「一个群都没配」是很可能出现的状态（`group_names` 的 schema 默认就是空），
-        进服又是高频事件，逐次刷日志只会把别的东西淹掉。要提示应当在**启动**时提示。
+        ⚠️ 这里**不额外记 warning**：配置问题应该报**一次**，而进服是高频事件，
+        逐次刷只会把别的东西淹掉。提示改在 `__init__` 的启动检查里报
+        （搜「binding_group 不在绑定群名单里」），那里才是运维会看的地方。
         """
         group_id = self._binding_group_id()
-        if not group_id:
+        # ⚠️ 除了「没群号」，「群号不在绑定群名单里」同样要放行——见 docstring。
+        if not group_id or group_id not in self.group_names:
             return False
         code = binding_flow.new_code(random.randrange)
         async with self._bind_code_lock:

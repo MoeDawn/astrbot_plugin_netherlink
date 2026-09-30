@@ -111,7 +111,7 @@ def note_server(table: dict, player: str, server_id: str) -> tuple:
     ⚠️ 未命中任何条件时**原样返回入参对象**（不是副本）——调用方据此跳过写盘。
     """
     rec = table.get(player)
-    if not isinstance(rec, dict) or not str(rec.get("qq") or ""):
+    if not isinstance(rec, dict) or not str(rec.get("qq") or "").strip():
         return table, False
     sid = str(server_id or "").strip()
     if not sid:
