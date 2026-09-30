@@ -154,7 +154,7 @@
     "description": "记录指令执行的审计日志",
     "type": "bool",
     "default": true,
-    "hint": "每次通过 AI 执行指令时记一条,含来源侧、发起者、目标服务器、指令与好感消耗。执行失败本来就有各自的日志,本项补的是成功执行的留痕——出事时能查出是谁干的"
+    "hint": "每次通过 AI 执行指令时,日志记一条并结构化落盘到 data/plugin_data/netherlink/audit.jsonl(来源侧、发起者、目标服务器、指令、好感消耗);关掉则两者都不写。执行失败另有日志,本项补的是成功留痕"
   },
   "enable_advancement": {
     "description": "玩家获得成就时通知 AI",
