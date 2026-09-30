@@ -234,7 +234,7 @@ DEFAULT_SERVER_DISPLAY = "MC"
 
 # 游戏侧注入给 AI 的系统上下文模板（**与 QQ 侧对称**）。
 # 占位符：{identity} 当前发起者、{is_admin} 是/不是管理员（已含结尾句号）、
-#        {server} 服务器显示名。
+#        {server} 服务器显示名、{binding} 绑定信息（已绑定时追加，没绑定就是空串）。
 # 2026-09-22 由 extra_system_prompt 改名而来——身份行从代码生成改为模板承载，
 # 用户就能在配置界面里看到并修改它（与 QQ 侧那份同等可配）。
 #
@@ -269,7 +269,8 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 
 # QQ 侧注入给 AI 的系统上下文模板（**游戏侧不用它**）。
 # 游戏侧那份并入「游戏内自定义提示词」，身份由代码生成——见 _admin_context。
-# 占位符：{identity} 当前发起者、{is_admin} 是/不是管理员（已含结尾句号）。
+# 占位符：{identity} 当前发起者、{is_admin} 是/不是管理员（已含结尾句号）、
+#        {binding} 绑定信息（已绑定时追加，没绑定就是空串）。
 # （{origin} / {roster} 已于 2026-09-22 删除，见 _admin_context_values）
 DEFAULT_NETHERLINK_CONTEXT_QQ = """\
 <netherlink_context>
@@ -1662,18 +1663,24 @@ class NetherLinkPlugin(Star):
         server_id: str = "",
         qq_id: str = "",
     ) -> dict:
-        """算出注入模板的占位符值：只有三项。
+        """算出注入模板的占位符值：共四项。
 
         ⚠️ `{is_admin}` **始终给**（是/不是都要说）——用户 2026-09-22 明确要求
         「只需要包含当前说话的玩家是不是管理员」。
 
         `{server}` 给游戏侧模板用（显示名）。
 
+        `{binding}` 是 2026-09-30（第二轮规格 §7）新增的**补充**项：
+        已绑定时给「，已绑定 …」，未绑定给空串。取值见 `_binding_fragment`。
+        ⚠️ 它**不在** `_render_template` 的 `required` 里——理由是存量部署
+        落盘的模板里没有它，进了 required 就会静默回退默认模板。
+
         `{origin}`（来源 + 服务器列表）与 `{roster}`（完整名单）已于 2026-09-22
         删除：前者与 AstrBot 自带的 Group name、以及 `_build_online_servers_hint()`
         里那份**在线**服务器清单重复；后者对「是否管理员」这个判断没有增量信息。
         `admin_context_admin_only` 开关随之删除（它只管这两行）。
-        占位符减到三个后，**模板里再写 {origin}/{roster} 会原样发出去**——
+        占位符减到三个后（2026-09-30 起为四个，多了一个 `{binding}`），
+        **模板里再写 {origin}/{roster} 会原样发出去**——
         `_render_template` 只替换已知的键，其余 `{...}` 一律保留（NBT 花括号
         那一课）。所以不要把它们加回模板提示词里。
         """
@@ -1715,9 +1722,15 @@ class NetherLinkPlugin(Star):
             return ""
         rec = self._binding_table.get(identity)
         if isinstance(rec, dict) and str(rec.get("qq") or ""):
-            return "，已绑定 QQ：%s（%s）" % (
-                str(rec.get("qq_name") or ""), str(rec["qq"])
-            )
+            qq = str(rec["qq"])
+            name = str(rec.get("qq_name") or "")
+            # 昵称为空时**不能**留下空括号（`，已绑定 QQ：（123456）`）——
+            # `bindings.upsert` 存的是 `str(qq_name or "")`，绑定路径传的是
+            # `str(event.get_sender_name() or "")`，所以「群友没设昵称」是
+            # 正常输入，不是一个不该出现的边界。有昵称时输出保持原样。
+            if name:
+                return "，已绑定 QQ：%s（%s）" % (name, qq)
+            return "，已绑定 QQ：%s" % qq
         return ""
 
     def _qq_is_admin(self, event) -> bool:
@@ -1765,6 +1778,9 @@ class NetherLinkPlugin(Star):
         流程——注给 QQ 侧只会让主 agent 去处理与它无关的事，所以那边给空串。
         `extra_in_front`：游戏侧要求 extra 紧跟在**好感规则**之后（用户
         2026-09-21 明确要求「好感度规则紧跟自定义提示词」）；QQ 侧则放末尾。
+        `qq_id`：发起者的 **QQ 号**，只有 QQ 侧会给（游戏侧留空）——QQ 侧的
+        `identity` 是群昵称，而绑定表按**游戏 ID** 建，没有它就反查不出对方
+        绑的游戏账号（见 `_binding_fragment`）。
         """
         blocks = []
         if self.karma_rules:
