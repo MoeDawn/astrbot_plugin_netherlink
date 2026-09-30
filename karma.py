@@ -247,8 +247,8 @@ class KarmaStore:
         只显示 QQ 号（或游戏 ID）与好感值，不带时间戳。
 
         不做过滤：非数字条目早已被 merge_records 挡在门外，内存里只有合法值。
-        本方法在任何输入下都不抛异常——2026-09-30 起插件初始化路径**不再**调用它，
-        唯一的生产调用点 `_sync_karma_to_config` 把它包在 try/except 里。
+        本方法在任何输入下都不抛异常（插件初始化路径会调用它——迁移探测
+        与 `_sync_karma_to_config`，两处都在 try/except 里，但仍然一个异常都不该抛）。
         """
         return dict(self._records)
 
