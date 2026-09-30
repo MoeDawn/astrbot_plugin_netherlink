@@ -721,6 +721,8 @@ class NetherLinkPlugin(Star):
         self._karma_path: Path = self._karma_dir / "karma.json"
 
         # 绑定表：QQ ↔ 游戏 ID。与 karma.json 同目录。
+        # ⚠️ `_binding_table` 就是运行期**唯一**那份表（好感键读它）——重绑落地时
+        # 必须**重新赋值这个属性**；只写盘不赋值，内存里会一直是旧表直到重启。
         self._bindings_path: Path = bindings.bindings_path(self._karma_dir.parent)
         try:
             self._binding_table: dict = bindings.load(self._bindings_path)
@@ -787,16 +789,6 @@ class NetherLinkPlugin(Star):
                 logger.error(f"NetherLink: 降级加载好感记录失败（按空表继续）: {e2}")
                 self._karma = KarmaStore({}, None)  # path=None：纯内存，不再落盘
                 self._karma_degraded = True
-        # 旧绑定表已废弃，不读不删，仅提示
-        try:
-            legacy = self._karma_dir / "bindings.json"
-            if legacy.exists():
-                logger.info(
-                    "NetherLink: 检测到已废弃的 bindings.json（绑定表功能已移除），"
-                    "插件不再读取该文件，可自行删除"
-                )
-        except OSError as e:
-            logger.warning(f"NetherLink: 检查遗留 bindings.json 失败（忽略）: {e}")
 
         # 配置解析全是**静默**的：admin_mc 打错一个字、分隔符用了全角逗号，
         # 插件都不会报错，只会安静地把管理员当普通玩家。这条日志是唯一能立刻
