@@ -112,10 +112,10 @@
     "hint": "默认 300 秒即 5 分钟。过期后重新进服即可拿到新码"
   },
   "binding_exempt_players": {
-    "description": "门禁豁免名单(游戏 ID,逗号分隔)",
-    "type": "string",
-    "default": "",
-    "hint": "名单里的玩家不会被门禁拦下,用于管理员/导演。不区分大小写"
+    "description": "门禁豁免的游戏 ID",
+    "type": "list",
+    "default": [],
+    "hint": "这些名字进服时不会被门禁拦下,用于排除管理员、导演或任何你不希望被拦的账号。⚠️ 按名字精确匹配,不区分大小写"
   },
   "mc_wake_prefixes": {
     "description": "游戏内机器人唤醒词",

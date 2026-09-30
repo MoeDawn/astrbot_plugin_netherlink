@@ -701,7 +701,7 @@ class NetherLinkPlugin(Star):
         self.binding_code_length: int = self._read_int(config, "binding_code_length", 6)
         self.binding_code_ttl: int = self._read_int(config, "binding_code_ttl", 300)
         self.binding_exempt_players: set = self._parse_csv(
-            config.get("binding_exempt_players", "")
+            config.get("binding_exempt_players", [])
         )
         # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
         # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
