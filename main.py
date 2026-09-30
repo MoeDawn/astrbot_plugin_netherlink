@@ -706,26 +706,28 @@ class NetherLinkPlugin(Star):
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
         self._karma_lock = asyncio.Lock()
-        # 配置优先、文件兜底（管理员在 WebUI 手改的 karma_records 优先级最高）。
+        # 配置项是唯一权威来源（管理员在 WebUI 手改的 karma_records
+        # 优先级最高）；磁盘文件只写不读，降级为镜像。
         # 加载失败必须让插件照常加载——好感度是软约束。各分支的实际保证：
         #   正常分支：store 绑定磁盘路径，改动落盘 + 写回配置项。
-        #   降级分支：store 的 path=None，**磁盘文件绝不会被写**（读失败的文件原样
-        #     留在盘上，修好后下次启动即可恢复）；但只要还能解析配置项，就继续用
+        #   降级分支：store 的 path=None，**磁盘文件绝不会被写**（镜像文件不被破坏，
+        #     日后可人工取用）；但只要还能解析配置项，就继续用
         #     配置项里的记录播种，于是后续写回的是「配置原有记录 + 本次改动」，
         #     不会把管理员手填的条目清空。
         #   播种也失败：退化为空表且置 _karma_degraded，此时禁止写回配置项——
         #     内存里没有配置项的记录，写回等于把它们全部清掉。
-        # KarmaStore.read 对缺失/损坏/非 UTF-8 文件返回空表且已归一化，不抛异常；
-        # 这里兜的是更外围的意外（如 RecursionError、数据目录不可读）。
+        # 这里兜的是意外（如 RecursionError、数据目录不可读）：
+        # `_parse_config_records` 自身已吞掉解析异常并回退空表。
         self._karma_degraded: bool = False
         try:
+            # ⚠️ 2026-09-30 起**只读配置项**（`karma_records` 是唯一权威来源）。
+            # 此前是「文件 ∪ 配置」并集（配置同键覆盖、两边独有都留），后果是
+            # **从哪一侧删都会被另一侧带回来**——删除在设计上做不到。
+            # 现在：配置项为空 ⇒ 记录为空（这就是"配置为准"的含义）。
+            # 磁盘文件仍然照写（KarmaStore._save），降级为**镜像**：
+            # 供人查看与手工恢复，不再参与启动加载。
             self._karma: KarmaStore = KarmaStore(
-                merge_records(
-                    KarmaStore.read(self._karma_path, self.karma_min, self.karma_max).snapshot(),
-                    self._parse_config_records(),
-                    self.karma_min,
-                    self.karma_max,
-                ),
+                self._parse_config_records(),
                 self._karma_path,
                 self.karma_min,
                 self.karma_max,
@@ -736,9 +738,7 @@ class NetherLinkPlugin(Star):
             # 但仍要用配置项里的记录播种——否则下一次 delta!=0 的 _karma_add 会把
             # 只含本次改动这一条的快照写回 karma_records，把管理员手改的条目全清掉。
             try:
-                self._karma = KarmaStore(
-                    merge_records({}, self._parse_config_records()), None
-                )
+                self._karma = KarmaStore(self._parse_config_records(), None)
             except Exception as e2:
                 logger.error(f"NetherLink: 降级加载好感记录失败（按空表继续）: {e2}")
                 self._karma = KarmaStore({}, None)  # path=None：纯内存，不再落盘
