@@ -36,7 +36,8 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 # ⚠️ `astrbot.api.web`（Plugin Pages 的响应 helper）**必须守卫式导入**：
 #    它比 metadata.yaml 声明的 `astrbot_version: ">=4.16,<5"` 新得多
-#    （Plugin Pages 本身需 AstrBot ≥ 4.28.2），旧版 AstrBot 里这个模块
+#    （Plugin Pages **需要较新版本**：真源码 tag `v4.27.4` **已含该功能**，
+#     **引入版本未能确定**，**4.28.2 不是已证实的门槛**），旧版里这个模块
 #    **根本不存在**。写成裸顶层导入的话，旧版上 import 阶段就抛 ImportError
 #    → 插件**整个加载失败**——不是「面板不可用」，而是 QQ↔MC 互通、好感度、
 #    指令执行全部一起消失。HANDOFF.md 的要求是「低版本**安静禁用**面板
@@ -74,13 +75,13 @@ def _panel_unavailable() -> dict:
     ⚠️ 返回**普通 dict**，不依赖缺席的 helper：AstrBot 允许 handler 直接返回
     dict，所以这段在缺 helper 时也成立（换 `error_response(...)` 会在缺 helper
     时再炸一次——那名字恰好是 None）。
-    ⚠️ 收成一个函数是为了**只有一份文案**：六条路由各抄一遍，改一句就会漂，
+    ⚠️ 收成一个函数是为了**只有一份文案**：十三条路由各抄一遍，改一句就会漂，
     而这句要同时被 `tests/test_panel_optional_api.py` 断言。
     """
     return {
         "status": "error",
         "message": "管理面板不可用：当前 AstrBot 没有 astrbot.api.web"
-                   "（Plugin Pages 需 ≥ 4.28.2）",
+                   "（Plugin Pages 需要较新版本；本插件已在 4.27.4 上验证可用）",
     }
 
 
@@ -1135,63 +1136,60 @@ class NetherLinkPlugin(Star):
         if self.context is not None:
             if not PANEL_AVAILABLE:
                 logger.warning(
-                    "NetherLink: 当前 AstrBot 没有 astrbot.api.web（Plugin Pages 需 "
-                    "AstrBot ≥ 4.28.2），管理面板不可用；"
+                    "NetherLink: 当前 AstrBot 没有 astrbot.api.web"
+                    "（Plugin Pages 需要较新版本：真源码 tag v4.27.4 已含该功能，"
+                    "引入版本未能确定），管理面板不可用；"
                     "插件其余功能（QQ↔MC 消息互通、好感度、指令执行）不受影响。"
                 )
             else:
+                # ⚠️ 逐条注册并**记数**：这 13 条此前是一个 try 包住的一串裸调用，
+                #    第 7 条抛异常时前 6 条**已经注册成功**——面板处在「半活」状态，
+                #    后面几条永远 404。只报「面板将不可用」是把故障说小了：运维会
+                #    照着「全没了」去查，而真正该看的是「从哪一条开始失败」。
+                #    用「列表 + 循环」而不是给 13 条各加一行计数，是为了让计数与
+                #    注册**同处一行**，谁也不会漏加。
+                registered = 0
                 try:
-                    self.context.register_web_api(
-                        panel.route("servers"), self._api_servers, ["GET"], "在线服务器列表"
-                    )
-                    self.context.register_web_api(
-                        panel.route("karma"), self._api_karma, ["GET"], "好感度记录"
-                    )
-                    self.context.register_web_api(
-                        panel.route("bindings"), self._api_bindings, ["GET"],
-                        "QQ↔游戏账号绑定表"
-                    )
-                    self.context.register_web_api(
-                        panel.route("diagnostics"), self._api_diagnostics, ["GET"],
-                        "配置解析结果（管理员/绑定群/端口）"
-                    )
-                    self.context.register_web_api(
-                        panel.route("players"), self._api_players, ["GET"],
-                        "在线玩家（现场下发 list 指令）"
-                    )
-                    self.context.register_web_api(
-                        panel.route("audit"), self._api_audit, ["GET"], "指令审计"
-                    )
-                    self.context.register_web_api(
-                        panel.route("karma/set"), self._api_karma_set, ["POST"],
-                        "设置好感度"
-                    )
-                    self.context.register_web_api(
-                        panel.route("karma/delete"), self._api_karma_delete, ["POST"],
-                        "删除好感度记录"
-                    )
-                    self.context.register_web_api(
-                        panel.route("bindings/rebind"), self._api_bindings_rebind,
-                        ["POST"], "改绑 QQ ↔ 游戏账号"
-                    )
-                    self.context.register_web_api(
-                        panel.route("bindings/unbind"), self._api_bindings_unbind,
-                        ["POST"], "解绑 QQ ↔ 游戏账号"
-                    )
-                    self.context.register_web_api(
-                        panel.route("bindings/migrate"), self._api_bindings_migrate,
-                        ["POST"], "把 mc: 好感并入 qq:（一次性迁移）"
-                    )
-                    self.context.register_web_api(
-                        panel.route("commands"), self._api_commands, ["GET"],
-                        "快捷指令（配置项 quick_commands 驱动的面板按钮）"
-                    )
-                    self.context.register_web_api(
-                        panel.route("commands/run"), self._api_commands_run, ["POST"],
-                        "执行一条快捷指令"
-                    )
+                    for route_name, handler, methods, desc in (
+                        ("servers", self._api_servers, ["GET"], "在线服务器列表"),
+                        ("karma", self._api_karma, ["GET"], "好感度记录"),
+                        ("bindings", self._api_bindings, ["GET"],
+                         "QQ↔游戏账号绑定表"),
+                        ("diagnostics", self._api_diagnostics, ["GET"],
+                         "配置解析结果（管理员/绑定群/端口）"),
+                        ("players", self._api_players, ["GET"],
+                         "在线玩家（现场下发 list 指令）"),
+                        ("audit", self._api_audit, ["GET"], "指令审计"),
+                        ("karma/set", self._api_karma_set, ["POST"], "设置好感度"),
+                        ("karma/delete", self._api_karma_delete, ["POST"],
+                         "删除好感度记录"),
+                        ("bindings/rebind", self._api_bindings_rebind, ["POST"],
+                         "改绑 QQ ↔ 游戏账号"),
+                        ("bindings/unbind", self._api_bindings_unbind, ["POST"],
+                         "解绑 QQ ↔ 游戏账号"),
+                        ("bindings/migrate", self._api_bindings_migrate, ["POST"],
+                         "把 mc: 好感并入 qq:（一次性迁移）"),
+                        ("commands", self._api_commands, ["GET"],
+                         "快捷指令（配置项 quick_commands 驱动的面板按钮）"),
+                        ("commands/run", self._api_commands_run, ["POST"],
+                         "执行一条快捷指令"),
+                    ):
+                        self.context.register_web_api(
+                            panel.route(route_name), handler, methods, desc
+                        )
+                        registered += 1
                 except Exception as e:
-                    logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
+                    if registered:
+                        logger.error(
+                            f"NetherLink: 注册面板路由时在第 {registered + 1} 条"
+                            f"（共 13 条）失败——**已注册 {registered} 条**，"
+                            f"面板处于半可用状态，其余路由的请求会 404: {e}"
+                        )
+                    else:
+                        logger.error(
+                            f"NetherLink: 注册面板路由失败，**一条都没注册上**"
+                            f"（面板不可用）: {e}"
+                        )
         logger.info("NetherLink 已加载")
 
     # ------------------------------------------------------------------
@@ -1478,11 +1476,25 @@ class NetherLinkPlugin(Star):
             return old, new
 
     async def _karma_set(self, key: str, target: int) -> tuple:
-        """把某键**设成** `target`，返回 `(旧值, 新值)`。
+        """把某键**设成** `target`，返回 `(结果, 旧值, 新值)`。
+
+        结果二选一（与 `_karma_delete` 同一套风格，调用方按它决定回什么给面板）：
+        - `"set"`：内存与配置项都按目标值更新完了（`old` / `new` 是真实前后值）；
+        - `"degraded"`：内存表没能从配置项播种，**整条设置被拒绝**（什么都没动，
+          `old` / `new` 都是 None）。
 
         实现是「读出当前值、算出 delta、再走 `_karma_add`」——内存、镜像、
         配置项因此全部经**既有入口**更新。面板不自己碰 `KarmaStore`：
         那会多出一条写法不同的写回路径，两处迟早漂移。
+
+        🔴 **降级态必须在动手之前拒绝**（理由同 `_karma_delete`）：那张内存表
+        没能从配置项播种、是不完整的；而 `_save()`（构造时 `path=None`）与
+        `_sync_karma_to_config` 在降级态下**都拒绝写**——照常走下去，管理员会
+        拿到一份「看起来成功、实际一个字节都没存」的回执。先改内存再放弃写回
+        同样不行，那会留下「内存变了、配置项没变」的分叉，重启后静默回滚。
+        ⚠️ **判据直接读 `self._karma_degraded`、不另取 `_karma_lock`**：它是
+        构造期定死的常量、之后不再变化；而下面的 `_karma_get` / `_karma_add`
+        **各自会取同一把锁**（`asyncio.Lock` 不可重入），在这里持锁再调它们会死锁。
 
         ⚠️ **取当前值与写回之间存在竞态**：这中间 AI 的对话性增减可能插进来，
         于是最终值不是 `target`。面板是管理员功能、同一时刻只有一个人在用，
@@ -1497,8 +1509,15 @@ class NetherLinkPlugin(Star):
         ⚠️ 校验（整数、范围、非空键）**不在这里**，在面板 handler 里做完才调本方法：
         本方法是「已经合法的目标值」的落地，不是入参闸门。
         """
+        if self._karma_degraded:
+            logger.error(
+                f"NetherLink: 好感记录处于降级态，拒绝设置 {key} —— "
+                f"写回会清掉管理员手填的 karma_records"
+            )
+            return "degraded", None, None
         current = await self._karma_get(key)
-        return await self._karma_add(key, int(target) - int(current))
+        old, new = await self._karma_add(key, int(target) - int(current))
+        return "set", old, new
 
     def _write_karma_config(self) -> bool:
         """把当前好感快照**无条件**写回配置项，返回是否真的写了。
@@ -2516,8 +2535,8 @@ class NetherLinkPlugin(Star):
         仍可能直接 await 它，那时 `json_response` / `error_response` 都是 None，
         裸调会抛 'NoneType' object is not callable。返回**普通 dict**——
         AstrBot 允许 handler 直接返回 dict，不必依赖缺席的 helper。
-        ⚠️ 那段文案收在 `_panel_unavailable()` 里——六条路由共用一份，
-        各抄一遍的话改一句就会漂。下面五条 handler 的兜底都走它。
+        ⚠️ 那段文案收在 `_panel_unavailable()` 里——十三条路由共用一份，
+        各抄一遍的话改一句就会漂。下面十二条 handler 的兜底都走它。
         """
         if not PANEL_AVAILABLE:
             return _panel_unavailable()
@@ -2557,6 +2576,11 @@ class NetherLinkPlugin(Star):
         不是回显请求——面板要能看出这次到底改没改。
         ⚠️ 目标值恰好等于 `karma_initial` 且原本没有记录时**不会新建记录**
         （见 `_karma_set`）：值本来就等于 initial，语义上没有变化。
+        🔴 **降级态必须返回 `error_response`**：那一态下 `_save()`（`path=None`）
+        与 `_sync_karma_to_config` **都不写**，照常回 `{"old": …, "value": …}`
+        就是**假成功**——管理员被告知改成了 30，而重启后一个字节都不剩。
+        理由与 `_api_karma_delete` 的同名分支完全一样：内存表不完整，
+        写回会清掉管理员手填的记录。
         ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
         但 handler 是普通绑定方法，别处仍可能直接 await 它。
         """
@@ -2576,7 +2600,12 @@ class NetherLinkPlugin(Star):
                 return error_response(
                     f"value 必须是 {self.karma_min}~{self.karma_max} 之间的整数"
                 )
-            old, new = await self._karma_set(key, value)
+            outcome, old, new = await self._karma_set(key, value)
+            if outcome == "degraded":
+                return error_response(
+                    "好感记录处于降级态（内存表没能从配置项播种），拒绝设置——"
+                    "写回会清掉管理员手填的 karma_records"
+                )
             return json_response({"key": key, "old": old, "value": new})
         except Exception as e:
             logger.error(f"NetherLink: 面板设置好感度失败: {e}")
