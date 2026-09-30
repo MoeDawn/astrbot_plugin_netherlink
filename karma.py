@@ -30,7 +30,9 @@ def clamp_value(v: object, lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> int:
     `lo > hi` 这类错误配置由调用方归一，本函数只保证「不抛异常」——
     真的传入倒置区间时，max(lo, min(hi, n)) 会返回 lo，不会崩。
     任何输入都不得抛异常——本函数在插件初始化路径（merge_records 归一化配置项）上
-    被调用，异常会直接崩掉插件加载。
+    被调用。⚠️ 该加载块**有** try/except（两条 `logger.error` + 降级分支），
+    所以异常不会崩掉插件加载；代价是**降级为空表**（`_karma_degraded`，
+    记录全丢）。正因如此，本函数仍然一个异常都不该抛。
 
     非数字归 0。溢出按方向夹到边界：JSON 里的 1e400 会被解析成 inf，而
     int(inf) 抛的是 OverflowError（不是 ValueError，不会被降级捕获），
