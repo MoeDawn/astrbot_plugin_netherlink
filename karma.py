@@ -239,6 +239,27 @@ class KarmaStore:
         self._save()
         return old, new
 
+    def remove(self, key: str) -> tuple:
+        """删除一个键，返回 `(是否原本存在, 旧值)`。
+
+        与 `add` 同风格：先改内存、再 `_save()`（镜像）。
+
+        ⚠️ **本方法不碰配置项**——配置项的唯一写入口在插件层
+        （`main.py` 的 `_karma_delete` 显式写回）。理由：`_sync_karma_to_config`
+        带一条「空快照不许覆盖非空配置」的守卫，删掉**最后一个**键时恰好会被它
+        挡下，于是删除静默失效（配置项留着旧记录，下次启动把它带回来）。
+        ⚠️ 键不在内存表里时返回 `(False, None)`，**且不写盘**——没有变化就不该
+        动文件（给镜像刷一次没有意义的 mtime，还会让「谁改的」更难查）。
+        ⚠️ 旧值走 `get` 的口径（越界夹回范围、旧 `{"value": N}` 形态取 value、
+        非数字返回 `initial`），所以报给面板的数字与实际生效的那个一致。
+        """
+        if key not in self._records:
+            return False, None
+        old = self.get(key, None)
+        del self._records[key]
+        self._save()
+        return True, old
+
     def snapshot(self) -> dict:
         """返回记录的副本，供写回配置项与落盘。
 

@@ -115,6 +115,42 @@ def _panel_limit(maximum: int) -> int:
     return min(int(value), maximum)
 
 
+def _panel_karma_key(raw) -> str:
+    """归一面板给的 key：必须是**非空字符串**（首尾空白会被去掉）。非法返回空串。
+
+    ⚠️ **为什么去空白**：HTML 输入框里复制粘贴很容易带上首尾空格，而
+    `merge_records` 不裁键——「 qq:123」于是变成一条谁也认不出来的新记录，
+    面板上表现为「设成功了，但列表里多出一条怪东西」。
+    ⚠️ **非字符串一律拒绝**（含 JSON 数字）：键的形态是 `qq:<QQ号>` / `mc:<游戏ID>`，
+    一个数字键只能是调用方写错了，悄悄 `str()` 只会把这个错误掩盖过去。
+    ⚠️ 这是**面板边界**的归一，不动既有数据：存量里若真有一条带空格的键，
+    它仍然原样躺在表里，只是再也别想从面板上改到它。
+    """
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
+def _panel_karma_value(raw, lo: int, hi: int) -> Optional[int]:
+    """把面板给的 value 归一成 `[lo, hi]` 内的整数。非法返回 None。
+
+    🔴 **`bool` 必须显式拒绝**：`isinstance(True, int)` 为真、`int(True) == 1`
+    —— 不判的话 JSON 的 `true` 会被当成「设成 1」，而面板上什么都看不出来
+    （这正是本仓库反复强调的静默失败）。
+    ⚠️ **不接受字符串数字**：面板发的是 JSON 数字，`"50"` 说明前端没解析。
+    这时回一句明确的错误比替它猜要值钱——猜错了是静默的，报错不是。
+    ⚠️ **小数同样拒绝**：好感是整数语义，`50.9` 该由前端取整，
+    而不是在这里被 `int()` 悄悄抹平（抹平了面板会显示一个用户没输入过的数字）。
+    ⚠️ 范围用调用方给的 `lo` / `hi`（= `self.karma_min` / `karma_max`，可配），
+    不硬编码 -50~100：那样改了配置面板就开始拒收合法值。
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    if not (lo <= raw <= hi):
+        return None
+    return raw
+
+
 # ⚠️ 这个导入**必须放顶层**，且必须在插件加载期真的执行到。
 # `mc_platform` 用 `@register_platform_adapter` 把适配器类注册进
 # `platform_cls_map`——AstrBot 是「先加载插件、后初始化平台」，
@@ -1085,6 +1121,14 @@ class NetherLinkPlugin(Star):
                     self.context.register_web_api(
                         panel.route("audit"), self._api_audit, ["GET"], "指令审计"
                     )
+                    self.context.register_web_api(
+                        panel.route("karma/set"), self._api_karma_set, ["POST"],
+                        "设置好感度"
+                    )
+                    self.context.register_web_api(
+                        panel.route("karma/delete"), self._api_karma_delete, ["POST"],
+                        "删除好感度记录"
+                    )
                 except Exception as e:
                     logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
         logger.info("NetherLink 已加载")
@@ -1332,6 +1376,99 @@ class NetherLinkPlugin(Star):
                         f"（{delta:+d}，范围 {self.karma_min}~{self.karma_max}）"
                     )
             return old, new
+
+    async def _karma_set(self, key: str, target: int) -> tuple:
+        """把某键**设成** `target`，返回 `(旧值, 新值)`。
+
+        实现是「读出当前值、算出 delta、再走 `_karma_add`」——内存、镜像、
+        配置项因此全部经**既有入口**更新。面板不自己碰 `KarmaStore`：
+        那会多出一条写法不同的写回路径，两处迟早漂移。
+
+        ⚠️ **取当前值与写回之间存在竞态**：这中间 AI 的对话性增减可能插进来，
+        于是最终值不是 `target`。面板是管理员功能、同一时刻只有一个人在用，
+        这个窗口可以接受；真要消除得让 `_karma_add` 支持「绝对值」语义，
+        那是改一个被多处调用的接口，代价与收益不成比例。
+
+        ⚠️ **目标值等于 `karma_initial` 且该键原本没有记录时不会新建记录**：
+        `_karma_add` 在 delta=0 时直接返回、不写盘（既有约定，避免每轮对话的
+        查询都触发写盘）。此时「没有记录」与「记录等于 initial」在 `_karma_get`
+        眼里本来就是同一个值——语义上确实什么都没变，面板照实显示即可。
+
+        ⚠️ 校验（整数、范围、非空键）**不在这里**，在面板 handler 里做完才调本方法：
+        本方法是「已经合法的目标值」的落地，不是入参闸门。
+        """
+        current = await self._karma_get(key)
+        return await self._karma_add(key, int(target) - int(current))
+
+    def _write_karma_config(self) -> bool:
+        """把当前好感快照**无条件**写回配置项，返回是否真的写了。
+
+        ⚠️ **与 `_sync_karma_to_config` 的分工**，别把两者合并：
+        那条是**内部记账**路径，带一条「空快照不许覆盖非空配置」的守卫，
+        本意是护着管理员在 WebUI 手填的 `karma_records`。删掉**最后一个**键时
+        快照恰好为空，那条守卫会**拒绝写回**——于是配置项留着旧记录、镜像文件
+        被写成空的、面板显示「删除成功」，而下次启动配置项把记录**原地带回来**。
+        管理员说删，就得真的删，所以这里显式写。
+        ⚠️ **降级态仍然不写**（`_karma_degraded`）：那张内存表没能从配置项播种，
+        是不完整的，拿它写回等于清掉管理员手填的记录。这是一条**一致性**守卫，
+        与"内部记账还是显式操作"无关，任何路径都不该绕开它。
+        （`_karma_delete` 还会在**动内存之前**再判一次，那里才是主判据；
+        本方法这一道是防线，保的是将来新增的调用方。）
+        """
+        if self._karma_degraded:
+            logger.error(
+                "NetherLink: 好感记录处于降级态，跳过显式写回配置，"
+                "以免清空管理员手填的 karma_records"
+            )
+            return False
+        try:
+            snapshot = self._karma.snapshot()
+            # 与 _sync_karma_to_config 同一形态：schema 把本项声明为 type=text，
+            # 落盘必须是字符串（写 dict 会让 WebUI 把对象塞进文本控件）。
+            self.config["karma_records"] = json.dumps(snapshot, ensure_ascii=False)
+            self.config.save_config()
+            return True
+        except Exception as e:
+            logger.error(f"NetherLink: 显式写回 karma_records 配置失败: {e}")
+            return False
+
+    async def _karma_delete(self, key: str) -> tuple:
+        """删除一个好感键，返回 `(结果, 旧值)`。
+
+        结果四选一（字符串常量，调用方按它决定回什么给面板）：
+        - `"deleted"`：内存与配置项都已删掉，`old` 是被删掉的那个值；
+        - `"missing"`：本来就没有这条记录，**无变化、也没写盘**（`old` 为 None）；
+        - `"degraded"`：内存表没能从配置项播种，**整条删除被拒绝**（什么都没动）；
+        - `"write_failed"`：内存删了、**配置项没写成**（写盘抛异常）——重启后
+          这条记录会从配置项回来。调用方必须把这种「只有一半生效」如实报出来。
+
+        ⚠️ **删除 ≠ 设成 0**：删掉之后 `_karma_get` 返回 `karma_initial`（默认 20），
+        而且面板上不再有这一行；「设成 0」是 `_karma_set` 的活。两者在
+        「值恰好等于 initial」时会看起来一样，但记录的有无不同——这一点必须让
+        管理员看得见（handler 把它写进了返回体的 message）。
+        ⚠️ **降级判定必须在动内存之前**：先删内存、再放弃写回，会留下
+        「内存里没了、配置项里还在」的分叉，比直接拒绝糟糕得多。
+        """
+        async with self._karma_lock:
+            if self._karma_degraded:
+                logger.error(
+                    f"NetherLink: 好感记录处于降级态，拒绝删除 {key} —— "
+                    f"写回会清掉管理员手填的 karma_records"
+                )
+                return "degraded", None
+            existed, old = self._karma.remove(key)
+            if not existed:
+                return "missing", None
+            if not self._write_karma_config():
+                # 走到这里只可能是写盘抛了异常（降级态上面已经拦掉）。内存已经删了、
+                # 配置项没写成——重启后这条记录会从配置项回来。这种「只有一半生效」
+                # 的状态必须报出来，混进 "deleted" 里就是撒谎。
+                logger.error(
+                    f"NetherLink: 好感记录 {key} 已从内存删除，但写回配置项失败 —— "
+                    f"重启后它会从配置项回来"
+                )
+                return "write_failed", old
+            return "deleted", old
 
     def _sync_karma_to_config(self) -> None:
         """把好感度快照写回配置项，WebUI 刷新即可见。失败仅告警。
@@ -2196,6 +2333,96 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 面板读取好感记录失败: {e}")
             return error_response("读取好感记录失败")
+
+    async def _api_karma_set(self):
+        """POST 把某个好感键**设成**目标值。body：`{"key": ..., "value": <int>}`。
+
+        ⚠️ body 走 `await request.json(default={})`——`request` 是 **ContextVar
+        代理**，不是 handler 形参（handler 只收路径参数，见 plugin-pages.md）。
+        ⚠️ 入参**全部在这里校验完再动手**：非法立即 `error_response`，
+        绝不让 `_karma_add` 去处理一个非数字的 delta，也绝不让异常冒泡给框架。
+        ⚠️ 返回体的 `old` / `value` 是**真实的前后值**（`_karma_add` 给的），
+        不是回显请求——面板要能看出这次到底改没改。
+        ⚠️ 目标值恰好等于 `karma_initial` 且原本没有记录时**不会新建记录**
+        （见 `_karma_set`）：值本来就等于 initial，语义上没有变化。
+        ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
+        但 handler 是普通绑定方法，别处仍可能直接 await 它。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            key = _panel_karma_key(payload.get("key"))
+            if not key:
+                return error_response("key 必须是非空字符串")
+            value = _panel_karma_value(
+                payload.get("value"), self.karma_min, self.karma_max
+            )
+            if value is None:
+                return error_response(
+                    f"value 必须是 {self.karma_min}~{self.karma_max} 之间的整数"
+                )
+            old, new = await self._karma_set(key, value)
+            return json_response({"key": key, "old": old, "value": new})
+        except Exception as e:
+            logger.error(f"NetherLink: 面板设置好感度失败: {e}")
+            return error_response("设置好感度失败")
+
+    async def _api_karma_delete(self):
+        """POST 删除某个好感键。body：`{"key": ...}`。
+
+        🔴 **删除不是「设成 0」**：删掉之后 `_karma_get` 返回 `karma_initial`
+        （默认 20），面板上也不再有这一行。这句写进返回体的 `message`——
+        前端与运维都该看到它，否则「删完显示 20」会被当成删除失败。
+        ⚠️ 删一个本来就不存在的键**不是错误**（删除是幂等的），返回
+        `deleted: false` 的正常响应。把它渲染成红色故障，会让管理员对着一份
+        已经过期的面板反复重试。
+        ⚠️ 降级态返回 `error_response`：那不是「这次没删掉」，而是**整类操作
+        都被拒**（内存表不完整，写回会清掉管理员手填的记录），必须显眼。
+        ⚠️ `write_failed`（内存删了、配置项没写成）同样返回 `error_response`：
+        那会在重启后**复活**这条记录，报成功就是撒谎。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            key = _panel_karma_key(payload.get("key"))
+            if not key:
+                return error_response("key 必须是非空字符串")
+            outcome, old = await self._karma_delete(key)
+            if outcome == "degraded":
+                return error_response(
+                    "好感记录处于降级态（内存表没能从配置项播种），拒绝删除——"
+                    "写回会清掉管理员手填的 karma_records"
+                )
+            if outcome == "write_failed":
+                return error_response(
+                    "记录已从内存删除，但写回配置项失败——重启后它会从配置项回来，"
+                    "请检查数据目录的权限与磁盘空间"
+                )
+            if outcome == "missing":
+                return json_response({
+                    "key": key,
+                    "deleted": False,
+                    "old": None,
+                    "message": "该键本来就没有记录，未做任何改动",
+                })
+            return json_response({
+                "key": key,
+                "deleted": True,
+                "old": old,
+                "message": (
+                    "已删除：记录已从配置项与镜像中移除，此后读取回退到初始值 "
+                    f"{self.karma_initial}（删除不等于设成 0）"
+                ),
+            })
+        except Exception as e:
+            logger.error(f"NetherLink: 面板删除好感度失败: {e}")
+            return error_response("删除好感度失败")
 
     async def _api_bindings(self):
         """GET QQ ↔ 游戏账号绑定表（可选 `?q=`）。
