@@ -42,7 +42,7 @@ def load(path: Path) -> dict:
             continue
         servers = rec.get("servers")
         out[str(player)] = {
-            "qq": str(rec["qq"]),
+            "qq": str(rec["qq"]).strip(),
             "qq_name": str(rec.get("qq_name") or ""),
             "servers": [str(s) for s in servers] if isinstance(servers, list) else [],
             "bound_at": str(rec.get("bound_at") or ""),
@@ -61,7 +61,7 @@ def lookup(table: dict, player: str) -> str:
     rec = table.get(player)
     if not isinstance(rec, dict):
         return ""
-    return str(rec.get("qq") or "")
+    return str(rec.get("qq") or "").strip()
 
 
 def record_for(table: dict, player: str) -> dict:
@@ -92,10 +92,36 @@ def upsert(table: dict, player: str, qq: str, qq_name: str, server_id: str,
     if sid and sid not in servers:
         servers.append(sid)
     out[str(player)] = {
-        "qq": str(qq),
+        "qq": str(qq).strip(),
         "qq_name": str(qq_name or ""),
         "servers": servers,
         "bound_at": str(now),
         "method": str(method),
     }
     return out
+
+
+def note_server(table: dict, player: str, server_id: str) -> tuple:
+    """记下「这个**已绑定**玩家在某台服上出现过」。返回 `(新表, 是否变了)`。
+
+    ⚠️ 只对已绑定的玩家记账——未绑定者没有记录，`servers` 无处可存
+    （等他绑定时 C3 会把当时那台服写进去）。
+    ⚠️ 返回 `changed` 让调用方**只在真变了时才落盘**：进服是高频事件，
+    每次都写盘既慢又没意义（规范 §3.1：只在见到「新的」服务器时才追加）。
+    ⚠️ 未命中任何条件时**原样返回入参对象**（不是副本）——调用方据此跳过写盘。
+    """
+    rec = table.get(player)
+    if not isinstance(rec, dict) or not str(rec.get("qq") or ""):
+        return table, False
+    sid = str(server_id or "").strip()
+    if not sid:
+        return table, False
+    servers = list(rec.get("servers") or [])
+    if sid in servers:
+        return table, False
+    servers.append(sid)
+    out = dict(table)
+    new_rec = dict(rec)
+    new_rec["servers"] = servers
+    out[player] = new_rec
+    return out, True

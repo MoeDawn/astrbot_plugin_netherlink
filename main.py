@@ -17,6 +17,9 @@
 
 import asyncio
 import json
+import random
+import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -487,6 +490,31 @@ def _render_template(tpl: str, default: str, values: dict, required: tuple, labe
     return text
 
 
+# `§x§R§R§G§G§B§B` 的 RGB 形式必须**先**去掉，否则每个 `§f` 会被当成一个
+# 独立码、在正文里剩下 "xff0000" 这种字面量。
+_SECTION_RGB_RE = re.compile("\u00a7x(?:\u00a7[0-9a-fA-F]){6}")
+_SECTION_CODE_RE = re.compile("\u00a7[0-9a-fk-orA-FK-OR]")
+
+
+def _strip_section_codes(text: str) -> str:
+    """去掉 MC 的 `§` 染色码（含 `§x§R§R§G§G§B§B` 的 RGB 形式）。
+
+    ⚠️ **只在「§ 不会被解释」的场合用**。实测结论（真 Paper 26.3，见 DEVLOG）：
+      · `kick` 的 reason 参数与 `/say` 的 text 同属 `MessageArgument`——
+        服务端**接受** §（`kick Steve §ehello§bworld` 正常解析，一路走到
+        「No player was found」），但**不把它当染色码**：`say §aGREEN` 在
+        服务端控制台里原样打出 `§aGREEN`，而同一次控制台**确实**会把它自己
+        的组件样式翻成 ANSI 色（那条报错就是 `[38;5;9m`）。也就是说 § 到了
+        这里只是一个普通字符，留在踢出界面/公屏上就是字面垃圾。
+      · 反过来，`chat` / `bot_reply` 那条路走 Java 的
+        `LegacyComponentSerializer.legacySection()`，§ **是**有效的——
+        **别**把本函数用到那条路上。
+    """
+    if not text:
+        return text
+    return _SECTION_CODE_RE.sub("", _SECTION_RGB_RE.sub("", text))
+
+
 class NetherLinkPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -703,6 +731,10 @@ class NetherLinkPlugin(Star):
         self.binding_exempt_players: set = self._parse_csv(
             config.get("binding_exempt_players", [])
         )
+        # 绑定流程的码簿（内存态）：进程重启后旧码失效是合理的。
+        # 码簿是跨协程的共享可变状态，读写都要拿锁。
+        self._bind_codes: dict = {}
+        self._bind_code_lock = asyncio.Lock()
         # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
         # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
         # 留空则用默认提示词（与其他提示词字段一致：空串不表示"关闭"，用开关关）。
@@ -1451,6 +1483,30 @@ class NetherLinkPlugin(Star):
                 text = self._fmt(self.templates["chat"], server=srv, bot=self.mc_bot_name,
                                  player=data.get("player", "?"), text=data.get("text", ""))
             elif mtype == "join" and self.config.get("enable_join_leave", True):
+                player = str(data.get("player") or "")
+                if binding_flow.is_gated(
+                    self._binding_table, player,
+                    ignored=self.mc_ignored_players,
+                    enabled=self.enable_binding and self.binding_join_gate,
+                    exempt=self.binding_exempt_players,
+                ):
+                    await self._gate_unbound_player(player, server_id)
+                    # ⚠️ **continue 的逻辑**：门禁已把这个人踢了，就不再走下面的
+                    # 推群/公屏——否则群里会看到一条「Steve 进入了服务器」，
+                    # 紧接着又看到他被踢，纯噪声。
+                    return
+                # 已绑定（或门禁关闭）：顺手记下他出现过的服务器。
+                # ⚠️ 只在**真新增**一台服时才落盘——进服是高频道，
+                # 每次都写盘既慢又没意义（规范 §3.1：「只在见到新的服务器时才追加」）。
+                updated, changed = bindings.note_server(
+                    self._binding_table, player, server_id
+                )
+                if changed:
+                    self._binding_table = updated
+                    try:
+                        bindings.save(self._bindings_path, self._binding_table)
+                    except Exception as e:
+                        logger.warning(f"NetherLink: 记录玩家服务器失败（忽略）: {e}")
                 text = self._fmt(self.templates["join"], server=srv, bot=self.mc_bot_name,
                                  player=data.get("player", "?"))
             elif mtype == "leave" and self.config.get("enable_join_leave", True):
@@ -2354,6 +2410,56 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 发送到 MC [{target}] 失败: {e}")
             return False
+
+    async def _gate_unbound_player(self, player: str, server_id: str) -> None:
+        """未绑定玩家进服：发码 + 公屏提示 + 踢出（踢出原因即提示）。
+
+        ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
+        1. **只走游戏内**——不额外 `_broadcast`，否则一条 join 会推两次群
+        2. **踢出用 `command` 帧**（`kick`）而非 `bot_reply`：走既有控制台通道，
+           四个 MC 端通用，且踢出界面上显示的原因就是那份说明
+        3. **提示同时用 `bot_reply` 发一遍**：它进公屏，于是以 `System chat: ...`
+           落进服务端日志（项目已实测）——「码写进日志」因此不必改 MC 端
+        """
+        group_id = self._binding_group_id()
+        code = binding_flow.new_code(random.randrange)
+        async with self._bind_code_lock:
+            self._bind_codes = binding_flow.issue(
+                binding_flow.prune(self._bind_codes, time.monotonic()),
+                player, code, time.monotonic(),
+            )
+        group_name = self.group_names.get(group_id, group_id) if group_id else "（未配置绑定群）"
+        reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
+                           player=player, code=code, group=group_name)
+        # ⚠️ § 染色码**两条路都要去掉**（实测结论，别「优化」回去）：
+        #   · `kick` 的 reason 是 `MessageArgument`——服务端接受 § 但**不解释**它，
+        #     踢出界面上会原样显示「§e请到 QQ 群…§bABC123」；
+        #   · `send_game_line` 本就会把文本里的 § 换成 `&`（防伪造染色的既有约定），
+        #     公屏那行会变成「&e请到 QQ 群…」，同样是字面垃圾。
+        # 换句话说，这条路上 § **根本到不了玩家眼前**，净化掉只有好处。
+        reason = _strip_section_codes(reason)
+        await self.send_game_line(reason, server_id)
+        await self._send_to_mc(
+            {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {reason}"},
+            server_id,
+        )
+
+    def _binding_group_id(self) -> str:
+        """哪个群接受验证码：配了就用配置，没配就取 `group_names` 里唯一那个。
+
+        ⚠️ 有多个群却没配 → 记一条 warning 并返回空串（**不猜**）。
+        """
+        if self.binding_group:
+            return self.binding_group
+        ids = list(self.group_names.keys())
+        if len(ids) == 1:
+            return ids[0]
+        if len(ids) > 1:
+            logger.warning(
+                "NetherLink: 配置了多个绑定群但未指定 binding_group，"
+                "无法确定验证码该去哪个群——请在配置里指定 binding_group"
+            )
+        return ""
 
     async def _broadcast_to_mc(self, payload: dict) -> int:
         """把一条下行消息发给**所有**在线的 MC 服务器，返回发成功的台数。
