@@ -290,8 +290,8 @@ DEFAULT_BOT_NAME = "ai"
 #    断言，分叉会让「改代码不生效而测试全绿」（见 claude.md 的
 #    「schema 与代码常量分叉风险」）。
 DEFAULT_BIND_HINT = "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定(5 分钟内有效)"
-DEFAULT_BIND_SUCCESS_GAME = "§a玩家 {player} 已完成 QQ 绑定"
-DEFAULT_BIND_SUCCESS_QQ = "§a{qq_name} ({qq}) 已绑定游戏账号 {player}"
+DEFAULT_BIND_SUCCESS_GAME = "玩家 {player} 已完成 QQ 绑定"
+DEFAULT_BIND_SUCCESS_QQ = "{qq_name} ({qq}) 已绑定游戏账号 {player}"
 
 
 

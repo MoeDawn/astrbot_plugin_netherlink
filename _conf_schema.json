@@ -300,13 +300,13 @@
   "template_bind_success_game": {
     "description": "绑定成功时游戏内广播",
     "type": "string",
-    "default": "§a玩家 {player} 已完成 QQ 绑定",
+    "default": "玩家 {player} 已完成 QQ 绑定",
     "hint": "占位符 {player} {qq} {qq_name} {server}。留空回退默认值"
   },
   "template_bind_success_qq": {
     "description": "绑定成功时群内回话",
     "type": "string",
-    "default": "§a{qq_name} ({qq}) 已绑定游戏账号 {player}",
+    "default": "{qq_name} ({qq}) 已绑定游戏账号 {player}",
     "hint": "占位符 {player} {qq} {qq_name}。留空回退默认值"
   }
 }
