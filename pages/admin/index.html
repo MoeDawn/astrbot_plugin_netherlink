@@ -51,6 +51,12 @@
         <button type="button" class="tab" data-target="bindings">
           绑定管理
         </button>
+        <button type="button" class="tab" data-target="diagnostics">
+          配置诊断
+        </button>
+        <button type="button" class="tab" data-target="players">
+          在线玩家
+        </button>
         <button type="button" class="tab" data-target="audit">指令审计</button>
         <button type="button" class="tab" data-target="commands">
           快捷指令
@@ -229,6 +235,73 @@
               迁移好感记录…
             </button>
             <p class="msg" id="bindings-migrate-result" role="status"></p>
+          </div>
+        </section>
+
+        <!-- ================= 配置诊断（I1 补齐） ================= -->
+        <section class="panel" id="section-diagnostics" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">配置诊断</h2>
+            <span class="panel__hint">
+              启动日志那条「配置解析结果」的可视化版本——这里显示的是
+              <strong>解析之后</strong>的结果，不是配置项里的原始文本
+            </span>
+          </div>
+          <p class="msg" id="diagnostics-msg" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>解析结果</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="diagnostics-body"></tbody>
+            </table>
+          </div>
+
+          <h3 class="add-row__title">端口绑定（ws_ports）</h3>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>服务器</th>
+                  <th>端口</th>
+                </tr>
+              </thead>
+              <tbody id="diagnostics-ports-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ================= 在线玩家（I1 补齐） ================= -->
+        <section class="panel" id="section-players" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">在线玩家</h2>
+            <span class="panel__hint">
+              打开或刷新本页时现场下发一次 list——本插件不追踪在线玩家，
+              这份数据只能临时问服务器
+            </span>
+          </div>
+          <p class="msg" id="players-msg" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>值</th>
+                </tr>
+              </thead>
+              <tbody id="players-body"></tbody>
+            </table>
+          </div>
+
+          <div class="cmd-output">
+            <h3 class="cmd-output__title">服务器原始回执</h3>
+            <pre class="cmd-output__body" id="players-output"></pre>
           </div>
         </section>
 

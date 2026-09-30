@@ -1,6 +1,7 @@
 /*
  * NetherLink 管理面板（C1：骨架 + 桥接 + 在线服务器 / 好感度两节；
- *                    C2：绑定管理 / 指令审计 / 快捷指令三节 + 迁移二次确认）。
+ *                    C2：绑定管理 / 指令审计 / 快捷指令三节 + 迁移二次确认；
+ *                    I1：配置诊断 / 在线玩家两节——补齐文档承诺的七个分区）。
  *
  * 🔴 三条桥接硬约束（写错都是**静默失败**，官方 plugin-pages.md 核实）：
  *   1. 本文件是**外部 module 文件**（`index.html` 里 `<script type="module" src="./app.js">`）
@@ -38,6 +39,10 @@ const state = {
   karmaQuery: "",
   bindings: [],
   bindingsQuery: "",
+  // 诊断与在线玩家都是**只读、无参数**，且失败时要与「拿到了空数据」区分开，
+  // 所以存 `null` 表示「没读到」（见各自的 render）。
+  diagnostics: null,
+  players: null,
   audit: [],
   auditQuery: "",
   commands: [],
@@ -562,6 +567,225 @@ async function runMigrateConfirm() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 配置诊断                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 空名单 / 空映射在诊断页上写什么。
+ *
+ * 🔴 **与启动日志同口径**（`main.py` 那条「配置解析结果」对空值印的就是
+ *    「未配置」）。这里**不写空串、也不写「0」**：一个空白的格子在页面上
+ *    既可能是「没配」也可能是「渲染坏了」，而这两件事的排查方向完全不同。
+ */
+const DIAGNOSTICS_UNCONFIGURED = "未配置";
+
+/**
+ * 读配置诊断——四项**解析之后**的结果。
+ *
+ * 它就是启动日志那条「配置解析结果」的可视化版本，用来回答「我配的东西到底
+ * 被读成了什么」。⚠️ 给的是**解析结果**而不是原始配置项：中文分隔符、大小写、
+ * `list` 与 `string` 两种形态这些坑全都发生在解析那一步，看原始值看不出来。
+ */
+async function loadDiagnostics() {
+  const msg = byId("diagnostics-msg");
+  setMessage(msg, "读取中…", "busy");
+  let payload;
+  try {
+    payload = await bridge.apiGet("diagnostics");
+  } catch (error) {
+    state.diagnostics = null;
+    renderDiagnostics();
+    setMessage(msg, "读取配置诊断失败：" + errorText(error), "error");
+    return;
+  }
+  // 返回体不是对象（桥接层给了别的东西）时也当成「没读到」，别让下面
+  // `data.admin_mc` 那样一路解引用到 undefined 上还渲染出一副正常样子。
+  state.diagnostics = payload && typeof payload === "object" ? payload : null;
+  renderDiagnostics();
+  setMessage(msg, "", "");
+}
+
+function renderDiagnostics() {
+  const tbody = byId("diagnostics-body");
+  const ports = byId("diagnostics-ports-body");
+  const data = state.diagnostics;
+  if (!data) {
+    emptyRow(tbody, 3, "没能读到配置解析结果（原因见上面的红字）。");
+    emptyRow(ports, 2, "没能读到端口绑定（原因见上面的红字）。");
+    return;
+  }
+
+  tbody.replaceChildren();
+  tbody.appendChild(diagnosticsRow(
+    "管理员（游戏）",
+    diagnosticsList(data.admin_mc),
+    "来自配置项 admin_mc，游戏内管理员的唯一来源（匹配不区分大小写）。",
+  ));
+  tbody.appendChild(diagnosticsRow(
+    "管理员（QQ）",
+    diagnosticsList(data.admin_qq),
+    "来自配置项 admin_qq，只作参考信息注入提示词，不参与任何权限判断。",
+  ));
+  tbody.appendChild(diagnosticsRow(
+    "绑定群",
+    diagnosticsGroups(data.group_names),
+    "配置项 group_names 的键——只有这些群的消息会与 MC 互通。",
+  ));
+
+  const bindings = data.ws_bindings || [];
+  if (!bindings.length) {
+    // ⚠️ 这**不是**一句中性的提示：留空 = 不监听任何端口，插件启动时会记 ERROR，
+    //    MC 端永远连不上。把启动时的后果写在这里，免得有人以为「没配就是默认值」。
+    emptyRow(ports, 2, "未配置（留空 = 不监听任何端口，启动时会记一条 ERROR）。");
+    return;
+  }
+  ports.replaceChildren();
+  for (const pair of bindings) {
+    // 每项是 [server_name, port]；server_name 为空串表示「由 MC 端上报的
+    // server-name 决定」，此时这一条绑定的只是端口本身。
+    const name = Array.isArray(pair) ? pair[0] : pair;
+    const port = Array.isArray(pair) ? pair[1] : "";
+    const tr = document.createElement("tr");
+    tr.appendChild(cell(name || "（按 MC 端上报名）", "mono"));
+    tr.appendChild(cell(port, "mono"));
+    ports.appendChild(tr);
+  }
+}
+
+function diagnosticsRow(label, value, note) {
+  const tr = document.createElement("tr");
+  tr.appendChild(cell(label));
+  tr.appendChild(cell(value, "mono"));
+  tr.appendChild(cell(note));
+  return tr;
+}
+
+/** 名字名单 → 一行文字。空 = 未配置（与启动日志同口径），否则顿号列举。 */
+function diagnosticsList(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    return DIAGNOSTICS_UNCONFIGURED;
+  }
+  return list.join("、");
+}
+
+/**
+ * 绑定群映射 → 一行文字。空 = 未配置。
+ *
+ * ⚠️ 群名等于群号时**只显示群号**：`group_names` 只填群号（不写群名）时值会回退
+ *    成群号，照原样渲染会得到 `123456（123456）`——看起来像渲染 bug 的重复，
+ *    而它其实是最常见的正常写法。
+ */
+function diagnosticsGroups(groups) {
+  const entries = Object.entries(groups || {});
+  if (!entries.length) {
+    return DIAGNOSTICS_UNCONFIGURED;
+  }
+  const parts = [];
+  for (const [id, name] of entries) {
+    parts.push(name && name !== id ? id + "（" + name + "）" : String(id));
+  }
+  return parts.join("、");
+}
+
+/* ------------------------------------------------------------------ */
+/* 在线玩家                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `players` GET 的返回体 → 「人数」那一格的文字 + 一句说明。
+ *
+ * 🔴 **三种「没有数字」是三件不同的事，不许压成一句**（同 `commandOutcome`：
+ *    把不同结局渲染成同一个样子，正是本项目第一轮那个跨端 bug 的形状）：
+ *
+ *    | 情形 | 显示 | 为什么 |
+ *    |---|---|---|
+ *    | `count` 是数字 | `3 / 20` | 服务器回了话，而且解析出来了 |
+ *    | `count: null` 且 `connected: true` | **无法解析** | 服务器回了话，但回执不是插件认得的那一种写法。**这是正常结果**，不是错误 |
+ *    | `connected: false` | **未取到（服务器未连接或未指定）** | 根本没拿到回执：没连、多台在线被拒发、或超时 |
+ *
+ * ⚠️ `count: null` **绝不能渲染成 0**：在线人数会被当**事实**看，编一个数字比
+ *    承认看不懂糟得多。原始回执永远显示在下面，人自己看得见原因。
+ * ⚠️ `connected: false` **绝不能写成「服务器里没人」**：它覆盖好几种成因
+ *    （未连接 / 超时 / 多台在线被拒发），说成「空的」是**编造结论**。
+ * ⚠️ 纯函数（不碰 DOM），与 `commandOutcome` 同一个理由：能被抠出来真跑。
+ */
+function playersSummary(payload) {
+  const data = payload || {};
+  if (data.connected !== true) {
+    return {
+      count: "未取到（服务器未连接或未指定）",
+      note: data.message || "没有拿到服务器回执。",
+    };
+  }
+  let note = "";
+  if (data.ok === false) {
+    // 服务器明确说这条 list 没执行成功——别让它读起来像「取到了 0 人」。
+    note = "服务器报告这条 list 执行失败。";
+  }
+  const count = data.count;
+  if (count === null || count === undefined) {
+    return {
+      count: "无法解析",
+      note: note +
+        "服务器回了话，但回执不是本插件认得的写法（只认实测见过的那一种）——" +
+        "原始回执见下，可据此判断。",
+    };
+  }
+  const max = data.max;
+  return {
+    count:
+      String(count) +
+      (max === null || max === undefined ? "" : " / " + String(max)),
+    note: note,
+  };
+}
+
+async function loadPlayers() {
+  const msg = byId("players-msg");
+  // 措辞里点明它会**下发一条指令**：这不是一次纯读，服务器上有回执可查。
+  setMessage(msg, "读取中…（面板正在向服务器下发一次 list）", "busy");
+  let payload;
+  try {
+    payload = await bridge.apiGet("players");
+  } catch (error) {
+    state.players = null;
+    renderPlayers();
+    setMessage(msg, "读取在线玩家失败：" + errorText(error), "error");
+    return;
+  }
+  state.players = payload && typeof payload === "object" ? payload : null;
+  renderPlayers();
+  setMessage(msg, "", "");
+}
+
+function renderPlayers() {
+  const tbody = byId("players-body");
+  const output = byId("players-output");
+  const data = state.players;
+  if (!data) {
+    emptyRow(tbody, 2, "没能读到在线玩家（原因见上面的红字）。");
+    output.textContent = "";
+    return;
+  }
+  const summary = playersSummary(data);
+  tbody.replaceChildren();
+  const countRow = document.createElement("tr");
+  countRow.appendChild(cell("在线人数"));
+  countRow.appendChild(cell(summary.count, "mono"));
+  tbody.appendChild(countRow);
+  const noteRow = document.createElement("tr");
+  noteRow.appendChild(cell("说明"));
+  noteRow.appendChild(cell(summary.note));
+  tbody.appendChild(noteRow);
+
+  // 🔴 原始回执**永远显示**：人数解析不出来时，它是管理员唯一能据以判断
+  //    「为什么」的东西（服务器换了措辞？还是压根没连上？）。它有可能是空串
+  //    ——那同样是有信息量的（服务器没回任何东西），所以不隐藏、只换一句话。
+  output.textContent = data.output || "（服务器没有返回任何输出）";
+}
+
+/* ------------------------------------------------------------------ */
 /* 指令审计                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -933,6 +1157,8 @@ function bindEvents() {
     loadServers();
     loadKarma();
     loadBindings();
+    loadDiagnostics();
+    loadPlayers();
     loadAudit();
     loadCommands();
   });
@@ -1054,6 +1280,8 @@ async function boot() {
     loadServers(),
     loadKarma(),
     loadBindings(),
+    loadDiagnostics(),
+    loadPlayers(),
     loadAudit(),
     loadCommands(),
   ]);
