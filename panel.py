@@ -14,7 +14,11 @@
 （面板要显示在线时长，得先在 MC 端上报连接时刻，那是另一件事）。
 """
 
+import logging
 import re
+
+
+logger = logging.getLogger(__name__)
 
 
 # 🔴 必须与 metadata.yaml 的 `name` 一致。
@@ -214,3 +218,70 @@ def players_view(output) -> dict:
     if not m:
         return {"count": None, "max": None}
     return {"count": int(m.group(1)), "max": int(m.group(2))}
+
+
+# ---------------------------------------------------------------------------
+# B3：快捷指令（面板按钮）
+# ---------------------------------------------------------------------------
+#
+# 🔴 安全边界**只此一份**：`main.py` 的 `_api_commands` 把它原样放进 GET 的返回体，
+# 前端因此没有理由不显示它。
+# 依据：AstrBot 的 `dashboard/api/plugins.py` 里，`/plugins/extensions/` 的**每一个**
+# 端点都声明了 `auth: AuthContext = Depends(require_plugin_scope)`，而
+# `require_plugin_scope = ScopeDependency("plugin")`——面板本身就要登录，
+# 所以能从这里点出去的指令等同管理员权限（规范 §5.3）。
+# ⚠️ 措辞必须点明它**不是**「绕过好感度的后门」：好感度约束的是 **AI 替人执行指令**
+# 时的计价，而这里的按钮是管理员**本人**动手，两条路径不同。
+QUICK_COMMAND_SECURITY_NOTE = (
+    "安全说明：快捷指令由管理员在面板上直接下发，不经 AI 判断、也不消耗好感度。"
+    "面板需要登录（AstrBot 的插件扩展接口统一要求 plugin 权限范围），"
+    "所以这等同管理员权限。它不是绕过好感度的后门——"
+    "好感度管的是 AI 替人执行指令时的计价，而这里的按钮是管理员本人动手，"
+    "与 AI 那条路径无关。"
+)
+
+
+def quick_commands_view(entries) -> list:
+    """`quick_commands` 配置项 → `[{"index", "name", "cmd", "server"}]`。
+
+    ⚠️ 入参是**已经过 `NetherLinkPlugin._as_str_list` 归一**的字符串列表
+    （全角逗号 / 顿号那些归它管，本模块不重复实现一份，免得两处漂移）。
+    配置项形态是 `名称|指令|服务器`，**一条记录塞在一个字符串里**——AstrBot 的
+    `type: "list"` 没有对象列表控件，全项目的列表项都是纯字符串（8 项无一例外）。
+
+    🔴 **分隔符是竖线，不是冒号**：MC 指令里到处都是冒号（`minecraft:diamond`、
+    NBT 的 `{id:"..."}`），照 `_parse_ws_ports` 那样 `rpartition(":")` 会把一条
+    指令劈成两半。代价是**指令里不能含竖线**——这条限制如实写在 schema 的 hint
+    里，不假装支持。
+
+    ⚠️ 坏条目**跳过并记 warning，绝不抛异常**（同 `_parse_ws_ports` 的口径）：
+    配置来自 WebUI 手填，一条写错不该让整个面板白掉。
+    ⚠️ `index` 是**解析后**的位置，不是原始配置项里的位置——坏条目被跳过后位置
+    会前移。面板按下标下发（`commands/run`），序号若沿用原始位置，跳过一条就会让
+    后面**每一条按钮都指向别人的指令**。
+    """
+    if isinstance(entries, str):
+        # 防御性：契约是列表，但单串传进来时按一条条目处理，而不是逐字符遍历
+        entries = [entries]
+    out = []
+    for raw in entries or ():
+        text = str(raw).replace("｜", "|").strip()
+        if not text:
+            continue
+        parts = [p.strip() for p in text.split("|")]
+        if len(parts) > 3:
+            logger.warning(
+                "NetherLink: quick_commands 条目里的竖线过多（竖线是分隔符，"
+                "指令里不能含它），已跳过: %r" % (text,)
+            )
+            continue
+        name = parts[0]
+        cmd = parts[1] if len(parts) > 1 else ""
+        server = parts[2] if len(parts) > 2 else ""
+        if not name or not cmd:
+            logger.warning(
+                "NetherLink: quick_commands 条目缺少名称或指令，已跳过: %r" % (text,)
+            )
+            continue
+        out.append({"index": len(out), "name": name, "cmd": cmd, "server": server})
+    return out

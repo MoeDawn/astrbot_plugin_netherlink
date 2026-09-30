@@ -1182,6 +1182,14 @@ class NetherLinkPlugin(Star):
                         panel.route("bindings/migrate"), self._api_bindings_migrate,
                         ["POST"], "把 mc: 好感并入 qq:（一次性迁移）"
                     )
+                    self.context.register_web_api(
+                        panel.route("commands"), self._api_commands, ["GET"],
+                        "快捷指令（配置项 quick_commands 驱动的面板按钮）"
+                    )
+                    self.context.register_web_api(
+                        panel.route("commands/run"), self._api_commands_run, ["POST"],
+                        "执行一条快捷指令"
+                    )
                 except Exception as e:
                     logger.error(f"NetherLink: 注册面板路由失败（面板将不可用）: {e}")
         logger.info("NetherLink 已加载")
@@ -2830,6 +2838,117 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 面板读取指令审计失败: {e}")
             return error_response("读取指令审计失败")
+
+    # ------------------------------------------------------------ B3：快捷指令
+
+    def _quick_commands(self) -> list:
+        """`quick_commands` 配置项 → 面板按钮列表。
+
+        ⚠️ **唯一的解析入口**：`commands`（展示）与 `commands/run`（下发）必须看到
+        同一份、同序的列表——`commands/run` 收到的 index 是按**解析后**的位置算的，
+        两条路由各解析一次就会出现「点第 2 个按钮、跑了第 3 条指令」，且不报错。
+        """
+        return panel.quick_commands_view(
+            self._as_str_list(self.config.get("quick_commands"))
+        )
+
+    @staticmethod
+    def _command_payload(item, server_id, connected, ok, output, message) -> dict:
+        """`commands/run` 的返回体。四个结局共用一份形状，别各写各的。"""
+        return {
+            "name": item["name"],
+            "cmd": item["cmd"],
+            "server": item["server"],
+            "server_id": server_id,
+            "connected": connected,
+            "ok": ok,
+            "output": output,
+            "message": message,
+        }
+
+    async def _api_commands(self):
+        """GET 快捷指令按钮列表 + **安全说明**。
+
+        ⚠️ `security_note` 是响应的一部分，不是装饰：这些指令不经 AI 判断、不扣
+        好感度，而面板本身要登录所以等同管理员权限——说明送到前端，前端才没有
+        理由不显示它（文本只有 `panel.QUICK_COMMAND_SECURITY_NOTE` 一份）。
+        ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
+        但 handler 是普通绑定方法，别处（测试、将来的内部调用）仍可能直接 await。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            return json_response({
+                "commands": self._quick_commands(),
+                "security_note": panel.QUICK_COMMAND_SECURITY_NOTE,
+            })
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取快捷指令失败: {e}")
+            return error_response("读取快捷指令失败")
+
+    async def _api_commands_run(self):
+        """POST 执行一条快捷指令。body：`{index}`（`commands` 里那一项的序号）。
+
+        ⚠️ index 是**外部输入**：非整数 / 负数 / 越界一律 `error_response`，且要在
+        动任何东西**之前**判掉——绝不把异常冒泡给框架。
+        🔴 越界检查必须对**解析后**的列表做（`self._quick_commands()`）：坏条目在
+        解析时被跳过、位置前移，拿**原始配置项**的长度当上界会索引越界（被兜底
+        except 接住，报成一句与病因无关的失败），或更糟——下发另一条指令。
+        ⚠️ `ok` 的三种结局必须分清（既有约定，见 claude.md 坑 4）：`True` /
+        `False`（服务端明确回了失败）/ `None`（没拿到回执：未连接、多台在线被拒发、
+        或超时）。把 `False` 报成成功正是第一轮修的那个跨端 bug 的形状。
+        ⚠️ 指令**不经 AI、不扣好感度**：面板走的是 `_run_console_cmd`（只管执行与
+        等回执），计价的 `exec_command_for` 那条路这里一步都不碰。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            body = await request.json(default={})
+            if not isinstance(body, dict):
+                return error_response("请求体必须是一个 JSON 对象")
+            index = body.get("index")
+            # ⚠️ bool 是 int 的子类：JSON 的 true 会通过 isinstance(x, int)，进而被
+            #    当成「第 1 条」——与 B1 的 value 校验同一个坑。
+            if isinstance(index, bool) or not isinstance(index, int):
+                return error_response("index 必须是整数(面板按钮的序号,从 0 开始)")
+            commands = self._quick_commands()
+            if index < 0 or index >= len(commands):
+                return error_response(
+                    "指令序号越界:当前共 %d 条快捷指令(可用序号 0~%d)"
+                    % (len(commands), len(commands) - 1)
+                )
+            item = commands[index]
+
+            server_id = ""
+            if item["server"]:
+                server_id = self._resolve_target_server(item["server"])
+                if not server_id:
+                    # 🔴 配了目标服但它不在线：**不许**退化成「发给唯一在线的那台」
+                    #    ——那会把指令发到另一台服务器上，而面板还报成功。
+                    #    （`_resolve_target_server` 只认在线的那几台，所以这里
+                    #    分不出「名字写错」与「没在线」，如实报「不在线」。）
+                    return json_response(self._command_payload(
+                        item, "", False, None, "",
+                        "配置里的目标服务器 %s 不在线" % item["server"],
+                    ))
+
+            result = await self._run_console_cmd(
+                item["cmd"], timeout=8.0, server_id=server_id
+            )
+            if result is None:
+                # 未连接 / 多台在线被拒发 / 超时——**不是错误**，同 `_api_players`：
+                # 问不到是常态，用 error_response 会让前端渲染成一片红色故障。
+                return json_response(self._command_payload(
+                    item, server_id, False, None, "",
+                    "MC 服务器未连接、未回执,或在线服务器不止一台"
+                    "(未指定服务器时插件会拒发)",
+                ))
+            return json_response(self._command_payload(
+                item, server_id, True, bool(result.ok), result.output, "",
+            ))
+        except Exception as e:
+            logger.error(f"NetherLink: 面板执行快捷指令失败: {e}")
+            return error_response("执行快捷指令失败")
 
 
 
