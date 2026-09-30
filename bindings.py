@@ -13,7 +13,10 @@
 
 from pathlib import Path
 
-from store import atomic_write_json, read_json
+try:
+    from .store import atomic_write_json, read_json
+except ImportError:  # 插件以顶层模块方式加载时
+    from store import atomic_write_json, read_json
 
 
 def bindings_path(data_dir: Path) -> Path:

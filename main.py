@@ -716,7 +716,7 @@ class NetherLinkPlugin(Star):
         # ---- 好感度（本地文件 + 配置项双写，供 WebUI 查看与手改） ----
         # 身份空间见 karma.karma_identity_key：**已绑定**的玩家与其 QQ 共享一份
         # （游戏侧也走 qq:<QQ号>）；未绑定者仍用 "mc:<游戏ID>"。
-        # ⚠️ 2026-09-30 第二轮之前是「两侧各自独立、不做映射」，本轮改了。
+        # ⚠️ 2026-09-30 第二轮之前两侧各自独立（键空间不互通），本轮改了。
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
 
@@ -1119,10 +1119,6 @@ class NetherLinkPlugin(Star):
     def bindings_snapshot(self) -> dict:
         """绑定表的只读快照。工具在协程里读它，不直接读可变属性。"""
         return dict(self._binding_table)
-
-    def _bindings_qq_for(self, player: str) -> str:
-        """玩家已绑定的 QQ 号；未绑定返回空串。"""
-        return bindings.lookup(self._binding_table, player)
 
     def _karma_identity_key(self, source: str, initiator: str, qq: str) -> str:
         """好感身份键的唯一入口——把绑定表填进 `karma.karma_identity_key`。
@@ -2663,8 +2659,7 @@ class NetherLinkPlugin(Star):
                 # （闭包那套只有在插件自建 agent 时才成立）。
                 event.set_extra(
                     "netherlink_ctx",
-                    {"source": "game", "player": player, "server_id": server_id,
-                     "qq": self._bindings_qq_for(player)},
+                    {"source": "game", "player": player, "server_id": server_id},
                 )
                 ctx = await self._build_game_context(
                     player, self._game_is_admin(player), server_id
@@ -2822,7 +2817,7 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     @staticmethod
     def _game_identity_from(event):
-        """若这个事件来自**游戏侧**，返回 {"player", "server_id", "qq"}；否则 None。
+        """若这个事件来自**游戏侧**，返回 {"player", "server_id"}；否则 None。
 
         这是两个工具判定「我该按游戏侧还是 QQ 侧执行」的**唯一**依据。
         不再有闭包绑定（那套只在插件自建 agent 时成立），也没有 player 参数
@@ -2838,8 +2833,7 @@ class NetherLinkPlugin(Star):
         server_id = str(extra.get("server_id") or "")
         if not player:
             return None
-        return {"player": player, "server_id": server_id,
-                "qq": str(extra.get("qq") or "")}
+        return {"player": player, "server_id": server_id}
 
     async def _run_game_command(self, ctx_game: dict, cmd: str, cost) -> str:
         """游戏侧发起者的指令执行（来源与身份都由连接确定）。"""
@@ -2927,7 +2921,7 @@ class NetherLinkPlugin(Star):
             if ctx_game is not None:
                 # 游戏侧：已绑定者与其 QQ 共享一份好感（键 qq:<QQ号>），
                 # 未绑定者仍用 mc:{玩家名}。见 _karma_identity_key。
-                key = self._karma_identity_key("game", ctx_game["player"], ctx_game.get("qq", ""))
+                key = self._karma_identity_key("game", ctx_game["player"], "")
                 origin = "游戏内对话"
             else:
                 qq = str(event.get_sender_id() or "")
