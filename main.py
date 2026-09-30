@@ -49,6 +49,7 @@ try:
         clamp_cost,
         clamp_value,
         identity_key,
+        karma_identity_key,
         merge_records,
     )
 except ImportError:  # 插件以顶层模块方式加载时
@@ -58,6 +59,7 @@ except ImportError:  # 插件以顶层模块方式加载时
         clamp_cost,
         clamp_value,
         identity_key,
+        karma_identity_key,
         merge_records,
     )
 
@@ -65,6 +67,11 @@ try:
     from . import audit
 except ImportError:  # 插件以顶层模块方式加载时
     import audit
+
+try:
+    from . import bindings
+except ImportError:  # 插件以顶层模块方式加载时
+    import bindings
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 900
@@ -707,10 +714,20 @@ class NetherLinkPlugin(Star):
         self._qq_umo_seen: str = ""
 
         # ---- 好感度（本地文件 + 配置项双写，供 WebUI 查看与手改） ----
-        # 身份空间见 karma.identity_key：游戏内玩家 "mc:<游戏ID>"，QQ 群友 "qq:<QQ号>"，
-        # 同一个人在两边是两份独立好感，不做映射。
+        # 身份空间见 karma.karma_identity_key：**已绑定**的玩家与其 QQ 共享一份
+        # （游戏侧也走 qq:<QQ号>）；未绑定者仍用 "mc:<游戏ID>"。
+        # ⚠️ 2026-09-30 第二轮之前是「两侧各自独立、不做映射」，本轮改了。
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
+
+        # 绑定表：QQ ↔ 游戏 ID。与 karma.json 同目录。
+        self._bindings_path: Path = bindings.bindings_path(self._karma_dir.parent)
+        try:
+            self._binding_table: dict = bindings.load(self._bindings_path)
+        except Exception as e:
+            # 绑定表坏了不该挡住插件加载——退化为「谁都没绑定」
+            logger.error(f"NetherLink: 绑定表加载失败（按空表继续）: {e}")
+            self._binding_table = {}
         # 指令审计落盘位置，与 karma.json 同目录（便于整体备份）。
         # ⚠️ `audit_path` 收的是**插件数据根**，会自己拼上 `netherlink/`。
         # `_karma_dir` 已经含 `netherlink/` 那一层，所以取它的 `.parent`；
@@ -1099,6 +1116,24 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 写回 karma_records 配置失败: {e}")
 
+    def bindings_snapshot(self) -> dict:
+        """绑定表的只读快照。工具在协程里读它，不直接读可变属性。"""
+        return dict(self._binding_table)
+
+    def _bindings_qq_for(self, player: str) -> str:
+        """玩家已绑定的 QQ 号；未绑定返回空串。"""
+        return bindings.lookup(self._binding_table, player)
+
+    def _karma_identity_key(self, source: str, initiator: str, qq: str) -> str:
+        """好感身份键的唯一入口——把绑定表填进 `karma.karma_identity_key`。
+
+        ⚠️ 全项目只此一处知道「绑定表在哪」；四个调用点都走它。
+        ⚠️ 名字**必须**含子串 `identity_key`：`tests/test_contracts.py` 有两条
+        AST 断言，要求 `exec_command_for` / `_dispatch_mc_event` 的函数体里出现
+        这个子串。改成 `_karma_key` 会让那两条以「未找到」失败。
+        """
+        return karma_identity_key(source, initiator, qq, self._binding_table)
+
     def _write_audit(self, event: str, **fields) -> None:
         """写一条审计记录。**旁路功能，绝不抛异常**——写不进去也不能连累指令执行。
 
@@ -1397,7 +1432,7 @@ class NetherLinkPlugin(Star):
                 # player 未知时回退值是 "?"，扣它会造出 mc:? 这条假记录，因此排除
                 if self.karma_death_penalty and player != "?":
                     await self._karma_add(
-                        identity_key("game", player, ""), -self.karma_death_penalty
+                        self._karma_identity_key("game", player, ""), -self.karma_death_penalty
                     )
                 text = self._fmt(self.templates["death"], server=srv, bot=self.mc_bot_name,
                                  player=player, message=data.get("message", ""))
@@ -1874,7 +1909,7 @@ class NetherLinkPlugin(Star):
             spend = clamp_cost(cost, self.max_command_cost)
             # 扣减前的水位，供回滚校验用。spend=0 时不读存储，此值不参与任何判断。
             cur = 0
-            key = identity_key(source, initiator, qq)
+            key = self._karma_identity_key(source, initiator, qq)
             # 审计：**请求**先留痕。放在这里是因为此刻 source/initiator/qq/
             # 裁剪后的报价/目标服都已确定；而「好感不足」这类拒绝也要留痕，
             # 所以不能放到执行成功之后。
@@ -2628,7 +2663,8 @@ class NetherLinkPlugin(Star):
                 # （闭包那套只有在插件自建 agent 时才成立）。
                 event.set_extra(
                     "netherlink_ctx",
-                    {"source": "game", "player": player, "server_id": server_id},
+                    {"source": "game", "player": player, "server_id": server_id,
+                     "qq": self._bindings_qq_for(player)},
                 )
                 ctx = await self._build_game_context(
                     player, self._game_is_admin(player), server_id
@@ -2786,7 +2822,7 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     @staticmethod
     def _game_identity_from(event):
-        """若这个事件来自**游戏侧**，返回 {"player", "server_id"}；否则 None。
+        """若这个事件来自**游戏侧**，返回 {"player", "server_id", "qq"}；否则 None。
 
         这是两个工具判定「我该按游戏侧还是 QQ 侧执行」的**唯一**依据。
         不再有闭包绑定（那套只在插件自建 agent 时成立），也没有 player 参数
@@ -2802,7 +2838,8 @@ class NetherLinkPlugin(Star):
         server_id = str(extra.get("server_id") or "")
         if not player:
             return None
-        return {"player": player, "server_id": server_id}
+        return {"player": player, "server_id": server_id,
+                "qq": str(extra.get("qq") or "")}
 
     async def _run_game_command(self, ctx_game: dict, cmd: str, cost) -> str:
         """游戏侧发起者的指令执行（来源与身份都由连接确定）。"""
@@ -2888,13 +2925,13 @@ class NetherLinkPlugin(Star):
         try:
             ctx_game = self._game_identity_from(event)
             if ctx_game is not None:
-                # 游戏侧的 key 空间是 mc:{玩家名}，与 QQ 侧的 qq:{QQ号} 相互独立
-                # （同一个人在两边是两份好感，这是刻意的，不做映射）。
-                key = identity_key("game", ctx_game["player"], "")
+                # 游戏侧：已绑定者与其 QQ 共享一份好感（键 qq:<QQ号>），
+                # 未绑定者仍用 mc:{玩家名}。见 _karma_identity_key。
+                key = self._karma_identity_key("game", ctx_game["player"], ctx_game.get("qq", ""))
                 origin = "游戏内对话"
             else:
                 qq = str(event.get_sender_id() or "")
-                key = identity_key("qq", str(event.get_sender_name() or qq), qq)
+                key = self._karma_identity_key("qq", str(event.get_sender_name() or qq), qq)
                 origin = "QQ 对话"
             if not int(delta or 0):
                 return f"[{key}] 当前好感值：{await self._karma_get(key)}（范围 {self.karma_min}~{self.karma_max}）。"

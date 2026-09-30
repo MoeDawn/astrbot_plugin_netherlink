@@ -251,6 +251,7 @@ class NetherLinkMcAdapter(Platform):
                     "player": player,
                     "server_id": server_id,
                     "kind": kind,
+                    "qq": "",
                 },
             )
             # 关掉流式：MC 聊天框里一条一条刷没有意义，而且流式会把
