@@ -81,9 +81,9 @@ AI： ①读配置内的提示词,发现这类指令不让用(如果你配置了
 
 ### 2. 在 MC 上装插件,根据自己的服务器版本选择对应插件
 
-- **Paper / Purpur / Folia** → [netherlink-plugin](https://github.com/MoeDawn/netherlink-plugin)
-- **Fabric** → [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)
-
+- **Paper / Purpur / Folia** → [netherlink-plugin](https://github.com/MoeDawn/netherlink-plugin "点击前往下载插件版本")
+- **Fabric** → [netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric "点击前往下载fabric版本")
+- **NeoForge** → [netherlink-neoforge](https://github.com/MoeDawn/netherlink-neoforge "点击前往下载neoforge版本")  
 各自的安装步骤见对应仓库的 README。
 
 ### 3. 两边填写配置文件
@@ -111,6 +111,9 @@ AstrBot 端和 MC 服务器两侧都需要配置**端口**、**密钥**、**唤�
 ### QQ → 游戏
 
 在**绑定群**里发消息，游戏公屏会显示 `⌜群名⌟ <名字> 消息`。
+
+群友发的是**图片 / 表情 / 语音**这类非文字内容时，游戏里会显示对应的占位符
+（如 `[图片]`、`[表情]`），而不是**什么都不发生**。
 
 ### 游戏 → QQ
 
@@ -206,6 +209,7 @@ QQ 群或游戏内,用自然语言描述需求即可 AI 会自行判断三件事
 | `enable_death` | 同步死亡消息（默认开）。⚠️ 它**同时**门控死亡扣好感——是死亡惩罚**唯一**的门槛 |
 | `enable_qq_to_mc` | QQ 群消息转发进游戏公屏（默认开） |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏（默认关，防刷屏） |
+| `mc_ignored_players` | **忽略名单**：这些玩家名产生的 MC 事件（进服 / 退服 / 聊天 / 死亡 / 成就）**一律不处理、也不推群**。用于排除机器人账号、小号或任何不该出现在群里的角色。⚠️ 按名字**精确**匹配（不是包含匹配）。**装了假人/AI 实体时必须填**，否则它会自己和自己对话、白烧 token |
 
 ### 游戏内对话
 

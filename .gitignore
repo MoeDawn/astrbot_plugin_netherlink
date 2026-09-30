@@ -6,8 +6,10 @@ __pycache__/
 # 测试（不随仓库分发；本机开发用）
 tests/
 
-# 含明文 NapCat 反连 Token 与服务器 IP，绝不入库
-roubot_config.md
+# 含明文 NapCat 反连 Token 与服务器 IP，绝不入库。
+# ⚠️ 规则用**通配**而不是精确文件名：现状文件名是 `roubot`（疑为 `robot` 的笔误），
+#    写死一种拼写的话，另一种拼写就会漏——而漏的后果是 token 被**静默**提交进 git。
+*bot_config*.md
 
 # 打好的插件包
 *.zip
