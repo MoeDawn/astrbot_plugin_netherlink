@@ -9,6 +9,9 @@ JSONL 直接 append，只在超上限时才重写一次。
 
 ⚠️ 与 `store.py` 的分工：那边是「一个 JSON 对象」，这里是「每行一个对象」，
 读写方式不同，所以不复用（复用会让两边都变形）。
+⚠️ 但**粒度差异是有后果的**：`store.py` 的「读不出来就整体回退默认值」
+对本格式是**错的**——一行坏掉不该毁掉整份。两个函数的容错策略因此各不相同，
+详见 `read_audit` 与 `_trim` 的 docstring。
 """
 
 import json
@@ -49,51 +52,58 @@ def _trim(path: Path, limit: int) -> None:
     ⚠️ `limit` 至少按 1 处理：`limit <= 0` 时 `lines[-limit:]` 会退化成
     整个列表（`-0` 就是 `0`），为负则变成 `lines[k:]` 只留尾部——实测
     6 条记录被裁成一行空白。上限是运维可填的值，必须防住。
-    ⚠️ 捕获 `ValueError` 是为了 `UnicodeDecodeError`（它**不是** `OSError`）。
-    文件里只要有**一个**解不出来的字节，整次 `read()` 都会抛——不接住
-    就等于「崩过一次之后，此后每次 append 都在裁剪这步炸掉」，
-    被调用方吞掉后审计**永久停记**。
-    ⚠️ 这里**刻意不用** `errors="replace"`（`read_audit` 用了）：本函数会把
-    内容**写回磁盘**，而替换字符一旦落盘就不可逆。读不干净时宁可不裁剪
-    （返回，文件保持原样），也不拿解不出来的字节去重写整份文件。
-    代价是：坏字节存在期间不再裁剪，文件会越过上限增长——那是可恢复的
-    占用问题，不是数据损坏。
+
+    ⚠️ 全程**按字节**处理，不解码。两条理由缺一不可：
+    ① **不能让坏字节关掉裁剪**：文本模式 `read()` 是**整文件一次性解码**，
+       一个坏字节就抛 `UnicodeDecodeError`；把它接住（或捕 `ValueError`）
+       都等于**永久跳过裁剪**——实测 limit=5 时 60 次 append 留下 **61 行**，
+       文件无界增长，且没有任何自愈路径。按字节切分完全不受影响。
+    ② **不能让替换字符落盘**：`errors="replace"` 会把坏字节解成 U+FFFD，
+       而本函数要把内容**写回磁盘**，替换字符一旦落盘就不可逆——审计日志
+       的价值就在保真，不能拿它换裁剪生效。按字节处理则坏字节原样带过。
+    对本格式这是**精确**的：`0x0A` 不可能出现在 UTF-8 多字节序列内部，
+    而 `json.dumps` 会把记录里的换行转义成 `\\n`，所以一条记录绝不跨行。
+    ⚠️ 落盘是 **CRLF**：`append_audit` 走文本模式，Windows 上 `\\n` 会被转成
+    `\\r\\n`（实测 `b'{"event": "request"}\\r\\n'`），所以被保留的行本来就以
+    `\\r` 结尾。按 `b"\\n"` 切、**原样写回**——`\\r` 必须保留，不能顺手规范化
+    掉（那会改写幸存行，对 git 也是内容变更）。
     """
     if limit < 1:
         limit = 1
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = [ln for ln in f.read().splitlines() if ln.strip()]
-    except (OSError, ValueError):
+        raw = path.read_bytes()
+    except OSError:
         return
+    lines = [ln for ln in raw.split(b"\n") if ln.strip()]
     if len(lines) <= limit:
         return
     keep = lines[-limit:]
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(keep) + "\n")
+    with open(tmp, "wb") as f:
+        f.write(b"\n".join(keep) + b"\n")
     os.replace(tmp, path)
 
 
 def read_audit(path: Path, limit: int = 100) -> list:
     """读最近 limit 条，**新的在前**。`limit <= 0` 一律返回空列表。
 
-    损坏的行被跳过，而不是让整份读不出来。损坏有**两种**，都要接住：
+    损坏的行被跳过，而不是让整份读不出来。损坏有**两种**：
     ① 崩溃留下的半行——那通常**不是**非法 JSON，而是**非法 UTF-8**：
        本模块用 `ensure_ascii=False` 落盘，中文玩家名是裸多字节序列，
        崩在半路会留下解不出来的字节尾；
-    ② 内容不是合法 JSON。
+    ② 内容不是合法 JSON（由下面的逐行 `json.loads` 判掉）。
 
-    ⚠️ 光把异常接住**不够**：`read()` 是**整文件一次性解码**的，只要有一个
-    坏字节，整次解码就失败——`except` 接住它只是把「抛异常」换成「返回空
-    列表」，文件照样一条都读不出来（面板上表现为审计莫名其妙是空的，更糟）。
-    所以这里必须用 `errors="replace"`：坏字节解成 U+FFFD，**逐行**解析照常
-    进行，那条坏行随即被下面的 `json.loads` 判为非法并跳过，好行一条不少。
+    ⚠️ ① 靠 **`errors="replace"` 预防**，**不是**靠捕获异常：
+    `read()` 是**整文件一次性解码**的，只要有一个坏字节，整次解码就失败
+    ——把它 `except` 接住只是把「抛异常」换成「返回空列表」，文件照样一条
+    都读不出来（面板上表现为审计莫名其妙是空的，比抛异常更糟）。
+    `errors="replace"` 让坏字节解成 U+FFFD、**逐行**解析照常进行，那条坏行
+    随即被 `json.loads` 判为非法并跳过，**好行一条不少**。
     本函数是**只读**的，替换字符不会写回磁盘，对文件零风险。
-    ⚠️ `UnicodeDecodeError` 是 `ValueError` 的子类、**不是** `OSError`。
-    有了 `errors="replace"` 它已不可能出现，但 except 仍按
-    `(OSError, ValueError)` 写——与 `store.py` 的 `read_json` 同口径
-    （纵深防御，并覆盖其它 `ValueError`）。
+    ⚠️ `except` 因此**只捕 `OSError`**（文件不存在、路径是目录等）。
+    刻意**不写** `ValueError`：解码失败已被预防掉、不可能再发生，
+    把不可能发生的异常接住只会让将来的回归变成「面板静默变空」
+    ——正是本条要消灭的症状。
     """
     path = Path(path)
     if limit <= 0:
@@ -103,7 +113,7 @@ def read_audit(path: Path, limit: int = 100) -> list:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
-    except (OSError, ValueError):
+    except OSError:
         return []
     out = []
     for line in reversed(lines):
