@@ -260,12 +260,18 @@ async function saveKarmaValue(key, rawValue, buttons) {
   let ok = false;
   try {
     const result = await bridge.apiPost("karma/set", { key: key, value: value });
-    const before = result && result.old === null ? "（无记录）" : result.old;
-    setMessage(
-      msg,
-      "已写入 " + key + "：" + before + " → " + (result ? result.value : value),
-      "ok",
-    );
+    // 🔴 `&&` 比 `?:` 优先级**高**。写成
+    //      result && result.old === null ? "（无记录）" : result.old
+    // 时，`result` 为空会让条件整体为假 → 走 else 分支 → 解引用 `result.old`
+    // 抛 TypeError → 被下面的 catch 接住 → 渲染成「写入失败」，
+    // **而服务端其实写成功了**。三元的分支必须自成一体（同 deleteKarmaValue）。
+    const before =
+      result && result.old !== null && result.old !== undefined
+        ? result.old
+        : "（无记录）";
+    const after =
+      result && result.value !== undefined ? result.value : value;
+    setMessage(msg, "已写入 " + key + "：" + before + " → " + after, "ok");
     ok = true;
   } catch (error) {
     setMessage(msg, "写入失败：" + errorText(error), "error");

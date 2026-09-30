@@ -9,10 +9,18 @@
          AstrBot 会在返回 HTML 时重写相对 URL 并追加短期 asset_token
          （`plugin_page_service.py` 的 `PLUGIN_PAGE_ASSET_TOKEN_TTL_SECONDS = 60`）。
          手写绝对路径（`/api/plugin/page/content/...`）或自行拼 token 会 401。
-      ⚠️ **不手写 bridge SDK 的 `<script>`**：AstrBot 返回 HTML 时会自动插入
-         `/api/plugin/page/bridge-sdk.js`（官方 plugin-pages.md 原话：
-         「不需要手动引入 bridge SDK」），而那个 src 是绝对路径——写进来
-         只会让本页多一处会被 token 重写规则碰到的绝对引用。
+      ⚠️ **不手写 bridge SDK 的 `<script>`**：AstrBot 返回 HTML 时会自动在 `</body>`
+         前插入它（官方 plugin-pages.md 原话：「不需要手动引入 bridge SDK」）。
+      🔴🔴 **绝对不要在本文件里写出那个 SDK 的 URL 字面量——哪怕放在注释里。**
+         AstrBot 判断「要不要注入」用的是对**原始 HTML 文本**的子串查询
+         （`plugin_page_service.py`：`if "<SDK 的 URL>" not in rewritten_html`），
+         而它**不剥注释**：注释里提一句，注入就被判定为「已经有了」而**跳过**，
+         于是真机上 `window.AstrBotPluginPage` 是 undefined、整页功能全废——
+         而所有本地静态守卫照样全绿（它们都先剥注释，看不到这条路径）。
+         这一条就是本仓库反复吃过的「守卫被自己的注释喂饱」，只是这次发生在
+         **生产侧**。守卫见 tests/test_panel_frontend.py 的
+         `test_bridge_sdk_url_is_never_mentioned_outside_a_real_script_src`
+         ——它**故意不剥注释**，因为要建模的是 AstrBot 的真实行为，不是理想版本。
       ⚠️ **一个 `<script>` 都没有内联**：官方文档明说内联脚本无法同步访问
          `window.AstrBotPluginPage`，脚本必须是外部 module 文件。
       ⚠️ **本页不做懒加载**：资产 token 只有 60 秒，页面停留超过 60 秒后再去
