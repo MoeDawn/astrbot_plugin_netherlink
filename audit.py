@@ -12,6 +12,8 @@ JSONL 直接 append，只在超上限时才重写一次。
 ⚠️ 但**粒度差异是有后果的**：`store.py` 的「读不出来就整体回退默认值」
 对本格式是**错的**——一行坏掉不该毁掉整份。两个函数的容错策略因此各不相同，
 详见 `read_audit` 与 `_trim` 的 docstring。
+⚠️ 另一个必须两边一致的约定是**「一行」的判据**：`_trim` 按 `b"\\n"` 切、
+`read_audit` 按 `"\\n"` 切。判据不同会**静默丢记录**——见 `read_audit` 的说明。
 """
 
 import json
@@ -67,6 +69,7 @@ def _trim(path: Path, limit: int) -> None:
     `\\r\\n`（实测 `b'{"event": "request"}\\r\\n'`），所以被保留的行本来就以
     `\\r` 结尾。按 `b"\\n"` 切、**原样写回**——`\\r` 必须保留，不能顺手规范化
     掉（那会改写幸存行，对 git 也是内容变更）。
+    ⚠️ **这里按 `b"\\n"` 切，`read_audit` 必须按 `"\\n"` 切**——见后者的说明。
     """
     if limit < 1:
         limit = 1
@@ -104,6 +107,14 @@ def read_audit(path: Path, limit: int = 100) -> list:
     刻意**不写** `ValueError`：解码失败已被预防掉、不可能再发生，
     把不可能发生的异常接住只会让将来的回归变成「面板静默变空」
     ——正是本条要消灭的症状。
+
+    ⚠️ 按 `"\\n"` 切行，**不用 `splitlines()`**：两者**不是**同一个判据
+    ——`splitlines()` 还会在 U+0085(NEL) / U+2028(LS) / U+2029(PS) 上断开，
+    而 `json.dumps(ensure_ascii=False)` **不转义**这三个字符（实测它们原样
+    落盘）。于是含它们的记录被**切成两段**、两段都不是合法 JSON → 被跳过
+    → **静默丢一条记录**，而 `_trim` 却按一条数它（两边判据就此分叉）。
+    （VT / FF / FS 不受影响：`json.dumps` 会转义它们，到不了文件里。）
+    切完每段可能带首尾空白，由循环里的 `line.strip()` 去掉。
     """
     path = Path(path)
     if limit <= 0:
@@ -112,7 +123,7 @@ def read_audit(path: Path, limit: int = 100) -> list:
         return []
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()
+            lines = f.read().split("\n")
     except OSError:
         return []
     out = []
