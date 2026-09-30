@@ -94,11 +94,19 @@ def identity_key(source: str, initiator: str, qq: str) -> str:
 
 def merge_records(file_records: dict, config_records: dict,
                   lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> dict:
-    """合并文件与配置里的好感记录。
+    """合并/归一化好感记录表。
 
-    **配置优先**：`config_records`（WebUI 里 `karma_records` 的值）是管理员手改入口，
-    优先级与可信度都最高，同键一律覆盖文件里的旧值。文件只在配置没有该键时兜底
-    （插件每次改动都写回配置，正常情况下两边一致；文件里多出来的条目＝配置被清过）。
+    **两种用法**（2026-09-30 起）：
+
+    1. **归一化单表**（插件启动路径用这个）：传空 `file_records`，
+       即 `merge_records({}, config_records, lo, hi)`。此时它就是「把配置项
+       过一遍筛子」——丢损坏条目、拆旧形态、夹范围，并**返回一个全新的 dict**。
+       最后这点很关键：`_parse_config_records()` 在配置项已是 dict 时返回的是
+       AstrBot 那个对象本身，直接交给 `KarmaStore` 会让一次 `_karma_add`
+       绕开 `save_config` 就地改内存配置。
+    2. **并集**（`KarmaStore.read` 用，读镜像 / 从镜像恢复）：配置优先，
+       文件只在配置没有该键时兜底。⚠️ **插件启动时不再做这个并集**——
+       那正是「从配置项删一条会被文件带回来」的成因。文件现在只作镜像。
 
     记录形态是「键 -> 好感值」，值为纯数字。非数字条目（含 bool、字符串、None、
     缺失）按损坏丢弃，让 get() 回退到 initial——与历史上非 dict 条目的口径一致。
