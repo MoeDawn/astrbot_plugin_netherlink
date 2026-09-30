@@ -278,6 +278,18 @@ DEFAULT_NETHERLINK_CONTEXT_QQ = """\
 # 那句文案现在不再提及机器人名）。
 DEFAULT_BOT_NAME = "ai"
 
+# 绑定功能的三个模板默认值。
+# 占位符：{player} 玩家名、{code} 验证码、{group} 群名、{server} 服务器名、
+#        {qq} 群友 QQ 号、{qq_name} 群友昵称。
+# ⚠️ 默认值只许用**半角**标点：有守卫扫 schema 的 default，全角标点直接判红
+#    （test_schema_defaults_use_halfwidth_punctuation）。
+# ⚠️ 这三份与 _conf_schema.json 的 default 必须逐字一致——另有守卫按整串相等
+#    断言，分叉会让「改代码不生效而测试全绿」（见 claude.md 的
+#    「schema 与代码常量分叉风险」）。
+DEFAULT_BIND_HINT = "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定(5 分钟内有效)"
+DEFAULT_BIND_SUCCESS_GAME = "§a玩家 {player} 已完成 QQ 绑定"
+DEFAULT_BIND_SUCCESS_QQ = "§a{qq_name} ({qq}) 已绑定游戏账号 {player}"
+
 
 
 
@@ -679,6 +691,18 @@ class NetherLinkPlugin(Star):
         # 出事时（谁用 AI 清了一片地）翻不出来。开这个开关把「谁、在哪台服、
         # 执行了什么、花了多少」记成一行。
         self.log_command_audit: bool = bool(config.get("log_command_audit", True))
+        # ---- 账号绑定（QQ ↔ 游戏 ID）----
+        # 第二轮：进服门禁 + 验证码绑定。策略在 binding_flow.py，表由 bindings.py 读写。
+        # ⚠️ 两个解析函数都是本类的 staticmethod，必须经 self. 调用——
+        #    裸写 _read_int(...) 运行时会 NameError，而静态扫描的守卫看不出来。
+        self.enable_binding: bool = bool(config.get("enable_binding", True))
+        self.binding_group: str = str(config.get("binding_group") or "").strip()
+        self.binding_join_gate: bool = bool(config.get("binding_join_gate", True))
+        self.binding_code_length: int = self._read_int(config, "binding_code_length", 6)
+        self.binding_code_ttl: int = self._read_int(config, "binding_code_ttl", 300)
+        self.binding_exempt_players: set = self._parse_csv(
+            config.get("binding_exempt_players", "")
+        )
         # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
         # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
         # 留空则用默认提示词（与其他提示词字段一致：空串不表示"关闭"，用开关关）。
@@ -696,6 +720,16 @@ class NetherLinkPlugin(Star):
             "qq_to_mc": config.get("template_qq_to_mc", "§a⌜{group}⌟§f <§d{sender}§f> §b{text}§f"),
             "bot_reply_game": config.get(
                 "template_bot_reply_game", "§c⌜{bot}⌟§f : §6{text}§f"
+            ),
+            # 绑定相关的三份模板同样是「空串回退默认值」——清空配置项不等于关闭。
+            "bind_hint": config.get("template_bind_hint", DEFAULT_BIND_HINT) or DEFAULT_BIND_HINT,
+            "bind_success_game": (
+                config.get("template_bind_success_game", DEFAULT_BIND_SUCCESS_GAME)
+                or DEFAULT_BIND_SUCCESS_GAME
+            ),
+            "bind_success_qq": (
+                config.get("template_bind_success_qq", DEFAULT_BIND_SUCCESS_QQ)
+                or DEFAULT_BIND_SUCCESS_QQ
             ),
         }
 

@@ -81,6 +81,42 @@
     "default": true,
     "hint": "开启后游戏内机器人对话使用 AstrBot 人格管理里配置的默认人格,关闭则无人格"
   },
+  "enable_binding": {
+    "description": "账号绑定总开关",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后,未绑定玩家进服会被拦下并收到验证码,在绑定群发码即可完成绑定;关掉则不发码也不拦人"
+  },
+  "binding_group": {
+    "description": "接受验证码的 QQ 群号",
+    "type": "string",
+    "default": "",
+    "hint": "填群号。留空时若只配了一个绑定群则自动用它;配了多个群却留空,插件会记一条 warning 且不发进服提示(不猜)"
+  },
+  "binding_join_gate": {
+    "description": "进服门禁:未绑定玩家是否被拦",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。关闭后未绑定玩家照常进服,只是 AI 不认得他"
+  },
+  "binding_code_length": {
+    "description": "验证码位数",
+    "type": "int",
+    "default": 6,
+    "hint": "默认 6 位。5 位在几百人的群里碰撞概率不低"
+  },
+  "binding_code_ttl": {
+    "description": "验证码有效期(秒)",
+    "type": "int",
+    "default": 300,
+    "hint": "默认 300 秒即 5 分钟。过期后重新进服即可拿到新码"
+  },
+  "binding_exempt_players": {
+    "description": "门禁豁免名单(游戏 ID,逗号分隔)",
+    "type": "string",
+    "default": "",
+    "hint": "名单里的玩家不会被门禁拦下,用于管理员/导演。不区分大小写"
+  },
   "mc_wake_prefixes": {
     "description": "游戏内机器人唤醒词",
     "type": "list",
@@ -254,5 +290,23 @@
     "type": "string",
     "default": "§c⌜{bot}⌟§f : §6{text}§f",
     "hint": "占位符 {bot} 机器人名字,{text} 回复内容.开头的名字与回复内容的颜色均可在此配置.支持 MC 颜色码"
+  },
+  "template_bind_hint": {
+    "description": "进服提示(也是踢出原因)",
+    "type": "string",
+    "default": "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定(5 分钟内有效)",
+    "hint": "占位符 {group} 群名 {code} 验证码 {player} 玩家名 {server} 服务器名。留空回退默认值"
+  },
+  "template_bind_success_game": {
+    "description": "绑定成功时游戏内广播",
+    "type": "string",
+    "default": "§a玩家 {player} 已完成 QQ 绑定",
+    "hint": "占位符 {player} {qq} {qq_name} {server}。留空回退默认值"
+  },
+  "template_bind_success_qq": {
+    "description": "绑定成功时群内回话",
+    "type": "string",
+    "default": "§a{qq_name} ({qq}) 已绑定游戏账号 {player}",
+    "hint": "占位符 {player} {qq} {qq_name}。留空回退默认值"
   }
 }
