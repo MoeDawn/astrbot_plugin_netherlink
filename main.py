@@ -249,7 +249,7 @@ DEFAULT_SERVER_DISPLAY = "MC"
 DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 <netherlink_context>
 你处于我的世界服务器:{server}
-当前发起者:{identity},{is_admin}
+当前发起者:{identity},{is_admin}{binding}
 接收玩家游戏公屏消息,群名与玩家ID由 AstrBot 附带.
 玩家试图或暗示赠送物品时:
 - 不得仅凭口头表示就道谢或加好感;物品未实际到手前,不得视为已收到.
@@ -273,7 +273,7 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 # （{origin} / {roster} 已于 2026-09-22 删除，见 _admin_context_values）
 DEFAULT_NETHERLINK_CONTEXT_QQ = """\
 <netherlink_context>
-当前发起者:{identity},{is_admin}
+当前发起者:{identity},{is_admin}{binding}
 </netherlink_context>"""
 
 # 机器人游戏内名字的兜底值。抽成常量只为让下面的配置读取有个单一来源，
@@ -1616,7 +1616,8 @@ class NetherLinkPlugin(Star):
     # 提示词拼装（游戏侧）
     # ------------------------------------------------------------------
     def _admin_context(
-        self, identity: str, is_admin: bool, source: str, server_id: str = ""
+        self, identity: str, is_admin: bool, source: str, server_id: str = "",
+        qq_id: str = ""
     ) -> str:
         """管理员名单 + 当前发起者身份 + 每次必查好感的要求，按模板渲染。
 
@@ -1638,7 +1639,7 @@ class NetherLinkPlugin(Star):
         （它并入「游戏内自定义提示词」，见 extra_system_prompt）。
         返回值永不为空。
         """
-        values = self._admin_context_values(identity, is_admin, source, server_id)
+        values = self._admin_context_values(identity, is_admin, source, server_id, qq_id)
         if source != "qq":
             self_label = "游戏侧系统上下文"
             tpl, default = self.netherlink_context_game, DEFAULT_NETHERLINK_CONTEXT_GAME
@@ -1659,6 +1660,7 @@ class NetherLinkPlugin(Star):
         is_admin: bool,
         source: str,
         server_id: str = "",
+        qq_id: str = "",
     ) -> dict:
         """算出注入模板的占位符值：只有三项。
 
@@ -1681,7 +1683,42 @@ class NetherLinkPlugin(Star):
             # 游戏侧模板里的 {server}——用**显示名**（server_display_names 配的，
             # 没配则兜底 MC），与 QQ 群前缀、模板 {server} 保持一致。
             "server": self._mc_server_display(server_id),
+            "binding": self._binding_fragment(identity, source, qq_id),
         }
+
+    def _binding_fragment(self, identity: str, source: str, qq_id: str = "") -> str:
+        """`{binding}` 的取值：已绑定 → 一句补充说明；未绑定 → 空串。
+
+        ⚠️ 这一项**不进** `_render_template` 的 `required`。`required` 的语义是
+        「缺了就回退默认模板」，而**存量部署**落盘的模板里没有 `{binding}`——
+        把它加进 required 会让那些部署的 `missing` 每次请求都非空、静默回退到
+        默认模板，用户在 WebUI 里改过的措辞全部丢失（只记一条 warning）。
+        它只是**补充**信息（认得出人就已经够用了），不是身份必需项——
+        与 `{identity}` / `{is_admin}` 的区别正在这里。
+
+        两侧取值方式不同：
+          · 游戏侧：`identity` 就是游戏 ID，直接查表；
+          · QQ 侧：`identity` 是群昵称，靠 `qq_id`（发起者的 QQ 号）**反查**
+            出他绑的游戏账号；`qq_id` 缺省时退回用 `identity` 当号码匹配
+            （`_admin_context` 被直接调用时惯例传 QQ 号当 identity）。
+        未绑定 / 表里有坏条目 / 号码为空，一律返回空串。
+        """
+        if source == "qq":
+            target = str(qq_id or identity)
+            if not target:
+                return ""
+            for player, rec in self._binding_table.items():
+                if not isinstance(rec, dict):
+                    continue
+                if str(rec.get("qq") or "") == target:
+                    return "，已绑定游戏账号：%s" % str(player)
+            return ""
+        rec = self._binding_table.get(identity)
+        if isinstance(rec, dict) and str(rec.get("qq") or ""):
+            return "，已绑定 QQ：%s（%s）" % (
+                str(rec.get("qq_name") or ""), str(rec["qq"])
+            )
+        return ""
 
     def _qq_is_admin(self, event) -> bool:
         """QQ 侧管理员判定：AstrBot 全局管理员或 admin_qq 白名单。
@@ -1713,7 +1750,8 @@ class NetherLinkPlugin(Star):
 
     async def _build_context(self, identity: str, is_admin: bool,
                              server_id: str = "", source: str = "qq",
-                             extra: str = "", extra_in_front: bool = False) -> str:
+                             extra: str = "", extra_in_front: bool = False,
+                             qq_id: str = "") -> str:
         """拼装注入给 AI 的全部上下文。QQ 侧与游戏侧共用这一个函数。
 
         为什么合并（2026-09-22 用户要求）：走原生群聊后，AstrBot 自己会在玩家
@@ -1738,7 +1776,7 @@ class NetherLinkPlugin(Star):
             blocks.append(extra)
         # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
         blocks.append(self._build_online_servers_hint())
-        blocks.append(self._admin_context(identity, is_admin, source, server_id))
+        blocks.append(self._admin_context(identity, is_admin, source, server_id, qq_id))
         if not extra_in_front and extra.strip():
             blocks.append(extra)
         return "\n\n".join(blocks)
@@ -3031,7 +3069,11 @@ class NetherLinkPlugin(Star):
                 return  # 私聊 / 其他平台 / 其他插件构造的请求，一律不碰
             identity = str(event.get_sender_name() or event.get_sender_id() or "?")
             is_admin = self._qq_is_admin(event)
-            ctx = await self._build_context(identity, is_admin)
+            # `identity` 是**群昵称**，拿不到 QQ 号就查不出绑定——号码在
+            # 同一处就有，显式传下去（面向存量部署：模板没 {binding} 也无害）。
+            ctx = await self._build_context(
+                identity, is_admin, qq_id=str(event.get_sender_id() or "")
+            )
             req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
             # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
             # 排查「AI 认不出管理员」时先看这行有没有出现。

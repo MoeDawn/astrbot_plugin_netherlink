@@ -249,14 +249,14 @@
   "template_netherlink_context_qq": {
     "description": "QQ 侧注入给 AI 的系统上下文模板",
     "type": "text",
-    "default": "<netherlink_context>\n当前发起者:{identity},{is_admin}\n</netherlink_context>",
-    "hint": "【QQ侧系统上下文】\n只作用于 QQ 群对话.占位符:{identity} 当前发起者,{is_admin} 是/不是管理员.空串回退默认值.用于提供管理员身份识别,此项一般不需要修改"
+    "default": "<netherlink_context>\n当前发起者:{identity},{is_admin}{binding}\n</netherlink_context>",
+    "hint": "【QQ侧系统上下文】\n只作用于 QQ 群对话.占位符:{identity} 当前发起者,{is_admin} 是/不是管理员,{binding} 绑定信息(已绑定时追加,没绑定就是空).空串回退默认值.用于提供管理员身份识别,此项一般不需要修改"
   },
   "template_netherlink_context_game": {
     "description": "游戏侧注入给 AI 的系统上下文模板",
     "type": "text",
-    "default": "<netherlink_context>\n你处于我的世界服务器:{server}\n当前发起者:{identity},{is_admin}\n接收玩家游戏公屏消息,群名与玩家ID由 AstrBot 附带.\n玩家试图或暗示赠送物品时:\n- 不得仅凭口头表示就道谢或加好感;物品未实际到手前,不得视为已收到.\n- 木头,石头,沙子等无价值或你不喜欢的物品:拒绝并生气(扣好感)\n- 铁锭,玫瑰花,凋零玫瑰,绿宝石(非原矿),火药等可刷怪塔或机器量产的物品:拒绝但不生气.\n- 价值不足:即使接受也不加好感\n赠送处理严格按序,不得跳步:\n1. 用 data get entity <玩家ID> Inventory[{id:\"minecraft:物品ID\"}] 查看对方背包.\n2. 仅按玩家明确数量执行,如 clear <玩家ID> minecraft:diamond 3;严禁不带数量执行 clear.\n3. 确认物品取走后,按价值调用好感度工具增加好感,并回复已拿到.\n若第1步未找到该物品:告知背包中没有,不 clear,不加好感.\n仅口头说说且未到第2步:不得视为收到\n回复前先调用 mc_karma(delta 传 0)查询当前发起者好感值,再据此决定说话方式与态度\n收到赠送只简短表达感受,不过多评价;严禁以物换物.\n玩家请求移动手中物品到身上或其他位置时,移动完成后必须删除原物品,防止复制.\n</netherlink_context>",
-    "hint": "【游戏侧系统上下文】\n在游戏内触发 AI 对话(含成就)时注入给 AI 的系统上下文.占位符:{identity} 当前发起者,{is_admin} 是/不是管理员,{server} 服务器显示名.空串回退默认值"
+    "default": "<netherlink_context>\n你处于我的世界服务器:{server}\n当前发起者:{identity},{is_admin}{binding}\n接收玩家游戏公屏消息,群名与玩家ID由 AstrBot 附带.\n玩家试图或暗示赠送物品时:\n- 不得仅凭口头表示就道谢或加好感;物品未实际到手前,不得视为已收到.\n- 木头,石头,沙子等无价值或你不喜欢的物品:拒绝并生气(扣好感)\n- 铁锭,玫瑰花,凋零玫瑰,绿宝石(非原矿),火药等可刷怪塔或机器量产的物品:拒绝但不生气.\n- 价值不足:即使接受也不加好感\n赠送处理严格按序,不得跳步:\n1. 用 data get entity <玩家ID> Inventory[{id:\"minecraft:物品ID\"}] 查看对方背包.\n2. 仅按玩家明确数量执行,如 clear <玩家ID> minecraft:diamond 3;严禁不带数量执行 clear.\n3. 确认物品取走后,按价值调用好感度工具增加好感,并回复已拿到.\n若第1步未找到该物品:告知背包中没有,不 clear,不加好感.\n仅口头说说且未到第2步:不得视为收到\n回复前先调用 mc_karma(delta 传 0)查询当前发起者好感值,再据此决定说话方式与态度\n收到赠送只简短表达感受,不过多评价;严禁以物换物.\n玩家请求移动手中物品到身上或其他位置时,移动完成后必须删除原物品,防止复制.\n</netherlink_context>",
+    "hint": "【游戏侧系统上下文】\n在游戏内触发 AI 对话(含成就)时注入给 AI 的系统上下文.占位符:{identity} 当前发起者,{is_admin} 是/不是管理员,{binding} 绑定信息(已绑定时追加,没绑定就是空),{server} 服务器显示名.空串回退默认值"
   },
   "template_chat": {
     "description": "MC 聊天推送模板",
