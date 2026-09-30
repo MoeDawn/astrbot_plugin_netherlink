@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NetherLink 管理面板</title>
+    <!--
+      ⚠️ 静态资源一律**相对路径**（`./style.css` / `./app.js`）。
+         AstrBot 会在返回 HTML 时重写相对 URL 并追加短期 asset_token
+         （`plugin_page_service.py` 的 `PLUGIN_PAGE_ASSET_TOKEN_TTL_SECONDS = 60`）。
+         手写绝对路径（`/api/plugin/page/content/...`）或自行拼 token 会 401。
+      ⚠️ **不手写 bridge SDK 的 `<script>`**：AstrBot 返回 HTML 时会自动插入
+         `/api/plugin/page/bridge-sdk.js`（官方 plugin-pages.md 原话：
+         「不需要手动引入 bridge SDK」），而那个 src 是绝对路径——写进来
+         只会让本页多一处会被 token 重写规则碰到的绝对引用。
+      ⚠️ **一个 `<script>` 都没有内联**：官方文档明说内联脚本无法同步访问
+         `window.AstrBotPluginPage`，脚本必须是外部 module 文件。
+      ⚠️ **本页不做懒加载**：资产 token 只有 60 秒，页面停留超过 60 秒后再去
+         动态拉新资产会 401。所有资源在打开时一次拉齐。
+    -->
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-head">
+        <div class="page-head__text">
+          <h1 class="page-title" id="page-title">NetherLink 管理面板</h1>
+          <p class="page-sub" id="page-sub">加载中…</p>
+        </div>
+        <div class="page-head__actions">
+          <span class="badge" id="ctx-badge" title="页面上下文">—</span>
+          <button type="button" class="btn btn--primary" id="refresh">
+            刷新
+          </button>
+        </div>
+      </header>
+
+      <nav class="tabs" id="tabs" aria-label="面板分区">
+        <button type="button" class="tab is-active" data-target="servers">
+          在线服务器
+        </button>
+        <button type="button" class="tab" data-target="karma">好感度</button>
+        <button type="button" class="tab" data-target="bindings" disabled>
+          绑定管理
+        </button>
+        <button type="button" class="tab" data-target="audit" disabled>
+          指令审计
+        </button>
+        <button type="button" class="tab" data-target="commands" disabled>
+          快捷指令
+        </button>
+      </nav>
+
+      <main class="panels">
+        <!-- ================= 在线服务器（C1） ================= -->
+        <section class="panel" id="section-servers">
+          <div class="panel__head">
+            <h2 class="panel__title">在线服务器</h2>
+            <span class="panel__hint">已连接的 MC 服务器（断开的一律不算在线）</span>
+          </div>
+          <p class="msg" id="servers-msg" role="status"></p>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>服务器 ID</th>
+                  <th>显示名</th>
+                  <th>端口</th>
+                  <th>上报名</th>
+                </tr>
+              </thead>
+              <tbody id="servers-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ================= 好感度（C1） ================= -->
+        <section class="panel" id="section-karma" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">好感度记录</h2>
+            <span class="panel__hint">
+              数据源是配置项 karma_records（删掉一条 ≠ 设成 0，此后回退到初始值）
+            </span>
+          </div>
+
+          <div class="toolbar">
+            <input
+              type="search"
+              class="input"
+              id="karma-query"
+              placeholder="按身份键过滤（如 qq: 或 mc:Steve）"
+              autocomplete="off"
+            />
+            <button type="button" class="btn" id="karma-search">过滤</button>
+            <button type="button" class="btn" id="karma-reload">重新加载</button>
+          </div>
+
+          <p class="msg" id="karma-msg" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>身份键</th>
+                  <th>好感值</th>
+                  <th class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="karma-body"></tbody>
+            </table>
+          </div>
+
+          <div class="add-row">
+            <h3 class="add-row__title">新增 / 覆盖一条记录</h3>
+            <div class="add-row__fields">
+              <input
+                type="text"
+                class="input"
+                id="karma-new-key"
+                placeholder="身份键，如 qq:123456 或 mc:Steve"
+                autocomplete="off"
+              />
+              <input
+                type="text"
+                class="input input--num"
+                id="karma-new-value"
+                placeholder="好感值"
+                autocomplete="off"
+              />
+              <button type="button" class="btn btn--primary" id="karma-set">
+                写入
+              </button>
+            </div>
+            <p class="add-row__hint">
+              范围由插件的 karma_min / karma_max 决定，本页不写死——
+              填错会拿到服务端的具体报错。
+            </p>
+          </div>
+        </section>
+
+        <!-- ============ 以下三节由 C2 实现（本任务只留位置） ============ -->
+        <section class="panel" id="section-bindings" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">绑定管理</h2>
+          </div>
+          <p class="placeholder">
+            待实现（C2）：QQ ↔ 游戏账号的改绑 / 解绑 / 好感迁移。
+          </p>
+        </section>
+
+        <section class="panel" id="section-audit" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">指令审计</h2>
+          </div>
+          <p class="placeholder">待实现（C2）：指令审计记录查询。</p>
+        </section>
+
+        <section class="panel" id="section-commands" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">快捷指令</h2>
+          </div>
+          <p class="placeholder">待实现（C2）：配置项驱动的快捷指令按钮。</p>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
