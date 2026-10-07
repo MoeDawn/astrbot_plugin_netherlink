@@ -6,10 +6,10 @@
     "hint": "【连接与服务器】\nMC 端插件作为客户端主动连入本地址"
   },
   "ws_ports": {
-    "description": "端口绑定（每一台 MC 服只能占一个端口）",
+    "description": "端口绑定（显示名:端口）",
     "type": "list",
     "default": [],
-    "hint": "填写 server-name:端口,如 survival:8765 或 8765\n(server-name为MC端插件配置项里填写的服务器名称)"
+    "hint": "格式 显示名:端口，如 生存服:8765；也可以只填端口号 8765（那样这台没有显示名，面板与群里都显示 MC）。一台 MC 服占一个端口。⚠️ 显示名只用于展示（QQ 群消息前缀、面板、模板 {server}），而服务器身份用的是 MC 端自己的 server-name——所以两台服的 server-name 必须不同，否则会互相顶掉、消息随机丢失。"
   },
   "auth_token": {
     "description": "连接鉴权 Token",
@@ -17,12 +17,6 @@
     "default": "change-me",
     "obvious_hint": true,
     "hint": "必须与 MC 端插件配置一致,握手时校验"
-  },
-  "server_display_names": {
-    "description": "按服务器区分的显示名",
-    "type": "list",
-    "default": [],
-    "hint": "填写 server-name:显示名,如 survival:生存服\n(显示名为同步到QQ端时显示的名字)"
   },
   "mc_bot_name": {
     "description": "机器人游戏内名字",
@@ -234,7 +228,7 @@
   "mc_command_server_param_desc": {
     "description": "mc_command 的 server 参数说明(仅 QQ 侧有该参数)",
     "type": "text",
-    "default": "决定指令发往哪台 MC 服务器(填 server_id 或显示名).只有一台在线时可省略",
+    "default": "决定指令发往哪台 MC 服务器(填 上报名 或显示名).只有一台在线时可省略",
     "hint": "只有 QQ 侧需要 AI 选服务器;游戏侧的来源由连接唯一确定,没有让 AI 选的余地.空串回退默认值,此项一般不需要修改"
   },
   "karma_tool_desc": {

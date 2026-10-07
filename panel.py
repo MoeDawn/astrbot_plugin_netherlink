@@ -141,8 +141,10 @@ def diagnostics_view(admin_mc, admin_qq, group_names, ws_bindings) -> dict:
     ⚠️ `admin_mc` / `admin_qq` 在插件里是 **set**：`json_response` 序列化不了，
     而且 set 的迭代顺序不确定，面板上会「刷新一次换个序」。这里统一成**排序好的
     列表**。
-    ⚠️ `ws_bindings` 原样带过（`[(server_id, port), ...]`）——它已经是
+    ⚠️ `ws_bindings` 原样带过（`[(显示名, port), ...]`）——它已经是
     `_parse_ws_ports` 的产物，重排只会引入新的出错点。
+    ⚠️ **第一项是显示名，不是身份**（2026-10-07 改版）：内部身份用的是 MC 端
+    上报的 `server-name`，而 `ws_ports` 冒号前那段只是**展示用**的显示名。
     ⚠️ 只报这四项。**不顺手加**别的东西（如「面板是否可用」）：这个形状是面板与
     诊断页的接口，多出来的字段没人消费，却会被当成契约的一部分。
     """
