@@ -1071,13 +1071,21 @@ class NetherLinkPlugin(Star):
         # ⚠️ 刻意**不**把兑换分支挪到那个开关之前：那会改变「关掉转发就什么都不
         #    转发」这条语义，代价比一条启动告警大得多。这里只把陷阱摆到运维
         #    已经在看的地方（配置解析结果那几行就在上面）。
-        if self.enable_binding and not self.config.get("enable_qq_to_mc", True):
+        # ⚠️ **三个条件**（2026-10-07 拆开开关后）：总开关开着、**确实要踢**、
+        #    而 QQ→MC 转发关着。只提醒不踢时玩家进得来、也能在群里发码，
+        #    不构成锁死，不该报这条。
+        if (
+            self.enable_binding
+            and self.binding_join_gate
+            and not self.config.get("enable_qq_to_mc", True)
+        ):
             logger.warning(
                 "NetherLink: enable_binding 开着、但 enable_qq_to_mc 关着——"
-                "进服门禁会把未绑定玩家踢出、让他去群里发验证码，"
+                "强制绑定会把未绑定玩家踢出、让他去群里发验证码，"
                 "而群里的码**永远不会被处理**（兑换分支在 enable_qq_to_mc 那关之后）。"
                 "结果是未绑定玩家全部进不来。"
-                "请二选一：打开 enable_qq_to_mc，或关掉进服门禁(binding_join_gate)。"
+                "请二选一：打开 enable_qq_to_mc，或关掉强制绑定(binding_join_gate)，"
+                "让未绑定玩家只收提示、不被踢。"
             )
 
         # 迁移探测：绑定了的人若还有 mc: 记录，提示可迁移。
@@ -2050,10 +2058,13 @@ class NetherLinkPlugin(Star):
                                  player=data.get("player", "?"), text=data.get("text", ""))
             elif mtype == "join" and self.config.get("enable_join_leave", True):
                 player = str(data.get("player") or "")
-                if binding_flow.is_gated(
+                # ⚠️ `enabled` 传的是**总开关**，不是它与子开关的与
+                #    （2026-10-07 拆分）：总开关开着就**发提示**；
+                #    子开关 `binding_join_gate` 只在门禁**内部**决定踢不踢。
+                if binding_flow.is_unbound(
                     self._binding_table, player,
                     ignored=self.mc_ignored_players,
-                    enabled=self.enable_binding and self.binding_join_gate,
+                    enabled=self.enable_binding,
                     exempt=self.binding_exempt_players,
                 ):
                     # ⚠️ 门禁整体包在 try 里，**一旦出错一律降级成「未拦截」**：
@@ -3603,7 +3614,21 @@ class NetherLinkPlugin(Star):
             return False
 
     async def _gate_unbound_player(self, player: str, server_id: str) -> bool:
-        """未绑定玩家进服：发码 + 公屏提示 + 踢出（踢出原因即提示）。
+        """未绑定玩家进服：发码 + 公屏提示，**并按 `binding_join_gate` 决定踢不踢**。
+
+        🔴 **两个开关的分工**（2026-10-07 用户要求）：
+          · `enable_binding`（**总开关**）—— 关掉 = 没有绑定功能：不发码、不提示、
+            不踢（调用方根本不会走到这里）。
+          · `binding_join_gate`（**子开关**）—— **只管踢不踢**。关掉时玩家
+            **照常收到提示与验证码**、照常进服，只是**不被踢出**。
+        ⚠️ 拆分前两者是**串联**的（`enabled = enable_binding and binding_join_gate`），
+        于是「只想提醒、不想踢人」这种合理配置**做不到**——关掉子开关会把提示
+        也一起关掉。现在可以了。
+
+        **返回值**：`True` = 已把他踢出去（调用方必须 `return`，别再推群）；
+        `False` = 没踢（子开关关着、拿不到可用群号、或执行出错），
+        调用方照常走后面的推群逻辑。
+        ⚠️ **返回 `False` 绝不该把玩家丢掉**：他收了提示、进了服，就该照常出现在群里。
 
         ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
         1. **只走游戏内**——不额外 `_broadcast`，否则一条 join 会推两次群
@@ -3667,7 +3692,11 @@ class NetherLinkPlugin(Star):
         #     公屏那行会变成「&e请到 QQ 群…」，同样是字面垃圾。
         # 换句话说，这条路上 § **根本到不了玩家眼前**，净化掉只有好处。
         reason = _strip_section_codes(reason)
+        # 提示**始终发**（走到这里说明总开关开着、且拿得到可用群号）。
         await self.send_game_line(reason, server_id)
+        if not self.binding_join_gate:
+            # 子开关关着 = 只提醒、不踢。玩家照常进服，调用方继续推群。
+            return False
         await self._send_to_mc(
             {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {reason}"},
             server_id,

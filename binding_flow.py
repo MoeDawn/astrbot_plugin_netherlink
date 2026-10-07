@@ -173,11 +173,19 @@ def prune(codes: dict, now: float, ttl: float = CODE_TTL_SECONDS) -> dict:
     }
 
 
-def is_gated(table: dict, player: str, ignored: set, enabled: bool,
-             exempt: set) -> bool:
-    """这个人是否该被挡在门外。
+def is_unbound(table: dict, player: str, ignored: set, enabled: bool,
+               exempt: set) -> bool:
+    """这名玩家是否**未绑定且够资格收到进服提示**。
 
-    四道判据缺一不可：开关打开、有玩家名、未绑定、不在忽略名单也不在豁免名单。
+    ⚠️ **2026-10-07 改名 + 收窄语义**：原名 `is_gated`，那时它回答的是
+    「要不要把他挡在门外」——而调用方拿一个 bool 同时决定了**发不发提示**与
+    **踢不踢人**。用户要求把这两件事拆开：
+      · `enable_binding`（总开关）管「有没有绑定功能」⇒ 决定**发不发提示**；
+      · `binding_join_gate`（子开关）管「踢不踢」。
+    所以本函数现在只回答「该不该提醒他」，**完全不涉及踢人**。
+    ⚠️ 传进来的 `enabled` 应当是**总开关**（`enable_binding`），不是两者的与。
+
+    四道判据缺一不可：总开关打开、有玩家名、未绑定、不在忽略名单也不在豁免名单。
 
     ⚠️ **按精确名字匹配，不做包含匹配**——`bot` 不该误伤 `robot`
     （与 `main.py` 的 `_is_ignored_player` 同口径）。
