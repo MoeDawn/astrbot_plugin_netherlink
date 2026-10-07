@@ -9,7 +9,7 @@
 不带前缀的路由**永远匹配不上**，而且不报错——只表现为 404。
 
 ⚠️ **本模块不产出 `online_seconds`**：`McConn` 上只有 `ws` / `port` /
-`reported_name` 三个字段，**没有连接时间戳**，算出不来。`servers_view` 的
+`port` 三个字段，**没有连接时间戳**，算出不来。`servers_view` 的
 `now` 形参因此**当前未被使用**——保留它是为了不改动既定的调用/测试签名
 （面板要显示在线时长，得先在 MC 端上报连接时刻，那是另一件事）。
 """
@@ -35,8 +35,11 @@ def servers_view(conns: dict, display_of, now: float) -> list:
 
     ⚠️ 只列**未关闭**的连接：`_mc_conns` 里可能残留已关闭的条目，
     面板按「在不在线」展示，关掉的一律不算在线。
-    ⚠️ `display` 走 `_mc_server_display`（配置的显示名），**不是** MC 上报名
-    ——上报名只作标识，显示名一律以插件配置为准（既有约定）。
+    ⚠️ `id` **就是 MC 上报的 server-name**（2026-10-07 身份改版后
+    `server_id = reported`），不是「配置里的名字」——所以**不再单独回一份
+    `reported_name`**：那两列会是同一个值，纯重复。
+    ⚠️ `display` 走 `_mc_server_display`（`ws_ports` 里按端口配的显示名），
+    与身份是两回事。
     ⚠️ `now` 目前未使用，见模块 docstring（没有连接时间戳，算不出在线时长）。
     """
     out = []
@@ -47,7 +50,6 @@ def servers_view(conns: dict, display_of, now: float) -> list:
             "id": str(sid),
             "display": str(display_of(sid)),
             "port": getattr(conn, "port", 0),
-            "reported_name": str(getattr(conn, "reported_name", "") or ""),
         })
     return out
 

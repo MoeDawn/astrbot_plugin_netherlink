@@ -26,6 +26,9 @@
   --error: #cf222e;
   --radius: 8px;
   --gap: 16px;
+  /* 行悬停底色与统一过渡时长（2026-10-07 界面打磨） */
+  --hover: #eef1f6;
+  --speed: 120ms;
 }
 
 [data-theme="dark"] {
@@ -40,6 +43,7 @@
   --ok: #3fb950;
   --warn: #d29922;
   --error: #f85149;
+  --hover: #2a2f39;
 }
 
 * {
@@ -119,6 +123,7 @@ body {
   color: var(--text-dim);
   font: inherit;
   cursor: pointer;
+  transition: color var(--speed), border-color var(--speed);
 }
 
 .tab:hover:not(:disabled) {
@@ -191,6 +196,20 @@ body {
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
+  /* 🔴 **默认不换行**（2026-10-07）：表里绝大多数格子是短标识——时间戳、
+     序号、结局、身份键、服务器名。默认允许换行时，列被挤窄就会把它们
+     断成两三行（实测：`2026-10-07T14:19:52` 断两行、`26.3生存服` 断成
+     「26.3生/存服」、好感列挤成「报/扣」），又丑又难读。
+     挤不下时让 `.table-wrap` 横向滚动，比把内容揉碎好。
+     ⚠️ **真正长的文本**（指令原文、备注、玩家名单）用 `.cell--wrap` 放开。 */
+  white-space: nowrap;
+}
+
+/* 长文本列：允许换行并断词，否则会把整张表撑出屏幕 */
+.table td.cell--wrap {
+  white-space: normal;
+  word-break: break-word;
+  min-width: 12em;
 }
 
 .table th {
@@ -198,6 +217,24 @@ body {
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+  /* 表头与数据之间加一道实线：此前只有每行的下边框，表头看起来和数据糊在一起 */
+  border-bottom: 1px solid var(--border);
+  /* 表格高时滚出视野就不知道每列是什么——表头吸顶。
+     ⚠️ 依赖 `.table-wrap` 是滚动容器；它 `overflow-x:auto` 已构成滚动上下文。 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+/* 斑马纹：一行行扫下去时不容易串行 */
+.table tbody tr:nth-child(even) td {
+  background: var(--surface-alt);
+}
+
+/* 悬停高亮：8 列的表，没有它很难看清自己指在哪一行 */
+.table tbody tr:hover td {
+  background: var(--hover);
 }
 
 .table tbody tr:last-child td {
@@ -238,6 +275,14 @@ body {
   font: inherit;
 }
 
+.input {
+  transition: border-color var(--speed), background var(--speed);
+}
+
+.input:hover {
+  border-color: var(--text-dim);
+}
+
 .input:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -259,6 +304,16 @@ body {
   color: var(--text);
   font: inherit;
   cursor: pointer;
+  transition: border-color var(--speed), color var(--speed),
+    background var(--speed), opacity var(--speed);
+}
+
+/* 键盘可达性：只对键盘焦点画环，鼠标点不动它（`:focus` 会让每次点击都闪一下） */
+.btn:focus-visible,
+.tab:focus-visible,
+.input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .btn:hover:not(:disabled) {
@@ -484,7 +539,28 @@ body {
 }
 
 /* ---------------- 审计结局着色 ---------------- */
+/*
+ * 四个结局各有各的颜色——**与「快捷指令」那四档同一个理由**：把「被拒」「失败」
+ * 渲染成和「成功」一样，是管理员扫一眼表格时最容易漏掉的一类误读。
+ * ⚠️ 取值来自 `main.py` 的 `_write_audit(...)`：request / rejected / failed / success。
+ */
 
 .mono--event {
   font-weight: 600;
+}
+
+.mono--event-ok {
+  color: var(--ok);
+}
+
+.mono--event-warn {
+  color: var(--warn);
+}
+
+.mono--event-error {
+  color: var(--error);
+}
+
+.mono--event-dim {
+  color: var(--text-dim);
 }
