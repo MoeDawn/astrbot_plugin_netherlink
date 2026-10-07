@@ -1035,7 +1035,7 @@ class NetherLinkPlugin(Star):
             f"绑定群={sorted(self.group_names) or '未配置'} "
             # ⚠️ `binding_group` 必须和 `绑定群` 印在同一行：这一项配错时
             # 单独看任何一半都判断不出来，而它决定「验证码发到哪个群」。
-            f"验证码群(binding_group)={self.binding_group or '未配置(单群时自动取绑定群)'} "
+            f"验证码群(binding_group)={self.binding_group or '未配置(全部消息互通的群都可用)'} "
             f"端口绑定={self.ws_bindings}"
         )
 
@@ -3565,18 +3565,22 @@ class NetherLinkPlugin(Star):
         是一张永远兑换不了的码。若还把他踢了，他连进来喊一声都做不到。
         所以这里必须放行：**一个字段打错，不该让全服新人被挡在门外**。
 
-        ⚠️ 这条判据放在**本方法里**而不是 `_binding_group_id()` 里：那个函数的契约
-        就是「配了 `binding_group` 就原样返回，否则取唯一的那个绑定群，都不行才返回
-        空串」，它**不做**成员校验；「群号可不可用、该不该因此放行」是**门禁的策略**，
-        而且下一轮的群侧发码匹配还要复用它。
+        ⚠️ 这条判据放在**本方法里**而不是 `_binding_groups()` 里：那个函数的契约
+        就是「配了 `binding_group` 就原样返回它，否则返回全部绑定群」，它**不做**
+        成员校验；「群号可不可用、该不该因此放行」是**门禁的策略**。
+        ⚠️ **「留空 = 全部绑定群都可用」是用户 2026-10-07 的要求**：改动前那种
+        「多个群却留空 → 只记一条 warning、门禁不生效」的行为已废除。
+        ⚠️ 发码**本来**就已在所有绑定群里生效（`on_group_message` 的门槛是
+        「群号 ∈ `group_names`」），本函数只决定**提示玩家去哪些群**。
 
         ⚠️ 这里**不额外记 warning**：配置问题应该报**一次**，而进服是高频事件，
         逐次刷只会把别的东西淹掉。提示改在 `__init__` 的启动检查里报
         （搜「binding_group 不在绑定群名单里」），那里才是运维会看的地方。
         """
-        group_id = self._binding_group_id()
-        # ⚠️ 除了「没群号」，「群号不在绑定群名单里」同样要放行——见 docstring。
-        if not group_id or group_id not in self.group_names:
+        groups = self._binding_groups()
+        # ⚠️ 除了「一个群都没配」，「群号不在绑定群名单里」同样要放行——见 docstring。
+        usable = [g for g in groups if str(g).strip() and g in self.group_names]
+        if not usable:
             return False
         # ⚠️ `binding_code_length` / `binding_code_ttl` 必须**真的传下去**：
         # 它们曾被读进 self 却没有任何调用点使用（`binding_flow` 内部只认自己的
@@ -3590,10 +3594,11 @@ class NetherLinkPlugin(Star):
                                    self.binding_code_ttl),
                 player, code, time.monotonic(),
             )
-        # 走到这里 `group_id` 必非空（上面那道门禁），所以不再需要 else 分支。
-        group_name = self.group_names.get(group_id, group_id)
+        # 走到这里 `usable` 必非空、且每个成员都在 `group_names` 里。
+        # `{group}` 是**群名**（顿号分隔）；留空配置下就是全部绑定群的名字。
+        group_names = self._binding_group_names(usable)
         reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
-                           player=player, code=code, group=group_name,
+                           player=player, code=code, group=group_names,
                            ttl=binding_flow.describe_ttl(self.binding_code_ttl))
         # ⚠️ § 染色码**两条路都要去掉**（实测结论，别「优化」回去）：
         #   · `kick` 的 reason 是 `MessageArgument`——服务端接受 § 但**不解释**它，
@@ -3609,22 +3614,40 @@ class NetherLinkPlugin(Star):
         )
         return True
 
-    def _binding_group_id(self) -> str:
-        """哪个群接受验证码：配了就用配置，没配就取 `group_names` 里唯一那个。
+    def _binding_groups(self) -> list:
+        """哪些群可以接受验证码，按 `group_names` 的插入顺序返回**群号**列表。
 
-        ⚠️ 有多个群却没配 → 记一条 warning 并返回空串（**不猜**）。
+        契约（改动前先读完）：
+          · 配了 `binding_group` → 只返回它（成员校验**不在这里**做）；
+          · 留空 → 返回**全部**绑定群（用户 2026-10-07 要求：留空 = 所有
+            消息互通的群都能发码）；
+          · `group_names` 为空 → 空列表。
+
+        ⚠️ **本函数不做成员校验**：`binding_group` 配了一个不在 `group_names` 里的
+        群号时照样原样返回——「这个群号能不能用、该不该因此放行」是**门禁的策略**。
+        这是改动前就定下的分工，别合并进来。
+
+        ⚠️ **返回群号、不是群名**：门禁要拿它跟 `group_names` 的键比对；而 `{group}`
+        占位符要的是**群名**，由 `_binding_group_names` 映射。两者形态不同，
+        别为了少一个函数而混用——混用会让门禁那句成员校验直接判假、门禁静默失效。
+
+        ❌ 这里以前叫 `_binding_group_id`，且在「配了多个群却留空」时记一条 warning
+        并返回空串——后果是**门禁整个不生效**（fail-open 放行）。用户明确要求改成
+        「留空 = 所有互通群都可用」，所以那条 warning 一并删除：现在不再存在
+        「拿不到群号」这个状态，只剩「一个群都没配」。
         """
         if self.binding_group:
-            return self.binding_group
-        ids = list(self.group_names.keys())
-        if len(ids) == 1:
-            return ids[0]
-        if len(ids) > 1:
-            logger.warning(
-                "NetherLink: 配置了多个绑定群但未指定 binding_group，"
-                "无法确定验证码该去哪个群——请在配置里指定 binding_group"
-            )
-        return ""
+            return [self.binding_group]
+        return list(self.group_names.keys())
+
+    def _binding_group_names(self, groups: list) -> str:
+        """把群号列表渲染成给玩家看的**群名**串（顿号分隔）。
+
+        `{group}` 占位符用它。查不到群名时回退群号本身——`group_names` 的既有口径
+        就是「只填群号时值等于键」。配了 `binding_group` 时列表只有一个，
+        行为与改动前完全一致。
+        """
+        return "、".join(self.group_names.get(g, g) for g in groups)
 
     async def _broadcast_to_mc(self, payload: dict) -> int:
         """把一条下行消息发给**所有**在线的 MC 服务器，返回发成功的台数。

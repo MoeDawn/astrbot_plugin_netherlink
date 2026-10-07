@@ -69,7 +69,7 @@
         <section class="panel" id="section-servers">
           <div class="panel__head">
             <h2 class="panel__title">在线服务器</h2>
-            <span class="panel__hint">已连接的 MC 服务器（断开的一律不算在线）</span>
+            <span class="panel__hint">已连接的 MC 服务器</span>
           </div>
           <p class="msg" id="servers-msg" role="status"></p>
           <div class="table-wrap">
@@ -92,7 +92,7 @@
           <div class="panel__head">
             <h2 class="panel__title">好感度记录</h2>
             <span class="panel__hint">
-              数据源是配置项 karma_records（删掉一条 ≠ 设成 0，此后回退到初始值）
+              数据源是配置项 karma_records。删掉一条不等于设成 0，删后回退到初始值
             </span>
           </div>
 
@@ -156,8 +156,8 @@
           <div class="panel__head">
             <h2 class="panel__title">绑定管理</h2>
             <span class="panel__hint">
-              表里的键是游戏 ID；一个 QQ 可以挂多个游戏 ID。
-              未绑定的玩家进服会被拦下并要求到群里发验证码。
+              表里的键是游戏 ID，一个 QQ 可以挂多个游戏 ID。
+              未绑定的玩家进服会被拦下，需到群里发验证码完成绑定
             </span>
           </div>
 
@@ -244,8 +244,7 @@
           <div class="panel__head">
             <h2 class="panel__title">配置诊断</h2>
             <span class="panel__hint">
-              启动日志那条「配置解析结果」的可视化版本——这里显示的是
-              <strong>解析之后</strong>的结果，不是配置项里的原始文本
+              启动日志那条「配置解析结果」的可视化，显示的是<strong>解析之后</strong>的结果
             </span>
           </div>
           <p class="msg" id="diagnostics-msg" role="status"></p>
@@ -282,8 +281,7 @@
           <div class="panel__head">
             <h2 class="panel__title">在线玩家</h2>
             <span class="panel__hint">
-              打开或刷新本页时现场下发一次 list——本插件不追踪在线玩家，
-              这份数据只能临时问服务器
+              打开或刷新本页时现场问一次服务器（本插件不追踪在线玩家）
             </span>
           </div>
           <p class="msg" id="players-msg" role="status"></p>
@@ -311,7 +309,7 @@
           <div class="panel__head">
             <h2 class="panel__title">指令审计</h2>
             <span class="panel__hint">
-              AI 替人执行指令的落盘留痕（新的在前）。关掉 log_command_audit 时不写。
+              AI 执行指令的落盘留痕，新的在前。关掉 log_command_audit 时不写
             </span>
           </div>
 

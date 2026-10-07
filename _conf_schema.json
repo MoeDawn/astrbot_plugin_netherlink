@@ -85,31 +85,28 @@
     "description": "账号绑定总开关",
     "type": "bool",
     "default": true,
-    "hint": "开启后,未绑定玩家进服会被拦下并收到验证码,在绑定群发码即可完成绑定;关掉则不发码也不拦人"
+    "hint": "开启后，未绑定玩家进服会被拦下并收到验证码，在绑定群发码即可完成绑定。关闭后不发码也不拦人，AI 也不认得他"
   },
   "binding_group": {
     "description": "接受验证码的 QQ 群号",
     "type": "string",
     "default": "",
-    "hint": "填群号。留空时若只配了一个绑定群则自动用它;配了多个群却留空,插件会记一条 warning 且不发进服提示(不猜)"
+    "hint": "留空则所有消息互通的群都能发码，进服提示里会列出全部群名。也可以只指定一个群，那样提示里只出现这一个。⚠️ 填的群号必须在「绑定的 QQ 群」里，否则门禁不生效"
   },
   "binding_join_gate": {
     "description": "进服门禁:未绑定玩家是否被拦",
     "type": "bool",
-    "default": true,
-    "hint": "默认开启。关闭后未绑定玩家照常进服,只是 AI 不认得他"
+    "default": true
   },
   "binding_code_length": {
     "description": "验证码位数",
     "type": "int",
-    "default": 6,
-    "hint": "默认 6 位。5 位在几百人的群里碰撞概率不低"
+    "default": 6
   },
   "binding_code_ttl": {
-    "description": "验证码有效期(秒)",
+    "description": "验证码有效期（秒）",
     "type": "int",
-    "default": 300,
-    "hint": "默认 300 秒即 5 分钟。过期后重新进服即可拿到新码"
+    "default": 300
   },
   "binding_exempt_players": {
     "description": "门禁豁免的游戏 ID",
@@ -301,7 +298,7 @@
     "description": "进服提示(也是踢出原因)",
     "type": "string",
     "default": "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定({ttl}内有效)",
-    "hint": "占位符 {group} 群名 {code} 验证码 {player} 玩家名 {server} 服务器名 {ttl} 有效期人话(如 5 分钟，跟随「验证码有效期」)。留空回退默认值"
+    "hint": "占位符 {group} 群名（留空 binding_group 时是全部绑定群、顿号分隔） {code} 验证码 {player} 玩家名 {server} 服务器名 {ttl} 有效期人话(如 5 分钟，跟随「验证码有效期」)。留空回退默认值"
   },
   "template_bind_success_game": {
     "description": "绑定成功时游戏内广播",
