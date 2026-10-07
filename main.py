@@ -992,8 +992,9 @@ class NetherLinkPlugin(Star):
         #     不会把管理员手填的条目清空。
         #   播种也失败：退化为空表且置 _karma_degraded，此时禁止写回配置项——
         #     内存里没有配置项的记录，写回等于把它们全部清掉。
-        # 这里兜的是意外（如 RecursionError、数据目录不可读）：
-        # `_parse_config_records` 自身已吞掉解析异常并回退空表。
+        # 这里兜的是「配置项读不出来」：`_parse_config_records` 对坏 JSON 抛异常，
+        # 于是降级分支生效、`_karma_degraded` 置起，写回路径全部拒绝。
+        # 也兜意外（如 RecursionError、数据目录不可读）。
         self._karma_degraded: bool = False
         try:
             # ⚠️ 2026-09-30 起**只读配置项**（`karma_records` 是唯一权威来源）。
@@ -1379,25 +1380,49 @@ class NetherLinkPlugin(Star):
     # 好感度存取（本地文件 + 配置项双写）
     # ------------------------------------------------------------------
     def _parse_config_records(self) -> dict:
-        """解析 karma_records 配置项（JSON 文本或已是 dict）。失败返回空表。
+        """解析 karma_records 配置项（JSON 文本或已是 dict）。
 
-        WebUI 里该配置可能是被手改过的 JSON 文本，解析失败按空表处理，
-        绝不能因此挡住插件加载。
+        🔴 **返回 `{}` 只表示一件事：配置项本来就是空的。**
+        「有内容但读不出来」一律**抛异常**，绝不与空配置混为一谈。
+
+        混为一谈的后果不是显示问题：坏 JSON 被当成空表播种进内存，随后任何一次
+        好感变化都以为「配置项本来就是空的」，把管理员手填的原文**覆写掉**——
+        数据静默丢失，而面板照报成功。抛异常让调用方那两个 `try` 生效，把插件
+        打成 `_karma_degraded` 态，所有写回路径一律拒绝（fail-safe 方向：
+        宁可少写一次，不可清空）。
+
+        ⚠️ 插件加载**不会**因此中断：两处调用点都在 try 里，降级后插件照常运行。
+        """
+        raw = self.config.get("karma_records", {})
+        if isinstance(raw, dict):
+            # 已是 dict 时返回的是 AstrBot 那个对象本身，调用方必须自行拷贝
+            return raw
+        if raw is None:
+            return {}
+        text = str(raw).strip()
+        if text in ("", "{}"):
+            return {}
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError) as e:
+            # json.JSONDecodeError 是 ValueError 子类，一并覆盖
+            raise ValueError(f"karma_records 不是合法 JSON: {e}") from e
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"karma_records 必须是 JSON 对象，实际是 {type(parsed).__name__}"
+            )
+        return parsed
+
+    def _config_has_records(self) -> bool:
+        """配置项里有没有记录——给写回守卫用的 fail-safe 判据。
+
+        读不出来时**当作有**：空快照因此不会覆盖它。方向与
+        `_parse_config_records` 抛异常一致——宁可少写一次，不可清空。
         """
         try:
-            raw = self.config.get("karma_records", {})
-        except Exception as e:
-            logger.warning(f"NetherLink: 读取 karma_records 配置失败，按空表处理: {e}")
-            return {}
-        if isinstance(raw, dict):
-            return raw
-        try:
-            parsed = json.loads(str(raw or "{}"))
-        except (ValueError, TypeError):
-            # json.JSONDecodeError 是 ValueError 子类，一并覆盖
-            logger.warning("NetherLink: karma_records 配置解析失败，按空表处理")
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+            return bool(self._parse_config_records())
+        except Exception:
+            return True
 
     def _apply_configured_tool_descs(self) -> None:
         """用配置项覆盖工具 schema 的**描述与参数说明**。
@@ -1719,9 +1744,10 @@ class NetherLinkPlugin(Star):
             return
         try:
             snapshot = self._karma.snapshot()
-            if not snapshot and self._parse_config_records():
+            if not snapshot and self._config_has_records():
                 # 空快照绝不允许覆盖非空的 karma_records——那是管理员手填的记录，
-                # 清掉就找不回来了
+                # 清掉就找不回来了。判据走 _config_has_records：配置读不出来时
+                # 也算「有」，同样不写。
                 logger.error("NetherLink: 好感快照为空但配置项有记录，跳过写回以免清空")
                 return
             # schema 把本项声明为 type=text / default="{}"，落盘必须是字符串：
@@ -2597,12 +2623,29 @@ class NetherLinkPlugin(Star):
         """GET 好感度记录（可选 `?q=` 子串过滤，大小写不敏感）。
 
         整形逻辑全在 `panel.karma_view` 里（脱离 AstrBot 可单测）。
+
+        🔴 **降级态必须 `error_response`，绝不回空列表。** 那两个状态在 JSON
+        里长得一模一样（都是"没有记录"），但事实相反：真的空是「他没有记录」，
+        降级态是「他的记录我读不出来」。回空列表等于**说假话**，而管理员看到
+        「一条都没有」的下一步动作是重建数据——重建的第一步正是把配置项覆写成
+        内存里那几条，数据就此消失。写侧三个出口（set / delete / migrate）早已
+        各自拒绝，读侧是同一条设计对偶的那一半。
+
+        ⚠️ 前端确实会把这条当失败：框架的 `PluginPagePage.vue` 判
+        `response.data?.status === "error"` 即 throw，bridge 转成 rejected
+        promise，`loadKarma` 的 catch 显示错误。这是本修法成立的前提。
         ⚠️ 兜底那段的理由同 `_api_servers`：禁用态下这条路由根本不会注册，
         但 handler 是普通绑定方法，别处仍可能直接 await 它。
         """
         if not PANEL_AVAILABLE:
             return _panel_unavailable()
         try:
+            if self._karma_degraded:
+                return error_response(
+                    "好感记录处于降级态（配置项里的 karma_records 读不出来），"
+                    "无法显示记录——请到 WebUI 检查该项的 JSON 是否合法。"
+                    "在你修好之前，面板上的增删改一律被拒绝，以免覆盖掉原文。"
+                )
             return json_response(
                 panel.karma_view(self._karma.snapshot(), _panel_query("q"))
             )
