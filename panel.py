@@ -194,7 +194,11 @@ def audit_view(records: list, query: str = "") -> list:
 #     **一个** Component 再套进那条翻译。所以只取「有几个 / 上限多少」，
 #     名字留原始输出给管理员自己看。
 #   · 用 `search` 而不是 `match`：真实回执可能带前缀/后缀（ANSI、换行）。
-_LIST_LINE_RE = re.compile(r"There are (\d+) of a max of (\d+) players online")
+# ⚠️ 末尾那段（玩家名列表）**单独捕获**：它可能为空（没人在线时服务端输出
+#    `... online: \n`）。用 `([^\n]*)` 而不是 `(.*)`，避免把后续行也吞进来。
+_LIST_LINE_RE = re.compile(
+    r"There are (\d+) of a max of (\d+) players online:?[ \t]*([^\n]*)"
+)
 
 # 控制台渲染是带 ANSI 色序列的（实测服务端日志里就有 SGR 序列）。
 # ⚠️ 目前**捕获路径**（Paper / Fabric / NeoForge 三端的 command_result）拿到的
@@ -202,22 +206,52 @@ _LIST_LINE_RE = re.compile(r"There are (\d+) of a max of (\d+) players online")
 # 只剥 SGR（`ESC [ ... m`），不碰别的转义序列（剥多了反而会改变有意义的字节）。
 _ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# MC 的 § 染色码（服务端给在线玩家上色时会带）。只用于**剥掉**，不解析样式。
+_SECTION_CODE_RE = re.compile(r"\u00a7.")
+
+
+def _split_player_names(tail: str) -> list:
+    """把「在线: A, B」后面那一段切成名字列表。
+
+    ⚠️ 分隔符是 `", "`（`ComponentUtils.DEFAULT_SEPARATOR`）。按 `,` 切再 strip
+    是安全的：MC 正版 ID 只含 `[A-Za-z0-9_]`，不可能出现逗号。
+    ⚠️ 名字里可能带 § 染色码（服务端给在线玩家上色时）——剥掉，否则面板上会
+    显示成字面乱码。
+    """
+    out = []
+    for part in str(tail or "").split(","):
+        name = _SECTION_CODE_RE.sub("", part).strip()
+        if name:
+            out.append(name)
+    return out
+
 
 def players_view(output) -> dict:
-    """`list` 指令的原始回执 → `{"count", "max"}`。
+    """`list` 指令的原始回执 → `{"count", "max", "players"}`。
 
     🔴 **解析不出来就是 `None`，绝不猜**。在线人数是会被人当**事实**看的数字，
     猜错的代价远高于显示「无法解析」——原始输出就在同一个 payload 里，
     管理员自己能看到那一行。同理，本函数**只认**那个实测见过的模式：
     换一种写法（比如将来服务端改了措辞）会走到 `None`，而不是匹配出半个数字。
 
+    `players`（名字列表）的三种取值，**各有含义，别混**：
+      · `None` —— 没解析出那一行，或解析出了但**人数 > 0 而名字段是空的**
+        （矛盾 ⇒ 宁可不报，也不谎称「没人在线」）；
+      · `[]`   —— 解析成功且确实是 0 人；
+      · `[...]` —— 解析出的名字，顺序即服务端给的顺序。
+
     ⚠️ `output` 为 `None`（服务器没回执）也走这条路，不抛异常。
     """
     text = _ANSI_SGR_RE.sub("", str(output or ""))
     m = _LIST_LINE_RE.search(text)
     if not m:
-        return {"count": None, "max": None}
-    return {"count": int(m.group(1)), "max": int(m.group(2))}
+        return {"count": None, "max": None, "players": None}
+    count = int(m.group(1))
+    names = _split_player_names(m.group(3))
+    if count > 0 and not names:
+        # 人数说有人、名字段却空着 —— 自相矛盾，不猜
+        return {"count": count, "max": int(m.group(2)), "players": None}
+    return {"count": count, "max": int(m.group(2)), "players": names}
 
 
 # ---------------------------------------------------------------------------

@@ -2844,46 +2844,72 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 面板读取配置诊断失败: {e}")
             return error_response("读取配置诊断失败")
 
+    async def _query_players_one(self, server_id: str) -> dict:
+        """对**一台**服务器下发 `list` 并整形出一行结果。
+
+        ⚠️ **逐台问，绝不「随便挑一台」**：`_send_to_mc` 在多台在线且未指定目标时
+        会拒发（那是刻意的），所以面板必须自己指定 server_id。
+        ⚠️ **不扣好感**：`_run_console_cmd` 只管执行与等回执，扣费在
+        `exec_command_for` 里。面板是管理员功能（规范 §5.3）。
+        ⚠️ **拿不到回执不是错误**（超时 / 发送失败）：照常返回一行、`ok` 与
+        解析结果都是 `None`，`message` 说明原因——用 `error_response` 会让前端
+        把它渲染成红色故障，而「那台服没回话」是常见情形。
+        """
+        row = {
+            "id": str(server_id),
+            "display": self._mc_server_display(server_id),
+            "ok": None,
+            "count": None,
+            "max": None,
+            "players": None,
+            "output": "",
+            "message": "",
+        }
+        try:
+            result = await self._run_console_cmd("list", timeout=8.0, server_id=server_id)
+        except Exception as e:
+            logger.error(f"NetherLink: 面板向 [{server_id}] 下发 list 失败: {e}")
+            row["message"] = "下发 list 失败：%s" % e
+            return row
+        if result is None:
+            row["message"] = "没有拿到回执（超时或发送失败）"
+            return row
+        row.update(panel.players_view(result.output))
+        row["ok"] = bool(result.ok)
+        row["output"] = result.output
+        if not result.ok:
+            row["message"] = "服务器报告这条 list 执行失败"
+        return row
+
     async def _api_players(self):
-        """GET 在线玩家——**现场下发 `list` 指令问服务端**，不是本地状态。
+        """GET 在线玩家——对**每一台**在线服务器各下发一次 `list`，逐台列出。
 
         ⚠️ 本插件**不追踪在线玩家**：join/leave 事件只按模板广播出去，从不累加
         （见 `_dispatch_mc_event`）。所以这份数据只能现场问。
-
-        ⚠️ **不扣好感**：`_run_console_cmd` 只管执行与等回执，扣费在
-        `exec_command_for` 里。面板是管理员功能（规范 §5.3），这条不经 AI 判断、
-        也不计价——面板本身要登录，等同管理员权限。
-
-        ⚠️ **拿不到回执不是错误**：未连接、多台服务器在线（`_send_to_mc` 会拒发，
-        绝不猜是哪台）、或超时，都返回 `connected: False` 的**正常响应**。
-        这是最常见的情形，用 `error_response` 会让前端把它渲染成红色故障。
-
-        ⚠️ `count` / `max` **解析不出来就是 `None`**，且**原始输出一律带上**：
-        解析只认实测见过的那一种写法（见 `panel.players_view`），界面要能把
-        「看不懂的输出」原样交给管理员，而不是显示一个编出来的数字。
+        ⚠️ **并发问**（`asyncio.gather`），不是逐台串行：串行时 N 台里只要有一台
+        不回话，面板就要卡满 N × 8 秒；并发下总耗时约等于最慢的那一台。
+        ⚠️ **没有服务器在线时返回空列表**，不是错误——那是最常见的状态，
+        前端渲染成「未连接」即可。
+        ⚠️ 每台的 `count` / `max` / `players` **解析不出来就是 `None`**，且
+        **原始输出一律带上**：解析只认实测见过的那一种写法（见 `panel.players_view`），
+        界面要能把「看不懂的输出」原样交给管理员，而不是显示一个编出来的数字。
         """
         if not PANEL_AVAILABLE:
             return _panel_unavailable()
         try:
-            result = await self._run_console_cmd("list", timeout=8.0, server_id="")
-            if result is None:
-                return json_response({
-                    "connected": False,
-                    "ok": None,
-                    "count": None,
-                    "max": None,
-                    "output": "",
-                    "message": "MC 服务器未连接、未回执，或在线服务器不止一台"
-                               "（面板暂不支持多服选择）",
-                })
-            payload = dict(panel.players_view(result.output))
-            payload.update({
-                "connected": True,
-                "ok": bool(result.ok),
-                "output": result.output,
-                "message": "",
+            alive = sorted(sid for sid, c in self._mc_conns.items() if not c.closed)
+            if not alive:
+                return json_response({"servers": [], "total": None})
+            rows = await asyncio.gather(
+                *[self._query_players_one(sid) for sid in alive]
+            )
+            counts = [r["count"] for r in rows if isinstance(r["count"], int)]
+            return json_response({
+                "servers": list(rows),
+                # 有任意一台没解析出人数时，合计就是 `None`——宁可不说，
+                # 也不给一个只加了一半的数（那会被当事实看）。
+                "total": sum(counts) if len(counts) == len(rows) else None,
             })
-            return json_response(payload)
         except Exception as e:
             logger.error(f"NetherLink: 面板读取在线玩家失败: {e}")
             return error_response("读取在线玩家失败")
