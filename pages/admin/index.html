@@ -9,20 +9,21 @@
          AstrBot 会在返回 HTML 时重写相对 URL 并追加短期 asset_token
          （`plugin_page_service.py` 的 `PLUGIN_PAGE_ASSET_TOKEN_TTL_SECONDS = 60`）。
          手写绝对路径（`/api/plugin/page/content/...`）或自行拼 token 会 401。
-      ⚠️ **不手写 bridge SDK 的 `<script>`**：AstrBot 返回 HTML 时会自动在 `</body>`
-         前插入它（官方 plugin-pages.md 原话：「不需要手动引入 bridge SDK」）。
+         **唯一的例外**是页面尾部那行 bridge SDK——那是框架约定的固定地址。
       🔴🔴 **绝对不要在本文件里写出那个 SDK 的 URL 字面量——哪怕放在注释里。**
          AstrBot 判断「要不要注入」用的是对**原始 HTML 文本**的子串查询
          （`plugin_page_service.py`：`if "<SDK 的 URL>" not in rewritten_html`），
-         而它**不剥注释**：注释里提一句，注入就被判定为「已经有了」而**跳过**，
-         于是真机上 `window.AstrBotPluginPage` 是 undefined、整页功能全废——
-         而所有本地静态守卫照样全绿（它们都先剥注释，看不到这条路径）。
-         这一条就是本仓库反复吃过的「守卫被自己的注释喂饱」，只是这次发生在
-         **生产侧**。守卫见 tests/test_panel_frontend.py 的
+         而它**不剥注释**。它同时会认出我们那行、把 token 补上。
+         守卫见 tests/test_panel_frontend.py 的
          `test_bridge_sdk_url_is_never_mentioned_outside_a_real_script_src`
          ——它**故意不剥注释**，因为要建模的是 AstrBot 的真实行为，不是理想版本。
-      ⚠️ **一个 `<script>` 都没有内联**：官方文档明说内联脚本无法同步访问
-         `window.AstrBotPluginPage`，脚本必须是外部 module 文件。
+      🔴 **还有一样同样要命的：注释里不要写「带尖括号的 script 开标签」。**
+         本仓库的守卫用「配对的开/闭标签」正则扫 HTML，而注释里一个**孤立的**
+         开标签会**跨注释**与后面真正的闭标签配成一对，把中间的真标签整段吞掉
+         ——踩过一次，加 bridge 那行时它把两个真标签一起吞了，守卫报的偏移也指向
+         注释里的假标签。写「script 标签」这种说法即可，别带尖括号。
+      ⚠️ **业务脚本必须是外部 module 文件**：官方文档明说内联脚本无法同步访问
+         `window.AstrBotPluginPage`。
       ⚠️ **本页不做懒加载**：资产 token 只有 60 秒，页面停留超过 60 秒后再去
          动态拉新资产会 401。所有资源在打开时一次拉齐。
     -->
@@ -430,6 +431,28 @@
       </div>
     </dialog>
 
+    <!--
+      🔴 **bridge SDK 由本页自己声明**（修复轮 3）。
+
+      此前本页**只依赖 AstrBot 自动注入**那个脚本标签。实测在用户的部署上
+      （反代 + 某一版 AstrBot）注入**没有发生**——页面里一个 bridge 标签都没有，
+      于是 `window.AstrBotPluginPage` 永远缺席，面板只剩一句
+      「must be opened from the AstrBot WebUI」。
+
+      自己写这一行在**两种框架版本下都成立**：
+        · 框架有注入逻辑时，它会认出这个 URL、把 asset_token 补上，
+          并因「已含该字符串」而**跳过**重复注入（框架用朴素子串判断）；
+        · 框架没有注入逻辑时，这一行原样生效。
+
+      ⚠️ **顺序是关键**：bridge 用 **classic** 脚本（立即执行），而 app.js 是
+         `type="module"`（deferred）。classic 必先执行，app.js 读
+         `window.AstrBotPluginPage` 时才拿得到。调换两者会重现同一个故障。
+
+      ⚠️ 别把 bridge 的**完整 URL** 写进注释：框架的注入判据是**朴素子串查找、
+         且从不剥注释**——注释里出现它会被误判成「已经有了」。
+         本段刻意只写「bridge SDK」。
+    -->
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>
