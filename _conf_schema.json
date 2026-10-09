@@ -72,26 +72,25 @@
   "enable_webui_persona": {
     "description": "游戏内对话启用 WebUI 配置的人格",
     "type": "bool",
-    "default": true,
-    "hint": "开启后游戏内机器人对话使用 AstrBot 人格管理里配置的默认人格,关闭则无人格"
+    "default": true
   },
   "enable_binding": {
     "description": "QQ 绑定功能总开关",
     "type": "bool",
     "default": true,
-    "hint": "开启后未绑定玩家进服会收到提示与验证码，在绑定群发码即可完成绑定。关闭则整块绑定功能停用：不发码、不提示、也不拦截。"
+    "hint": "开启后未绑定玩家进服会收到提示与验证码,在绑定群发码即完成绑定。关闭则整块停用:不发码、不提示、不拦截"
   },
   "binding_group": {
     "description": "接受验证码的 QQ 群号",
     "type": "string",
     "default": "",
-    "hint": "留空则所有消息互通的群都能发码，进服提示里会列出全部群名。也可以只指定一个群，那样提示里只出现这一个。⚠️ 填的群号必须在「绑定的 QQ 群」里，否则门禁不生效"
+    "hint": "留空则所有消息互通的群都能发码。填的群号必须在绑定的 QQ 群名单里,否则门禁不生效"
   },
   "binding_join_gate": {
     "description": "强制绑定：未绑定玩家是否被踢出",
     "type": "bool",
     "default": true,
-    "hint": "开启后未绑定玩家进服会被踢出，并看到前往绑定的提示。关闭则只发提示不踢人——他照常进服。（总开关关闭时本项不起作用。）"
+    "hint": "开启后未绑定玩家进服被踢出并提示前往绑定。关闭则只发提示不踢人,他照常进服。总开关关闭时本项不起作用"
   },
   "binding_code_length": {
     "description": "验证码位数",
@@ -101,13 +100,14 @@
   "binding_code_ttl": {
     "description": "验证码有效期（秒）",
     "type": "int",
-    "default": 300
+    "default": 300,
+    "hint": "过期后重新进服拿新码"
   },
   "binding_exempt_players": {
     "description": "门禁豁免的游戏 ID",
     "type": "list",
     "default": [],
-    "hint": "这些名字进服时不会被门禁拦下,用于排除管理员、导演或任何你不希望被拦的账号。⚠️ 按名字精确匹配,不区分大小写"
+    "hint": "这些名字进服不会被门禁拦下。按名字精确匹配,不区分大小写"
   },
   "mc_wake_prefixes": {
     "description": "游戏内机器人唤醒词",
@@ -128,7 +128,7 @@
     "description": "快捷指令(面板上的按钮)",
     "type": "list",
     "default": [],
-    "hint": "每项一条,格式为 名称|指令|服务器,如 给钻石|give @s minecraft:diamond 1|survival。服务器段可省略,省略时不指定目标服务器(只有恰好一台在线时才发送)。⚠️ 竖线是分隔符,所以指令里不能含它;一条列表项就是一条完整指令,逗号等其它符号原样保留。这些指令由管理员在面板上直接执行,不经 AI 判断、也不消耗好感度"
+    "hint": "每项一条,格式 名称|指令|服务器,如 给钻石|give @s minecraft:diamond 1|survival。服务器段可省略,省略时只有恰好一台在线才发送。竖线是分隔符,指令里不能含它。这些指令不经 AI 判断,也不消耗好感度"
   },
   "admin_qq": {
     "description": "管理员 QQ 白名单",

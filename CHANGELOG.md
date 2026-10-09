@@ -2,6 +2,16 @@
 
 ## 未发布
 
+### 修复：进服验证码改为私聊发送
+
+未绑定玩家进服时，提示原本用 `bot_reply` **广播到游戏公屏**，同服任何玩家都能看到
+别人的验证码并抢先绑定。现改为 `command` 帧执行 `/tell <玩家>`，只发给本人。
+
+- 与已有的 `kick` 共用同一条控制台通道，四个 MC 端通用，**不需要改 MC 端**
+- 「验证码写进服务端日志」这条特性保留（用户要求）：实测真 Paper 26.3，控制台发出的
+  `/tell` 走 `MinecraftServer.sendSystemMessage` = `LOGGER.info("System chat: ...")`
+- `binding_join_gate` 关掉时（只提醒不踢）同样走私聊
+
 NetherLink 的 AstrBot 插件——把 Minecraft 服务器与 QQ 群双向打通。
 
 ### 修复

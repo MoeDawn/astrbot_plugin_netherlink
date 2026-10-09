@@ -3675,10 +3675,15 @@ class NetherLinkPlugin(Star):
 
         ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
         1. **只走游戏内**——不额外 `_broadcast`，否则一条 join 会推两次群
-        2. **踢出用 `command` 帧**（`kick`）而非 `bot_reply`：走既有控制台通道，
+        2. **私聊发码，不广播**（2026-10-09 用户要求）：走 `command` 帧执行
+           `/tell <玩家> <提示>`，只发给本人。此前用 `bot_reply` 广播到公屏，
+           同服任何玩家都能看到别人的验证码，可以抢先绑定。
+        3. **踢出用 `command` 帧**（`kick`）：与 `/tell` 同一条控制台通道，
            四个 MC 端通用，且踢出界面上显示的原因就是那份说明
-        3. **提示同时用 `bot_reply` 发一遍**：它进公屏，于是以 `System chat: ...`
-           落进服务端日志（项目已实测）——「码写进日志」因此不必改 MC 端
+        4. **仍然落服务端日志**（用户要求保留）：实测真 Paper 26.3，`/tell` 从
+           控制台发出时走 `CommandSourceStack.sendChatMessage` →
+           `MinecraftServer.sendSystemMessage` → `LOGGER.info("System chat: ...")`，
+           所以「码写进日志」这条特性不变，不必改任何 MC 端
 
         **返回值**：`True` = 已经把他拦下了，调用方应当 `return`（不要再推群）；
         `False` = 门禁**没有生效**（拿不到可用群号，或执行出错），
@@ -3728,15 +3733,19 @@ class NetherLinkPlugin(Star):
         reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
                            player=player, code=code, group=group_names,
                            ttl=binding_flow.describe_ttl(self.binding_code_ttl))
-        # ⚠️ § 染色码**两条路都要去掉**（实测结论，别「优化」回去）：
-        #   · `kick` 的 reason 是 `MessageArgument`——服务端接受 § 但**不解释**它，
-        #     踢出界面上会原样显示「§e请到 QQ 群…§bABC123」；
-        #   · `send_game_line` 本就会把文本里的 § 换成 `&`（防伪造染色的既有约定），
-        #     公屏那行会变成「&e请到 QQ 群…」，同样是字面垃圾。
-        # 换句话说，这条路上 § **根本到不了玩家眼前**，净化掉只有好处。
+        # ⚠️ § 染色码必须去掉（实测结论，别「优化」回去）：`kick` 与 `/tell` 的
+        # 正文都走 `MessageArgument`——服务端接受 § 但**不解释**它，聊天框里会
+        # 原样显示「§e请到 QQ 群…§bABC123」，纯字面垃圾。这条路上 § 到不了玩家
+        # 眼前能渲染的地方，净化掉只有好处。
         reason = _strip_section_codes(reason)
-        # 提示**始终发**（走到这里说明总开关开着、且拿得到可用群号）。
-        await self.send_game_line(reason, server_id)
+        # 提示**始终私聊发**（走到这里说明总开关开着、且拿得到可用群号）。
+        # ⚠️ 用 `command` 帧执行 `/tell` 而非广播：码只该给本人，广播会让同服
+        # 其他玩家抢绑。与下面的 `kick` 共用同一条控制台通道，四端通用。
+        await self._send_to_mc(
+            {"type": "command", "id": uuid.uuid4().hex,
+             "cmd": f"tell {player} {reason}"},
+            server_id,
+        )
         if not self.binding_join_gate:
             # 子开关关着 = 只提醒、不踢。玩家照常进服，调用方继续推群。
             return False
