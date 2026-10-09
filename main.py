@@ -2433,49 +2433,66 @@ class NetherLinkPlugin(Star):
 
     async def _build_context(self, identity: str, is_admin: bool,
                              server_id: str = "", source: str = "qq",
-                             extra: str = "", extra_in_front: bool = False,
                              qq_id: str = "") -> str:
-        """拼装注入给 AI 的全部上下文。QQ 侧与游戏侧共用这一个函数。
+        """拼装注入给 AI 的**整串**上下文（静态 + 动态）。两侧共用这一个函数。
 
         为什么合并（2026-09-22 用户要求）：走原生群聊后，AstrBot 自己会在玩家
         消息后附上 User ID / Nickname / Group name，两侧的差别就只剩「这是哪个
         场景」。以前维护两份近乎重复的拼装，只会漂移。
 
-        内容顺序：好感规则 -> [extra（仅游戏侧）]-> 在线服务器清单 -> 管理员与身份。
+        ⚠️ **注入钩子不再用它**（2026-10-09）：钩子按静态/动态分两处下发
+        （system_prompt / 用户消息块），见「注入点」。本函数保留是因为测试与
+        直接调用方的既有契约都是「整串」。
+
         `source`：`"qq"` / `"game"`，决定 `_admin_context` 给哪一份文案
         （游戏侧多「唤醒词含义」与「先查一次好感」两句）。
-        `extra`：仅游戏侧附加的提示词（`extra_system_prompt`），含背包查验那套
-        流程——注给 QQ 侧只会让主 agent 去处理与它无关的事，所以那边给空串。
-        `extra_in_front`：游戏侧要求 extra 紧跟在**好感规则**之后（用户
-        2026-09-21 明确要求「好感度规则紧跟自定义提示词」）；QQ 侧则放末尾。
         `qq_id`：发起者的 **QQ 号**，只有 QQ 侧会给（游戏侧留空）——QQ 侧的
         `identity` 是群昵称，而绑定表按**游戏 ID** 建，没有它就反查不出对方
         绑的游戏账号（见 `_binding_fragment`）。
         """
-        blocks = [self._build_static_context()]
-        if extra.strip():
-            blocks.append(extra)
-        blocks.append(self._admin_context(identity, is_admin, source, server_id, qq_id))
-        return "\n\n".join(b for b in blocks if b.strip())
+        static = self._build_static_context()
+        dynamic = self._build_dynamic_context(
+            identity, is_admin, source, server_id, qq_id
+        )
+        return "\n\n".join(b for b in (static, dynamic) if b.strip())
 
     def _build_static_context(self) -> str:
-        """**静态**上下文：好感规则 + 在线服务器清单。
+        """**静态**上下文：只有 `karma_rules`。
 
-        🔴 **这一份进 system_prompt**（2026-10-09 B1 拆分）。判据是
-        「什么时候会变」——`karma_rules` 只在管理员改配置时变，在线服务器
-        清单只在上线/掉线时变，**都不是逐请求变**，放前缀不影响缓存命中。
+        🔴 **这一份进 system_prompt**（2026-10-09 B1 拆分，审核要求）。
+        它是提示缓存的**前缀**，所以只放「只在管理员改配置时才变」的东西。
 
-        与之相对的**动态**部分是 `_admin_context`（身份 / 是否管理员 / 绑定），
-        它逐请求变，改由 `_append_ephemeral_user_context` 进 user 消息。
+        ⚠️ **在线服务器清单已挪走**（2026-10-09）：它随服务器上下线而变，
+        审核的判据是「随**时间**变」，归动态段。见 `_build_dynamic_context`。
+        """
+        if not self.karma_rules:
+            return ""
+        # 工具名（mc_karma）由 karma_rules 的默认值点出——
+        # 用户 2026-09-22：好感规则本来就有配置项，把「互动涉及好感度时调用」
+        # 写在那儿比单独维护一个 QQ_KARMA_HINT 常量更省事，也不会两处漂移。
+        return self.karma_rules
+
+    def _build_dynamic_context(
+        self, identity: str, is_admin: bool, source: str = "qq",
+        server_id: str = "", qq_id: str = "",
+    ) -> str:
+        """**动态**上下文：在线服务器清单 + 身份 / 管理员 / 绑定。
+
+        🔴 **这一份进用户消息块**（`extra_user_content_parts`），
+        **绝不进 system_prompt** —— 它逐请求变（身份）或随时间变（在线清单），
+        塞进缓存前缀会把命中率打掉（2026-10-09 上架审核的驳回理由）。
+
+        ⚠️ 在线清单为什么算「动态」：它**随服务器上下线而变**。我一开始按
+        「只在上下线时变，不是逐请求变」把它归了静态，但审核的判据写的是
+        「随用户和**时间**逐请求变化」——服务器掉线正是随时间变。用户的决定
+        是挪进动态段，别改回去。
         """
         blocks = []
-        if self.karma_rules:
-            # 工具名（mc_karma）由 karma_rules 的默认值点出——
-            # 用户 2026-09-22：好感规则本来就有配置项，把「互动涉及好感度时调用」
-            # 写在那儿比单独维护一个 QQ_KARMA_HINT 常量更省事，也不会两处漂移。
-            blocks.append(self.karma_rules)
         # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
         blocks.append(self._build_online_servers_hint())
+        blocks.append(
+            self._admin_context(identity, is_admin, source, server_id, qq_id)
+        )
         return "\n\n".join(b for b in blocks if b.strip())
 
     async def _handle_advancement(self, data: dict, server_id: str = ""):
@@ -3539,9 +3556,10 @@ class NetherLinkPlugin(Star):
             return False
     
     async def _build_game_static_context(self, server_id: str = "") -> str:
-        """游戏侧的**静态**上下文 = WebUI 人格 + 好感规则 + 在线清单。
+        """游戏侧的**静态**上下文 = WebUI 人格 + 好感规则。
 
-        进 system_prompt（缓存友好）。动态的身份部分见 `_admin_context`。
+        进 system_prompt（缓存友好）。动态部分（在线清单 + 身份 / 绑定）
+        见 `_build_dynamic_context`。
         与 QQ 侧共用 `_build_static_context`，只在前面多一段 WebUI 人格
         （QQ 侧主 agent 自己会读人格，插件不用带）。
         """
@@ -3568,7 +3586,9 @@ class NetherLinkPlugin(Star):
         `_build_context` 的既有契约都是「整串」，删了会让那些断言失真。
         """
         static = await self._build_game_static_context(server_id)
-        dynamic = self._admin_context(identity, is_admin, "game", server_id)
+        dynamic = self._build_dynamic_context(
+            identity, is_admin, "game", server_id
+        )
         return "\n\n".join(p for p in (static, dynamic) if p.strip())
     def _is_aiocqhttp_event(self, event) -> bool:
         """这个事件是否来自 aiocqhttp 平台的**群消息**。
@@ -4381,7 +4401,7 @@ class NetherLinkPlugin(Star):
                 # 免得每次改写前缀把缓存打掉（2026-10-09 上架审核要求）。
                 _append_ephemeral_user_context(
                     req,
-                    self._admin_context(
+                    self._build_dynamic_context(
                         player, self._game_is_admin(player), "game", server_id
                     ),
                 )
@@ -4404,8 +4424,9 @@ class NetherLinkPlugin(Star):
                 ).strip()
             _append_ephemeral_user_context(
                 req,
-                self._admin_context(
-                    identity, is_admin, "qq", qq_id=str(event.get_sender_id() or "")
+                self._build_dynamic_context(
+                    identity, is_admin, "qq",
+                    qq_id=str(event.get_sender_id() or ""),
                 ),
             )
             # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
