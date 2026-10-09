@@ -34,6 +34,14 @@ NetherLink 的 AstrBot 插件——把 Minecraft 服务器与 QQ 群双向打通
 
 ### 🔴 修复
 
+- **`pages/admin/app.js` 在 git 里是 E-SafeNet 密文**（上架审核驳回）。
+  文件 50725 字节，头部含 `E-SafeNet/LOCK`，浏览器无法解析、审核无法审计。
+  根因：它当初是**用 Python 写的**（py 在白名单 → 落盘即加密），而同目录的
+  `index.html` / `style.css` 是 Write 工具写的（明文）——只有它中招，
+  潜伏了多轮发版。已从明文来源覆盖，内容逐字节等价。
+  新增守卫 `tests/test_git_plaintext.py`：走 `git cat-file`（绕过透明解密）
+  查每个上架文件是不是密文。⚠️ 用 py 自查无效——它读到的永远是明文。
+
 - **手改坏 `karma_records` 会静默清空整份好感记录**。在 WebUI 把该项的 JSON
   改坏（少个括号、多个逗号），下一次**任何玩家**的好感变化都会把原文覆写成
   内存里那一条——没写错的部分一并消失，而面板**照报成功**。
