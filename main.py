@@ -86,16 +86,35 @@ def _append_ephemeral_user_context(req, text: str) -> None:
 
     ⚠️ 失败一律静默跳过：注入失败不能连累对话本身。
     """
-    if TextPart is None or not (text or "").strip():
+    if not (text or "").strip():
+        return  # 空文本是正常情况（模板渲染成空），不必报
+    if TextPart is None:
+        # 🔴 **不静默**：导入失败时注入等于没做，而调用方会照打「已注入」。
+        logger.error(
+            "NetherLink: TextPart 不可用，身份注入被跳过 —— "
+            "本版 AstrBot 的 astrbot.core.agent.message 路径可能已变"
+        )
         return
     parts = getattr(req, "extra_user_content_parts", None)
     if parts is None:
+        # 🔴 同上：req 上没有这个字段时追加无处可去。
+        logger.error(
+            "NetherLink: req 上没有 extra_user_content_parts"
+            f"（类型 {type(req).__name__}），身份注入被跳过"
+        )
         return
+    before = len(parts)
     part = TextPart(text=text)
     mark = getattr(part, "mark_as_temp", None)
     if callable(mark):
         part = mark()
     parts.append(part)
+    # 留一条痕：真机排查「AI 认不出管理员」时，先看这行有没有出现、
+    # 以及块数有没有 +1。注入失败在这里一目了然。
+    logger.info(
+        f"NetherLink: 身份块已追加到用户消息（{before} -> {len(parts)} 块，"
+        f"{len(text)} 字）"
+    )
 
 # 面板是否可用。注册路由与 handler 兜底两处都要用这条事实，
 # 起个名字，免得两处判据各写一份、日后漂移。
@@ -1087,15 +1106,7 @@ class NetherLinkPlugin(Star):
         # 配置解析全是**静默**的：admin_mc 打错一个字、分隔符用了全角逗号，
         # 插件都不会报错，只会安静地把管理员当普通玩家。这条日志是唯一能立刻
         # 看出「我配的东西到底被解析成了什么」的地方——排查时先看它。
-        logger.info(
-            f"NetherLink: 配置解析结果 —— 管理员(游戏)={sorted(self.admin_mc) or '未配置'} "
-            f"管理员(QQ)={sorted(self.admin_qq) or '未配置'} "
-            f"绑定群={sorted(self.group_names) or '未配置'} "
-            # ⚠️ `binding_group` 必须和 `绑定群` 印在同一行：这一项配错时
-            # 单独看任何一半都判断不出来，而它决定「验证码发到哪个群」。
-            f"验证码群(binding_group)={self.binding_group or '未配置(全部消息互通的群都可用)'} "
-            f"端口绑定(显示名:端口)={self.ws_bindings}"
-        )
+        self._log_parsed_config()
 
         # ⚠️ **`binding_group` 填了一个不在 `group_names` 里的群号 = 门禁静默失效**。
         # 两个群号都会被观察者当成「配对」的正常写法，实际却永远不会碰面：
@@ -1163,15 +1174,13 @@ class NetherLinkPlugin(Star):
                     len(stale["obsolete"]),
                     "\n".join(f"    · {k}：{why}" for k, why in stale["obsolete"]),
                 )
-            # 「与默认值不同」只报计数：自定义是正常行为，逐项列出会刷屏。
-            # 详情降到 debug——要排查时把它调出来看。
+            # 「与默认值不同」**连计数都不报**（用户 2026-10-09 要求）：
+            # 自定义是正常行为，启动日志不需要它。要排查时把日志级别调到
+            # debug 看详情。
             if stale["customized"]:
-                logger.info(
-                    "NetherLink: 另有 %d 项配置与默认值不同（多为你的自定义，属正常）",
-                    len(stale["customized"]),
-                )
                 logger.debug(
-                    "NetherLink: 与默认值不同的项：\n%s",
+                    "NetherLink: %d 项配置与默认值不同：\n%s",
+                    len(stale["customized"]),
                     "\n".join(f"    · {k}：{why}" for k, why in stale["customized"]),
                 )
         except Exception as e:
@@ -1918,6 +1927,37 @@ class NetherLinkPlugin(Star):
             for sid, conn in sorted(self._mc_conns.items())
             if not conn.closed
         ]
+
+    def _log_parsed_config(self) -> None:
+        """启动时把**解析之后**的四项打出来（用户 2026-10-09 精简要求）。
+
+        只打这四项：已配置的服务器 / 已绑定的群聊 / 已配置的管理员 / 绑定开关。
+        配置解析全是**静默**的（admin_mc 打错一个字、分隔符用了全角逗号都不报错，
+        只会安静地把管理员当普通玩家），所以这几行是唯一能立刻看出
+        「我配的东西被解析成了什么」的地方。
+
+        ⚠️ 只打这四项，**不顺手加别的**：这里是运维第一眼要看的地方，
+        多一行就是干扰。要查别的日志请另开一行，别往这里塞。
+
+        ⚠️ 服务器的**上报名**由 MC 端在握手时上报，启动这一刻还没有，
+        所以这里打的是 `显示名(端口)`；连上之后面板与在线清单才看得到上报名。
+        """
+        servers = "、".join(f"{disp}({port})" for disp, port in self.ws_bindings) or "无"
+        groups = "、".join(
+            f"{name}({gid})" for gid, name in self.group_names.items()
+        ) or "无"
+        admins = (
+            f"qq: {'、'.join(sorted(self.admin_qq)) or '无'}; "
+            f"mc: {'、'.join(sorted(self.admin_mc)) or '无'}"
+        )
+        binding = "已开启" if self.enable_binding else "未开启"
+        logger.info(
+            "NetherLink: 已配置的服务器 —— %s\n"
+            "NetherLink: 已绑定的群聊 —— %s\n"
+            "NetherLink: 已配置的管理员 —— %s\n"
+            "NetherLink: 账号绑定 —— %s",
+            servers, groups, admins, binding,
+        )
 
     def _build_online_servers_hint(self) -> str:
         """把在线服务器列给 AI，供它决定指令发往哪台。
