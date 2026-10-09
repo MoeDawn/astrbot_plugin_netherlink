@@ -109,9 +109,10 @@ def _append_ephemeral_user_context(req, text: str) -> None:
     if callable(mark):
         part = mark()
     parts.append(part)
-    # 留一条痕：真机排查「AI 认不出管理员」时，先看这行有没有出现、
-    # 以及块数有没有 +1。注入失败在这里一目了然。
-    logger.info(
+    # ⚠️ **debug**：每轮对话都打，而下面 `inject_qq_identity` 那条已经
+    # 报了「发起者是谁、是不是管理员」——同一件事打两遍就是刷屏。
+    # 要核对块数/字数时把日志级别调到 debug。
+    logger.debug(
         f"NetherLink: 身份块已追加到用户消息（{before} -> {len(parts)} 块，"
         f"{len(text)} 字）"
     )
@@ -2010,7 +2011,8 @@ class NetherLinkPlugin(Star):
         # 🔴 **身份就是上报名**（2026-10-07 起）。端口不再影响身份——它只用来
         #    决定「哪台服务器连的是哪个口」（端口冲突检测仍需要它）。
         #    以前这里还有一条「端口绑定的 id 优先」，已删除。
-        logger.info(f"NetherLink: MC 端已连入（本地端口 {port}），等待握手")
+        # debug：紧接着就有一条「握手成功（端口 X，上报名 Y）」，信息更全
+        logger.debug(f"NetherLink: MC 端已连入（本地端口 {port}），等待握手")
 
         server_id = ""
         async for msg in ws:
@@ -3355,10 +3357,13 @@ class NetherLinkPlugin(Star):
             # 裁剪后的报价/目标服都已确定；而「好感不足」这类拒绝也要留痕，
             # 所以不能放到执行成功之后。
             if self.log_command_audit:
-                logger.info(
+                # ⚠️ **debug**：紧接着的「成功」那条会带上全部字段，
+                # 每条指令打两行就是刷屏。拒绝/失败是异常路径，各有自己的日志。
+                # `_write_audit` 照写——audit.jsonl 的结构化记录不受影响。
+                logger.debug(
                     f"NetherLink: [指令审计] 请求 来源={source} "
-                    f"发起者={initiator!r} qq={qq or '-'} "
-                    f"目标={server_id or '自动'} 报价={spend} 指令={cmd!r}"
+                    f"发起者={initiator} qq={qq or '-'} "
+                    f"目标={server_id or '自动'} 报价={spend} 指令={cmd}"
                 )
                 self._write_audit(
                     "request", source=source, initiator=initiator, qq=qq or "",
@@ -3435,12 +3440,15 @@ class NetherLinkPlugin(Star):
                     )
                     return f"{failure}\n（好感未扣除）"
 
-                # 走过了上面的 failure 分支 ⇒ 这次**成功**了。成功路径此前一条日志
-                # 都没有，审计里只能靠「没有失败日志」反推——补上这一行。
+                # 成功路径的**唯一**一条日志（请求那条已降 debug）——所以它要
+                # 自带全部字段，别指望读者再去看上一行。格式用 `键=值` 空格分隔，
+                # 不给值加引号（`{initiator}` 会输出 `'桃核大'`，那对人是噪声）。
                 if self.log_command_audit:
                     logger.info(
-                        f"NetherLink: [指令审计] 成功 发起者={initiator!r} "
-                        f"目标={server_id or '自动'} 消耗={spend} 指令={cmd!r}"
+                        f"NetherLink: [指令审计] 成功 来源={source} "
+                        f"发起者={initiator} qq={qq or '-'} "
+                        f"目标={server_id or '自动'} 报价={spend} 消耗={spend} "
+                        f"指令={cmd}"
                     )
                 self._write_audit(
                     "success", source=source, initiator=initiator, qq=qq or "",
