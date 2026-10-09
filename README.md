@@ -307,8 +307,8 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 | 配置项 | 说明 |
 |---|---|
-| `template_netherlink_context_qq` | **QQ 侧**注入给 AI 的系统上下文模板。占位符 `{identity}` `{is_admin}` `{binding}` |
-| `template_netherlink_context_game` | **游戏侧**注入给 AI 的系统上下文模板。占位符多一个 `{server}`，默认值含「物品换好感的三步流程」 |
+| `template_netherlink_context_qq` | **QQ 侧**注入给 AI 的身份模板，随本轮消息下发。占位符 `{identity}` `{is_admin}` `{binding}` |
+| `template_netherlink_context_game` | **游戏侧**注入给 AI 的身份模板，随本轮消息下发。占位符多一个 `{server}`，默认值含「物品换好感的三步流程」 |
 
 > `{binding}` 在已绑定时追加一句「已绑定…」，QQ 侧会把该 QQ 绑的全部游戏 ID 用顿号列出；未绑定则是空串。它**不是**必需占位符，缺了不回退默认值。
 

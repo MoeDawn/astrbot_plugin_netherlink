@@ -2,6 +2,36 @@
 
 ## 未发布
 
+### 🔴 过审整改：logger 规范 + 身份注入改走用户消息
+
+AstrBot 市场审核驳回两条，逐条整改。
+
+**① `panel.py` 用了内置 `logging`** —— 规范要求 logger 必须且只能从
+`astrbot.api` 导入。改用 `from astrbot.api import logger`。
+
+- ⚠️ 牵连三处：`panel.py` 的「不 import AstrBot」本是**有意的单测能力**，
+  而 `test_panel*.py` 在**模块顶层** `import panel`（收集期），桩来不及装。
+  解法是在 `tests/conftest.py` 的**模块顶层**装一个最小 astrbot 桩。
+- `_real_module_exists` 改成看 `__file__`，否则会把那个最小桩当成
+  「本机有真 AstrBot」而跳过装完整桩。
+- 两条 `caplog` 测试改用 `capture_logs` 抓插件 logger（桩把 `propagate`
+  设成 False，caplog 挂在 root 上收不到——项目里早有这条经验）。
+- 新增 `tests/test_logging_convention.py` 钉住该规范（AST 判定）。
+
+**② `system_prompt` 逐请求改写** —— 它是提示缓存的**前缀**，会破坏缓存命中率。
+按静态/动态拆分：
+
+- **静态**（`karma_rules` + 在线清单 + 游戏侧人格）→ `system_prompt`
+- **动态**（身份 / 是否管理员 / 绑定）→ `extra_user_content_parts`
+  + `.mark_as_temp()`（不落会话历史）
+- 🔴 **工具描述三份副本必须同步改**：原写「身份见**系统提示词中的**
+  `<netherlink_context>`」，身份挪走后那句会把 AI 指到没有身份的地方
+  → 把管理员当普通玩家（坑 5 复发条件）。改成「身份见**本轮消息中附带的**」，
+  守卫随之反转（原先断言「必须写系统提示词中的」，现在断言「不得写它」）。
+
+⚠️ **真机行为未验证**：身份从 system_prompt 挪到用户消息块，AI 是否仍能正确
+识别管理员/绑定，本机验不了。本机只保证「同一信息只有一处权威来源」。
+
 ### 修复：进服验证码改为私聊发送
 
 未绑定玩家进服时，提示原本用 `bot_reply` **广播到游戏公屏**，同服任何玩家都能看到
