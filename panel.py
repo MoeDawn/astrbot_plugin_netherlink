@@ -2,7 +2,9 @@
 """管理面板的**数据整形层**。
 
 本模块只做一件事：把插件的**运行时状态**整形成能直接 `json_response` 出去的形状。
-它**不 import web、不 import 插件**，所以能脱离 AstrBot 单测。
+它**不 import web、不 import 插件实例**，所以能脱离 AstrBot 单测。
+⚠️ `logger` 必须走 `astrbot.api`（上架规范要求，不得用内置 `logging`）；
+单测环境由 `tests/conftest.py` 装最小桩，本模块因此仍可独立 import。
 
 ⚠️ 路由前缀必须是**插件名**：dashboard 拿注册时的 route **原样**与
 `/api/v1/plugins/extensions/<插件>/<子路径>` 比对（源码是正则，不是 FastAPI）。
@@ -14,11 +16,9 @@
 （面板要显示在线时长，得先在 MC 端上报连接时刻，那是另一件事）。
 """
 
-import logging
 import re
 
-
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 
 # 🔴 必须与 metadata.yaml 的 `name` 一致。

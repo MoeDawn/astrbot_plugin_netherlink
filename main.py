@@ -51,6 +51,52 @@ except ImportError:  # 旧版 AstrBot：没有 Plugin Pages
     json_response = None
     request = None
 
+# 往用户消息追加**逐请求变化**的上下文块（`extra_user_content_parts`）。
+# 同样是守卫式导入：旧版 AstrBot 未必有 `astrbot.core.agent.message`。
+try:
+    from astrbot.core.agent.message import TextPart
+except ImportError:  # pragma: no cover - 旧版兜底
+    TextPart = None
+
+
+def _has_injected_context(req) -> bool:
+    """这个请求的**用户消息块**里已经注入过 netherlink 身份了吗？
+
+    幂等判据。2026-10-09 起看 `extra_user_content_parts`——动态身份不再走
+    system_prompt（那里只放静态前缀，判它会把「另一个插件注过静态段」
+    误判成「我们已经注过了」）。
+    """
+    for part in getattr(req, "extra_user_content_parts", None) or ():
+        text = getattr(part, "text", None)
+        if isinstance(text, str) and "<netherlink_context>" in text:
+            return True
+    return False
+
+
+def _append_ephemeral_user_context(req, text: str) -> None:
+    """把一段**逐请求变化**的上下文追加到用户消息末尾（不写进会话历史）。
+
+    🔴 **为什么不塞 system_prompt**：system prompt 是提示缓存的**前缀**，
+    逐请求改写它会让缓存每次落空（2026-10-09 上架审核因此驳回）。
+    改成 user 消息里的内容块后，前缀稳定、只有尾部变化。
+
+    `.mark_as_temp()` 让框架把它标成 `_no_save`——**不持久化进对话历史**，
+    否则每轮都会往历史里堆一份身份块，越积越多。
+    （⚠️ 方法名是 `mark_as_temp` 不是 `make_as_temp`，见 message.py:68。）
+
+    ⚠️ 失败一律静默跳过：注入失败不能连累对话本身。
+    """
+    if TextPart is None or not (text or "").strip():
+        return
+    parts = getattr(req, "extra_user_content_parts", None)
+    if parts is None:
+        return
+    part = TextPart(text=text)
+    mark = getattr(part, "mark_as_temp", None)
+    if callable(mark):
+        part = mark()
+    parts.append(part)
+
 # 面板是否可用。注册路由与 handler 兜底两处都要用这条事实，
 # 起个名字，免得两处判据各写一份、日后漂移。
 # ⚠️ **三个都要在**，不是「有一个就行」：只读面（karma/bindings/diagnostics/
@@ -2363,20 +2409,31 @@ class NetherLinkPlugin(Star):
         `identity` 是群昵称，而绑定表按**游戏 ID** 建，没有它就反查不出对方
         绑的游戏账号（见 `_binding_fragment`）。
         """
+        blocks = [self._build_static_context()]
+        if extra.strip():
+            blocks.append(extra)
+        blocks.append(self._admin_context(identity, is_admin, source, server_id, qq_id))
+        return "\n\n".join(b for b in blocks if b.strip())
+
+    def _build_static_context(self) -> str:
+        """**静态**上下文：好感规则 + 在线服务器清单。
+
+        🔴 **这一份进 system_prompt**（2026-10-09 B1 拆分）。判据是
+        「什么时候会变」——`karma_rules` 只在管理员改配置时变，在线服务器
+        清单只在上线/掉线时变，**都不是逐请求变**，放前缀不影响缓存命中。
+
+        与之相对的**动态**部分是 `_admin_context`（身份 / 是否管理员 / 绑定），
+        它逐请求变，改由 `_append_ephemeral_user_context` 进 user 消息。
+        """
         blocks = []
         if self.karma_rules:
+            # 工具名（mc_karma）由 karma_rules 的默认值点出——
+            # 用户 2026-09-22：好感规则本来就有配置项，把「互动涉及好感度时调用」
+            # 写在那儿比单独维护一个 QQ_KARMA_HINT 常量更省事，也不会两处漂移。
             blocks.append(self.karma_rules)
-        # 工具名（mc_karma）由 karma_rules 的默认值点出——
-        # 用户 2026-09-22：好感规则本来就有配置项，把「互动涉及好感度时调用」
-        # 写在那儿比单独维护一个 QQ_KARMA_HINT 常量更省事，也不会两处漂移。
-        if extra_in_front and extra.strip():
-            blocks.append(extra)
         # 在线服务器清单：告诉 AI 指令能发往哪台、不填会怎样。
         blocks.append(self._build_online_servers_hint())
-        blocks.append(self._admin_context(identity, is_admin, source, server_id, qq_id))
-        if not extra_in_front and extra.strip():
-            blocks.append(extra)
-        return "\n\n".join(blocks)
+        return "\n\n".join(b for b in blocks if b.strip())
 
     async def _handle_advancement(self, data: dict, server_id: str = ""):
         """玩家获得成就：把渲染好的提示词推进**平台管线**，由 AI 更新好感并回话。
@@ -3432,12 +3489,11 @@ class NetherLinkPlugin(Star):
         except Exception:
             return False
     
-    async def _build_game_context(
-        self, identity: str, is_admin: bool, server_id: str = ""
-    ) -> str:
-        """游戏侧的上下文 = 人格 + 通用上下文（含游戏侧专属的附加提示词）。
+    async def _build_game_static_context(self, server_id: str = "") -> str:
+        """游戏侧的**静态**上下文 = WebUI 人格 + 好感规则 + 在线清单。
 
-        与 QQ 侧共用 _build_context，只在前面多一段 WebUI 人格
+        进 system_prompt（缓存友好）。动态的身份部分见 `_admin_context`。
+        与 QQ 侧共用 `_build_static_context`，只在前面多一段 WebUI 人格
         （QQ 侧主 agent 自己会读人格，插件不用带）。
         """
         parts = []
@@ -3450,13 +3506,21 @@ class NetherLinkPlugin(Star):
                     parts.append(str(persona["prompt"]))
             except Exception as e:
                 logger.warning(f"NetherLink: 读取 WebUI 人格失败（跳过）: {e}")
-        # 游戏侧上下文的渲染（含 {server} 替换）现在由 _admin_context 走模板完成。
-        parts.append(
-            await self._build_context(
-                identity, is_admin, server_id=server_id, source="game",
-            )
-        )
-        return "\n\n".join(p for p in parts if p.strip())    
+        parts.append(self._build_static_context())
+        return "\n\n".join(p for p in parts if p.strip())
+
+    async def _build_game_context(
+        self, identity: str, is_admin: bool, server_id: str = ""
+    ) -> str:
+        """游戏侧上下文的**整串**（静态 + 动态），供直接调用方与测试用。
+
+        ⚠️ **注入钩子不再用它**（2026-10-09 B1 拆分）：钩子把静态部分放
+        system_prompt、动态部分放 user 消息。本函数保留是因为测试与
+        `_build_context` 的既有契约都是「整串」，删了会让那些断言失真。
+        """
+        static = await self._build_game_static_context(server_id)
+        dynamic = self._admin_context(identity, is_admin, "game", server_id)
+        return "\n\n".join(p for p in (static, dynamic) if p.strip())
     def _is_aiocqhttp_event(self, event) -> bool:
         """这个事件是否来自 aiocqhttp 平台的**群消息**。
 
@@ -4225,7 +4289,9 @@ class NetherLinkPlugin(Star):
         try:
             # 幂等：这个请求已经注入过了就不再追加。见 docstring 里的说明——
             # **必须在两条分支之前**，否则重复处理时两边都会各叠一份。
-            if "<netherlink_context>" in (req.system_prompt or ""):
+            # ⚠️ 2026-10-09 起判据从 system_prompt 改到**用户消息块**：
+            #    动态身份已从 system_prompt 挪进 `extra_user_content_parts`。
+            if _has_injected_context(req):
                 return
             # ⚠️ 必须先判游戏侧，再判 aiocqhttp。
             # 这两条是**互斥的两个场景**，但原先写成
@@ -4255,10 +4321,21 @@ class NetherLinkPlugin(Star):
                     "netherlink_ctx",
                     {"source": "game", "player": player, "server_id": server_id},
                 )
-                ctx = await self._build_game_context(
-                    player, self._game_is_admin(player), server_id
+                # 静态部分（人格 + 好感规则 + 在线清单）进 system_prompt，
+                # 它是提示缓存的**前缀**，只在配置/上下线时变。
+                static = await self._build_game_static_context(server_id)
+                if static.strip():
+                    req.system_prompt = (
+                        (req.system_prompt or "").rstrip() + "\n\n" + static
+                    ).strip()
+                # 动态部分（身份 / 是否管理员 / 绑定）逐请求变，进 user 消息，
+                # 免得每次改写前缀把缓存打掉（2026-10-09 上架审核要求）。
+                _append_ephemeral_user_context(
+                    req,
+                    self._admin_context(
+                        player, self._game_is_admin(player), "game", server_id
+                    ),
                 )
-                req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
                 logger.info(
                     f"NetherLink: 已为游戏侧对话注入身份 —— 发起者 {player}，"
                     f"服务器 {self._mc_server_display(event.get_session_id())}"
@@ -4270,10 +4347,18 @@ class NetherLinkPlugin(Star):
             is_admin = self._qq_is_admin(event)
             # `identity` 是**群昵称**，拿不到 QQ 号就查不出绑定——号码在
             # 同一处就有，显式传下去（面向存量部署：模板没 {binding} 也无害）。
-            ctx = await self._build_context(
-                identity, is_admin, qq_id=str(event.get_sender_id() or "")
+            # 静态部分进 system_prompt（缓存前缀），动态身份进 user 消息。
+            static = self._build_static_context()
+            if static.strip():
+                req.system_prompt = (
+                    (req.system_prompt or "").rstrip() + "\n\n" + static
+                ).strip()
+            _append_ephemeral_user_context(
+                req,
+                self._admin_context(
+                    identity, is_admin, "qq", qq_id=str(event.get_sender_id() or "")
+                ),
             )
-            req.system_prompt = ((req.system_prompt or "").rstrip() + "\n\n" + ctx).strip()
             # 注入是静默的，出问题时从日志完全看不出它有没有跑——留一条痕，
             # 排查「AI 认不出管理员」时先看这行有没有出现。
             logger.info(
