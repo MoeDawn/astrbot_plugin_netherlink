@@ -1220,6 +1220,9 @@ class NetherLinkPlugin(Star):
         #    重连」。立即播报会让群里看到「已断开」紧跟「已连接」。延迟窗口内
         #    该 server_id 若重新握手成功就取消这条播报。
         self._server_offline_tasks: dict = {}
+        # 卸载中标志：置真后 `_schedule_offline_broadcast` 不再挂新任务。
+        # 见 `terminate()` 的说明（重启时误报离线的根因）。
+        self._terminating: bool = False
 
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
@@ -2517,6 +2520,10 @@ class NetherLinkPlugin(Star):
 
     def _schedule_offline_broadcast(self, server_id: str) -> None:
         """断开时挂一个「延迟确认」任务（见 `_broadcast_server_status`）。"""
+        # !!! 卸载中不挂新任务：terminate() 关连接会让 `_ws_session` 走到这里
+        #     并挂出一个延迟确认任务；它会在新实例已播完「已连接」之后才触发「已断开」。
+        if self._terminating:
+            return
         if not self.enable_server_status:
             return
         self._cancel_offline_broadcast(server_id)
@@ -5074,6 +5081,11 @@ class NetherLinkPlugin(Star):
         ⚠️ **先等 `_ws_task`**：`_runner` 由那个 task 赋值，不等它可能还是 None，
         于是 runner 漏了 cleanup、**端口不释放**（重装时 address already in use）。
         """
+        # ⚠️ **先置卸载标志**：下面关连接会让 `_ws_session` 走到断开分支，
+        #    那条路会去挂一个 5 秒后触发的下线播报。不挡住它，新实例已播完
+        #    「已连接」之后，这个孤儿任务还会再播一条「已断开」（跨实例，新实例管不到）。
+        self._terminating = True
+
         # ① 等 WS 启动 task 落定（`_runner` 由它赋值）
         if self._ws_task is not None:
             try:
@@ -5104,6 +5116,12 @@ class NetherLinkPlugin(Star):
                 )
             except Exception as e:
                 logger.warning(f"NetherLink: 关闭 MC 连接失败（忽略）: {e}")
+        # ②b **取消所有待确认的下线播报**：这些是「关闭之前就已挂着」的，
+        #     上面的 `_terminating` 只能挡住关闭过程中新产生的。
+        #     不取消的话，它们的 `_confirm_offline` 会在 5 秒后醒来、
+        #     查出「已不在线」（本实例的 `_mc_conns` 刚清空）并播一条下线。
+        for _sid in list(self._server_offline_tasks):
+            self._cancel_offline_broadcast(_sid)
         self._live_ws.clear()
         self._mc_conns.clear()
         self._port_owner.clear()
