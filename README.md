@@ -109,7 +109,6 @@ AstrBot 端与 MC 端都要配**端口**、**密钥**、**唤醒词**：
 
 跨服行只在**别的**服务器出现，本服玩家看不到自己服的消息被重复显示。目标服务器离线时不转发，也不会补发。
 
-
 ### 游戏内与 AI 对话
 
 以唤醒词开头，如 `ai 你好`、`ai 列出在线玩家`，回复显示在游戏里并同步到群。
@@ -309,7 +308,7 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | 配置项 | 说明 |
 |---|---|
 | `mc_command_tool_desc` | `mc_command` 的工具描述。**决定 AI 该拒绝哪些请求**，例如清空成就进度、召末影龙、破坏他人建筑，以及给管理员多宽松的尺度 |
-| `mc_command_cost_param_desc` | `mc_command` 的 **cost 参数说明**。**指令的好感价目表就在这里**：免费放行 / 趣味指令 / 按超标程度计价三类加具体价格 |
+| `mc_command_cost_param_desc` | `mc_command` 的 **cost 参数说明**。**指令的好感价目表就在这里**：计算流程、变量定义、分类细则与具体价格 |
 | `mc_command_cmd_param_desc` | `mc_command` 的 cmd 参数说明，游戏侧与 QQ 侧共用 |
 | `mc_command_server_param_desc` | `mc_command` 的 server 参数说明，仅 QQ 侧有该参数 |
 | `karma_tool_desc` | `mc_karma` 的工具描述 |
