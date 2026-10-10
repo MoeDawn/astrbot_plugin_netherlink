@@ -138,6 +138,10 @@ PANEL_AUDIT_LIMIT = 100
 # 详见 `terminate` 的 docstring：反顺序之后本不该真正用到，给短值是兜底，
 # 保证保存/卸载不会因为某条连接卡住而拖到一分钟。
 _WS_SHUTDOWN_TIMEOUT = 3.0
+
+# 服务器断开后**延迟多久确认**再播报（秒）。
+# 理由见 `_server_offline_tasks` 的注释：避开指数退避重连的抖动。
+_SERVER_OFFLINE_CONFIRM_DELAY = 5.0
 # 单独关一条 MC 连接的上限；超时只记日志（不强行中断 socket，不做私有 attr hack），
 # 整体卸载仍由 runner.cleanup() 的短超时兜底。
 _WS_CLOSE_TIMEOUT = 2.0
@@ -537,6 +541,17 @@ DEFAULT_BIND_HINT = '["",{"text":"✦ ","color":"gold","bold":true,"obfuscated":
 DEFAULT_BIND_SUCCESS_GAME = "玩家 {player} 已完成 QQ 绑定"
 DEFAULT_BIND_SUCCESS_QQ = "{qq_name} ({qq}) 已绑定游戏账号 {player}"
 
+# 跨服转发的四个模板（带 § 色码，由 MC 端渲染）。
+# ⚠️ 进/退服用**黄色 §e**（用户 2026-10-10 指定，与原版公告同色）。
+DEFAULT_CROSS_CHAT = '§9[{server}]§f <{player}> {text}'
+DEFAULT_CROSS_JOIN = '§e[{server}]§f {player} 加入了游戏'
+DEFAULT_CROSS_LEAVE = '§e[{server}]§f {player} 离开了游戏'
+DEFAULT_CROSS_DEATH = '§8[{server}]§f {message}'
+
+# 服务器上下线播报（推群，**不带 § 色码** —— 推群模板的惯例）。
+DEFAULT_SERVER_ONLINE = '[{server}] 服务器已连接'
+DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
+
 
 
 
@@ -872,6 +887,15 @@ class NetherLinkPlugin(Star):
         # 仍是旧字符串（AstrBot 只补缺失键、不覆盖已有值）——两种都要认。
         # 忽略名单：这些名字产生的 MC 事件一律丢弃。
         # 通用能力（排除机器人账号 / 小号），**不认识任何具体项目**。
+        # 服务器上下线播报（默认开）。
+        self.enable_server_status: bool = bool(
+            config.get("enable_server_status", True)
+        )
+        # 服务器之间消息转发（默认**关**）：单服部署下无效。
+        self.enable_cross_server: bool = bool(
+            config.get("enable_cross_server", False)
+        )
+
         self.mc_ignored_players: set = self._parse_csv(
             config.get("mc_ignored_players", [])
         )
@@ -1095,6 +1119,24 @@ class NetherLinkPlugin(Star):
                 config.get("template_bind_success_qq", DEFAULT_BIND_SUCCESS_QQ)
                 or DEFAULT_BIND_SUCCESS_QQ
             ),
+            # ---- 跨服转发（转到**其余**在线服务器，带 § 色码）----
+            "cross_chat": config.get("template_cross_chat", DEFAULT_CROSS_CHAT)
+            or DEFAULT_CROSS_CHAT,
+            "cross_join": config.get("template_cross_join", DEFAULT_CROSS_JOIN)
+            or DEFAULT_CROSS_JOIN,
+            "cross_leave": config.get("template_cross_leave", DEFAULT_CROSS_LEAVE)
+            or DEFAULT_CROSS_LEAVE,
+            "cross_death": config.get("template_cross_death", DEFAULT_CROSS_DEATH)
+            or DEFAULT_CROSS_DEATH,
+            # ---- 服务器上下线播报（推群，不带色码）----
+            "server_online": (
+                config.get("template_server_online", DEFAULT_SERVER_ONLINE)
+                or DEFAULT_SERVER_ONLINE
+            ),
+            "server_offline": (
+                config.get("template_server_offline", DEFAULT_SERVER_OFFLINE)
+                or DEFAULT_SERVER_OFFLINE
+            ),
         }
 
         # ---- 运行时状态 ----
@@ -1116,6 +1158,12 @@ class NetherLinkPlugin(Star):
         # 同 id 再连 = 断线重连（正常，替换旧的）；不同 id = 配置冲突（阶段 0：报错拒绝）。
         self._port_owner: dict = {}
         # 等待执行结果的指令：id -> asyncio.Future
+        # 已断开、等「延迟确认」的服务器：server_id -> asyncio.Task。
+        # ⚠️ MC 端重连是指数退避（3 秒起），网络抖一下就是「断开→3 秒后
+        #    重连」。立即播报会让群里看到「已断开」紧跟「已连接」。延迟窗口内
+        #    该 server_id 若重新握手成功就取消这条播报。
+        self._server_offline_tasks: dict = {}
+
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
         self._player_llm_locks: dict[str, asyncio.Lock] = {}
@@ -2224,6 +2272,8 @@ class NetherLinkPlugin(Star):
                         f"NetherLink: MC 服务器 [{server_id}] 握手成功"
                         f"（端口 {port}，上报名 {reported}）"
                     )
+                    # 上线立即播；顺带撤销可能还挂着的下线播报（重连）
+                    await self._broadcast_server_status(server_id, online=True)
                 elif not self._is_current_conn(server_id, ws):
                     continue  # 未握手、或已被重连替换的连接不发事件
 
@@ -2262,6 +2312,8 @@ class NetherLinkPlugin(Star):
             if self._port_owner.get(port) == server_id:
                 self._port_owner.pop(port, None)
             logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
+            # 下线**延迟确认**：抖动重连不该刷屏（见 _schedule_offline_broadcast）
+            self._schedule_offline_broadcast(server_id)
         return ws
 
     def _is_ignored_player(self, name) -> bool:
@@ -2371,8 +2423,110 @@ class NetherLinkPlugin(Star):
             else:
                 return
             await self._broadcast(text)
+            # 跨服转发（`enable_cross_server` 控）。接在这里的两个理由：
+            #   · 在 `_is_ignored_player` 之后 ⇒ 忽略名单自然生效
+            #   · 在门禁的提前 `return` 之后 ⇒ 被踢的玩家不转发到别的服
+            # ⚠️ 它与推群的开关**耦合**：某类事件的推群开关关着时，它也不会跨服
+            #    转发（那段 if/elif 是同一个分支）。要独立得重构那串分支。
+            await self._cross_forward(mtype, data, server_id)
         except Exception as e:
             logger.error(f"NetherLink: 处理 MC 事件 {mtype} 失败: {e}")
+
+    # ------------------------------------------------------------------
+    # 跨服互通
+    # ------------------------------------------------------------------
+    async def _broadcast_server_status(self, server_id: str, online: bool) -> None:
+        """服务器上线/下线时推送到所有绑定群（`enable_server_status` 控）。
+
+        🔴 **下线走延迟确认**（用户 2026-10-10 要求）：MC 端重连是指数退避
+        （3 秒起），网络抖一下就是「断开 → 3 秒后重连」，立即播报群里会看到
+        「已断开」紧跟「已连接」。所以断开时**先挂一个 task**，等
+        `_SERVER_OFFLINE_CONFIRM_DELAY` 秒；窗口内该 `server_id` 若重新握上手，
+        `_cancel_offline_broadcast` 把它取消。**上线立即播**。
+
+        ⚠️ 确认期结束时判的是「这个 server_id **现在**在不在线」，不是
+        「有没有收到过新的 join」——重连可能换了新的 ws 对象。
+        """
+        if not self.enable_server_status:
+            return
+        key = "server_online" if online else "server_offline"
+        try:
+            text = self._fmt(self.templates[key],
+                             server=self._mc_server_display(server_id))
+        except Exception as e:
+            logger.warning(f"NetherLink: 服务器状态播报渲染失败（忽略）: {e}")
+            return
+        await self._broadcast(text)
+
+    def _schedule_offline_broadcast(self, server_id: str) -> None:
+        """断开时挂一个「延迟确认」任务（见 `_broadcast_server_status`）。"""
+        if not self.enable_server_status:
+            return
+        self._cancel_offline_broadcast(server_id)
+        task = asyncio.create_task(self._confirm_offline(server_id))
+        self._server_offline_tasks[server_id] = task
+
+    def _cancel_offline_broadcast(self, server_id: str) -> None:
+        """取消某个 server_id 待确认的下线播报（重连成功 / 重复断开时）。"""
+        task = self._server_offline_tasks.pop(server_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _confirm_offline(self, server_id: str) -> None:
+        """等够确认窗口，若那台**仍不在线**就播报下线。"""
+        try:
+            await asyncio.sleep(_SERVER_OFFLINE_CONFIRM_DELAY)
+            if self._conn_closed(server_id):
+                await self._broadcast_server_status(server_id, online=False)
+        except asyncio.CancelledError:
+            # 重连成功时会被取消 —— **预期路径**，不进日志（CLAUDE.md 禁止吞取消）
+            raise
+        except Exception as e:
+            logger.warning(f"NetherLink: 下线播报失败（忽略）: {e}")
+        finally:
+            self._server_offline_tasks.pop(server_id, None)
+
+    async def _cross_forward(self, mtype: str, data: dict, server_id: str) -> None:
+        """把一条 MC 事件转发到**其余**在线服务器（`enable_cross_server` 控）。
+
+        只转 chat / join / leave / death。**不转** bot_chat / advancement：
+          · `bot_chat` 是唤醒词对话，转过去会成为**跨服 LLM 循环**的入口
+          · `advancement` 已有 AI 好感播报，再转一遍是噪声
+
+        🔴 **复用现有的 `chat` 下行帧**，不新增帧类型：下行 `chat` 在四端都不是
+        聊天事件（Paper 走 `getServer().broadcast`，Fabric / NeoForge 走
+        `broadcastSystemMessage`），**广播不触发 `AsyncChatEvent` /
+        `ServerChatEvent`**，所以 MC 端不会把跨服行再上报 —— 防循环天然成立。
+        代价是三个 MC 端**零改动**、不必重新编译。
+
+        ⚠️ 调用点在 `_dispatch_mc_event` 里、`_is_ignored_player` **之后**，
+        忽略名单自然生效。
+        """
+        if not self.enable_cross_server:
+            return
+        key = {"chat": "cross_chat", "join": "cross_join",
+               "leave": "cross_leave", "death": "cross_death"}.get(mtype)
+        if key is None:
+            return
+        try:
+            line = self._fmt(
+                self.templates[key],
+                server=self._mc_server_display(server_id),
+                player=data.get("player", "?"),
+                text=data.get("text", ""),
+                message=data.get("message", ""),
+            )
+        except Exception as e:
+            logger.warning(f"NetherLink: 跨服转发渲染失败（忽略）: {e}")
+            return
+        # ⚠️ **不发回来源服**（不回声）：三台在线时另外两台各收到一次。
+        for sid, conn in list(self._mc_conns.items()):
+            if sid == server_id or conn.closed:
+                continue
+            try:
+                await self._send_to_mc({"type": "chat", "line": line}, sid)
+            except Exception as e:
+                logger.warning(f"NetherLink: 跨服转发到 [{sid}] 失败（忽略）: {e}")
 
     def _mc_server_display(self, server_id: str = "") -> str:
         """对外展示与 LLM 上下文统一使用的服务器名（**只影响展示**）。

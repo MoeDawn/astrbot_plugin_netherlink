@@ -306,5 +306,53 @@
     "type": "string",
     "default": "{qq_name} ({qq}) 已绑定游戏账号 {player}",
     "hint": "占位符 {player} {qq} {qq_name}。留空回退默认值"
+  },
+  "enable_server_status": {
+    "description": "服务器上下线播报",
+    "type": "bool",
+    "default": true,
+    "hint": "【服务器状态】\n某台 MC 服务器连上或断开时推送到所有绑定群\n让群友能分辨「服里没人说话」和「插件断了」"
+  },
+  "template_server_online": {
+    "description": "服务器上线播报模板",
+    "type": "string",
+    "default": "[{server}] 服务器已连接",
+    "hint": "占位符 {server}。推群模板，不带 MC 颜色码"
+  },
+  "template_server_offline": {
+    "description": "服务器下线播报模板",
+    "type": "string",
+    "default": "[{server}] 服务器已断开",
+    "hint": "占位符 {server}。断开后延迟 5 秒确认再播，避开重连抖动"
+  },
+  "enable_cross_server": {
+    "description": "服务器之间消息转发",
+    "type": "bool",
+    "default": false,
+    "hint": "【服务器互通】\n一台服的聊天 / 进服 / 退服 / 死亡转发到其余在线服务器\n单服部署下此项无效。默认关"
+  },
+  "template_cross_chat": {
+    "description": "跨服：聊天转发模板",
+    "type": "string",
+    "default": "§9[{server}]§f <{player}> {text}",
+    "hint": "占位符 {server} {player} {text}。支持 MC 颜色码，由 MC 端渲染"
+  },
+  "template_cross_join": {
+    "description": "跨服：进服转发模板",
+    "type": "string",
+    "default": "§e[{server}]§f {player} 加入了游戏",
+    "hint": "占位符 {server} {player}。默认黄色，与原版进服公告同色"
+  },
+  "template_cross_leave": {
+    "description": "跨服：退服转发模板",
+    "type": "string",
+    "default": "§e[{server}]§f {player} 离开了游戏",
+    "hint": "占位符 {server} {player}。默认黄色，与原版退服公告同色"
+  },
+  "template_cross_death": {
+    "description": "跨服：死亡转发模板",
+    "type": "string",
+    "default": "§8[{server}]§f {message}",
+    "hint": "占位符 {server} {message}。死亡消息不包含坐标"
   }
 }
