@@ -354,5 +354,17 @@
     "type": "string",
     "default": "§8[{server}]§f {message}",
     "hint": "占位符 {server} {message}。死亡消息不包含坐标"
+  },
+  "enable_actions": {
+    "description": "结构化动作（令牌 + 参数）",
+    "type": "bool",
+    "default": true,
+    "hint": "【结构化动作】\n开启后按动作目录为 AI 注册独立工具：AI 只填参数，插件负责拼命令与校验\n关掉则只用 mc_command 手写指令。改动需重启或热重载"
+  },
+  "actions_file": {
+    "description": "动作目录文件路径",
+    "type": "string",
+    "default": "",
+    "hint": "留空用 data/plugin_data/netherlink/actions.yaml\n插件自带一份默认目录，首次启动落地一份（不覆盖已有）"
   }
 }

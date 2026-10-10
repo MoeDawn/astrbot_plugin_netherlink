@@ -34,6 +34,9 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+import action_tools
+import actions
+
 # ⚠️ `astrbot.api.web`（Plugin Pages 的响应 helper）**必须守卫式导入**：
 #    它比 metadata.yaml 声明的 `astrbot_version: ">=4.16,<5"` 新得多
 #    （Plugin Pages **需要较新版本**：真源码 tag `v4.27.4` **已含该功能**，
@@ -952,6 +955,10 @@ class NetherLinkPlugin(Star):
         self.enable_cross_server: bool = bool(
             config.get("enable_cross_server", False)
         )
+        # 结构化动作层：为 AI 注册「只填参数、插件拼命令」的动作工具。
+        self.enable_actions: bool = bool(config.get("enable_actions", True))
+        # 目录路径；留空用默认位置（data/plugin_data/netherlink/actions.yaml）
+        self.actions_file: str = str(config.get("actions_file") or "").strip()
 
         self.mc_ignored_players: set = self._parse_csv(
             config.get("mc_ignored_players", [])
@@ -1223,6 +1230,8 @@ class NetherLinkPlugin(Star):
         # 卸载中标志：置真后 `_schedule_offline_broadcast` 不再挂新任务。
         # 见 `terminate()` 的说明（重启时误报离线的根因）。
         self._terminating: bool = False
+        # 本插件注册的动作名（用于卸载 / 重载时清掉上一轮的，含已从目录删掉的）
+        self._action_tool_names: set = set()
 
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
@@ -1399,6 +1408,8 @@ class NetherLinkPlugin(Star):
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
         # 扫描过），因此放在 __init__ 末尾；失败不影响工具可用性
         self._apply_configured_tool_descs()
+        # 结构化动作工具：同样必须在 @filter.llm_tool 扫描完之后注册。
+        self._register_action_tools()
         # 游戏侧平台适配器：补写配置项 + 把适配器重新绑到本实例。
         # 放在最后：它依赖上面的配置解析结果（端口与显示名等）。
         self._init_game_platform()
@@ -1688,6 +1699,134 @@ class NetherLinkPlugin(Star):
             return bool(self._parse_config_records())
         except Exception:
             return True
+
+    def _actions_path(self) -> Path:
+        """动作目录的路径。配了用配的，否则默认在 plugin_data 下。"""
+        if self.actions_file:
+            return Path(self.actions_file)
+        return self._karma_dir / "actions.yaml"
+
+    def _ensure_actions_file(self, path: Path) -> None:
+        """首次启动把插件自带的默认目录**落地**一份。
+
+        ⚠️ 只落地、**从不覆盖**：这份文件是给人改的，覆盖等于删用户配置。
+        """
+        if path.exists():
+            return
+        src = Path(__file__).resolve().parent / "actions.default.yaml"
+        if not src.is_file():
+            logger.warning(f"NetherLink: 找不到默认动作目录 {src}，动作层不启用")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(src.read_bytes())
+            logger.info(f"NetherLink: 已落地默认动作目录 -> {path}")
+        except Exception as e:
+            logger.warning(f"NetherLink: 落地动作目录失败（忽略）: {e}")
+
+    def _unregister_action_tools(self) -> None:
+        """把本插件上一轮注册的动作工具从注册表里摘掉。
+
+        ⚠️ 为什么需要：`add_llm_tools` 只在**同名**时替换，而「上一轮注册过、
+        这一轮从目录里删掉了」的那条**不会**被替换 —— 不主动清就是**僵尸工具**：
+        AI 看得到它、能用它，但它已经不在目录里了（用户以为删掉了）。
+        """
+        if self.context is None or not self._action_tool_names:
+            return
+        try:
+            mgr = self.context.get_llm_tool_manager()
+        except Exception:
+            return
+        for name in list(self._action_tool_names):
+            try:
+                tool = mgr.get_func(name)
+                if tool is not None and self._is_our_action_tool(tool):
+                    mgr.remove_func(name)
+            except Exception as e:
+                logger.warning(f"NetherLink: 摘除动作工具 [{name}] 失败（忽略）: {e}")
+        self._action_tool_names.clear()
+
+    @staticmethod
+    def _is_our_action_tool(tool) -> bool:
+        """这个工具是不是**我们**注册的？
+
+        🔴 用 `handler_module_path` 而不是名字前缀：前缀会误伤用户自己起的
+        同名动作；module_path 是注册时由框架算出的归属标识。查不到时保守返回
+        False（**宁可留下一个僵尸工具，也不要摘掉别人的工具**）。
+        """
+        mp = str(getattr(tool, "handler_module_path", "") or "")
+        return bool(mp) and "astrbot_plugin_netherlink" in mp
+
+    def _register_action_tools(self) -> None:
+        """读目录 → 为每个动作注册一个 LLM 工具。
+
+        ⚠️ **任何失败都不连累插件启动**（本项目的既有约定），但必须有日志 ——
+        静默不注册的症状是「AI 说没有这个工具」，与「没配」长得一样。
+        """
+        if self.context is None:
+            return          # 测试替身没有工具管理器，静默跳过
+        # 先摘掉上一轮的（含已从目录删掉的），再注册这一轮的
+        self._unregister_action_tools()
+        if not self.enable_actions:
+            logger.info("NetherLink: 结构化动作层已关闭（enable_actions=false）")
+            return
+        path = self._actions_path()
+        self._ensure_actions_file(path)
+        try:
+            acts = actions.load_actions(str(path))
+        except actions.ActionError as e:
+            # 目录坏了要**响亮**：不注册任何动作，并说明是哪一条、为什么
+            logger.error(f"NetherLink: 动作目录不可用，本次不注册任何动作 —— {e}")
+            return
+        except Exception as e:
+            logger.error(f"NetherLink: 读取动作目录失败（本次不注册任何动作）: {e}")
+            return
+        if not acts:
+            logger.info(f"NetherLink: 动作目录 {path} 里没有动作")
+            return
+        try:
+            tools = [action_tools.make_tool(a, self) for a in acts]
+            self.context.add_llm_tools(*tools)
+            self._action_tool_names = {t.name for t in tools}
+            logger.info(
+                f"NetherLink: 已注册 {len(tools)} 个动作工具"
+                f"（{', '.join(sorted(self._action_tool_names))}）来自 {path}"
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 注册动作工具失败: {e}")
+
+    async def _run_action_tool(self, action, event, raw_params: dict) -> str:
+        """动作工具的执行入口。
+
+        ⚠️ 本函数只做到「校验 + 渲染 + 报价」并返回**给 AI 看的文本**；
+        真正的确认卡 / 下发在后续步骤接（第 4、5 步）。现在先把
+        「参数校验与渲染」这条路跑通，错误消息直接回给 AI 让它改参数重试。
+        """
+        try:
+            values = actions.validate_params(action, raw_params)
+        except actions.ActionError as e:
+            # 参数错的消息是**写给 AI 看的**，直接回
+            return f"参数有误：{e}"
+        try:
+            cmd = actions.render_command(action, values)
+        except actions.ActionError as e:
+            return f"内部错误（模板渲染）：{e}"
+        try:
+            cost = actions.resolve_karma(action, values,
+                                        raw_params.get("cost"))
+        except actions.ActionError as e:
+            return str(e)
+        # 第 4、5 步会在这里换成「发确认卡 → 等玩家点 → 执行」。
+        # 现在先如实回一条，避免 AI 以为已经执行了。
+        logger.info(
+            f"NetherLink: [动作预演] {action.name} 指令={cmd!r} "
+            f"好感={cost} 参数={values}"
+        )
+        return (
+            f"（未执行）动作 {action.name} 已通过校验：将执行 `{cmd}`，"
+            f"消耗 {cost} 好感。确认卡功能尚未接入，本次没有真正执行。"
+        )
+
 
     def _apply_configured_tool_descs(self) -> None:
         """用配置项覆盖工具 schema 的**描述与参数说明**。
@@ -5085,6 +5224,8 @@ class NetherLinkPlugin(Star):
         #    那条路会去挂一个 5 秒后触发的下线播报。不挡住它，新实例已播完
         #    「已连接」之后，这个孤儿任务还会再播一条「已断开」（跨实例，新实例管不到）。
         self._terminating = True
+        # 摘掉本插件注册的动作工具，否则热重载会留下僵尸工具
+        self._unregister_action_tools()
 
         # ① 等 WS 启动 task 落定（`_runner` 由它赋值）
         if self._ws_task is not None:

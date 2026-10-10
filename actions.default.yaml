@@ -1,0 +1,103 @@
+# NetherLink 结构化动作目录（默认值）
+#
+# 这是**给人改的**配置文件 —— 插件首次启动时会把它复制到
+#   data/plugin_data/netherlink/actions.yaml
+# 之后**只读那一份**（升级不覆盖）。
+#
+# 用途：把「命令文本的生成」从 AI 移出。AI 只填参数，插件按 template 拼命令
+# 并做校验。设计见 docs/superpowers/specs/2026-10-10-structured-actions-and-local-menu-design.md
+#
+# 改完要**重启或热重载**插件才生效。目录里有格式错时插件启动会**响亮报错**，
+# 不会静默跳过某一条。
+#
+# ---------------------------------------------------------------------------
+# 字段说明
+# ---------------------------------------------------------------------------
+#   name      工具名（AI 看到的就是它）。只允许小写字母/数字/下划线，字母开头。
+#             不要用 mc_command / mc_karma（与既有工具撞名）。
+#   label     给人看的名字
+#   desc      工具描述的开头（AI 靠它判断该不该用这个工具）
+#   params    参数表。每个参数：
+#               type      player | item_id | int | str
+#               required  必填？（**有 default 时不必写 required**）
+#               default   缺省值；写了它就不算必填
+#               min/max   仅 int
+#               max_len   仅 str
+#               desc      参数说明（进 JSON Schema，AI 看得到）
+#   template  命令模板。`{参数名}` 会被替换。**不带前导斜杠**。
+#             ⚠️ 占位符必须在 params 里有对应项，否则启动报错。
+#   karma     定价。三选一：
+#               model: none            免费
+#               model: fixed           写死（还要给 cost: <整数>）
+#               model: table_then_ai   表内查表；表外要 AI 按 pricing_rules 报价
+#             table_then_ai 还要给：
+#               table           {物品ID: 好感}
+#               pricing_rules   给 AI 看的报价规则（注入工具描述）
+#               table_key       用哪个参数查表（默认 item）
+#   confirm   是否先发确认卡（玩家点了才执行）
+#   done      完成播报模板
+# ---------------------------------------------------------------------------
+
+version: 1
+
+actions:
+  # -------------------------------------------------------------------------
+  # 给玩家物品
+  # -------------------------------------------------------------------------
+  # ⚠️ 本动作**只管「纯物品」**，不带自定义名称 / 附魔 / 属性。
+  #    那类请求属于「造物品」，价格量级不同且有物品复制风险（玩家先改名、
+  #    拿到物品、把原物品丢掉、再让 AI 改名 ⇒ 凭空多一件），必须另立
+  #    专用动作做原子操作。目前这类请求让它走 mc_command。
+  #    解释见 design spec §2.4。
+  - name: give_item
+    label: 给玩家物品
+    desc: >-
+      给玩家发放**普通物品**（不带自定义名称 / 附魔 / 属性）。
+      玩家要求这些东西时不要用本工具，改用 mc_command。
+    params:
+      player:
+        type: player
+        required: true
+        desc: 接收者的游戏 ID
+      item:
+        type: item_id
+        required: true
+        desc: 物品 ID，如 diamond 或 minecraft:diamond（不带组件的纯物品）
+      count:
+        type: int
+        min: 1
+        max: 6400
+        default: 1
+        desc: 数量，默认 1
+      cost:
+        type: int
+        min: 0
+        required: false
+        desc: >-
+          仅当物品**不在**下面的价目表里时才填 —— 按说明里的规则报价。
+          表内物品不用填（填了也会被忽略）。
+    template: "give {player} {item} {count}"
+    karma:
+      model: table_then_ai
+      table_key: item
+      table:
+        minecraft:diamond: 3
+        minecraft:golden_apple: 3
+        minecraft:dragon_egg: 20
+        minecraft:nether_star: 20
+        minecraft:elytra: 20
+        minecraft:netherite_ingot: 3
+        minecraft:enchanted_golden_apple: 3
+        minecraft:music_disc_pigstep: 3
+        minecraft:ancient_debris: 5
+        minecraft:heart_of_the_sea: 5
+      pricing_rules: |-
+        报价规则（物品不在上面的表里时，按它算出一个整数填进 cost）：
+        1 = 原版常见、易得的普通物品（木头、石头、泥土、食物、羊毛等）
+        2 = 需要挖掘或合成、但不算稀有的（铁、铜、红石、青金石、书等）
+        3 = 稀有或需要一定功夫的（金、绿宝石、钻石类工具装备、下界合金相关）
+        5 = 需要探索或定位才拿得到的（海洋之心、远古残骸、回响碎片等）
+        7 = 结构战利品或需要打 Boss 才有的（鞘翅、龙蛋、下界之星、附魔金苹果）
+        拿不准时按 3 算。**只给普通物品**；要求加名称/附魔/属性的一律改用 mc_command。
+    confirm: true
+    done: "{player} 花费 {cost} 好感获得 ⌜{item}⌟ ×{count}"
