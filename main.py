@@ -2653,6 +2653,17 @@ class NetherLinkPlugin(Star):
                     if self._is_ignored_player(data.get("player")):
                         continue
                     asyncio.create_task(self._handle_bot_chat(data, server_id))
+                elif mtype == "action_confirm":
+                    # 玩家点了菜单/确认按钮（MC 端轮询计分板发现 → 上报）。
+                    # ⚠️ **单独起 task**：这里要扣好感 + 下发指令，是慢操作（等回执），
+                    #    压在这条 WS 事件路径上会连累后续事件（与 advancement 同一处理）。
+                    asyncio.create_task(
+                        self._handle_action_confirm(
+                            str(data.get("player") or ""),
+                            data.get("token"),
+                            server_id,
+                        )
+                    )
                 else:
                     await self._dispatch_mc_event(mtype, data, server_id)
 
