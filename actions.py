@@ -49,6 +49,119 @@ _RE_PATH = re.compile(r"^[a-z0-9/._-]+$")
 _RE_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+@dataclass
+class PendingAction:
+    """一条「等玩家点确认」的请求。
+
+    🔴 **为什么要有它**：`click_event: run_command` 能跑的只有 0 权限的
+    `trigger <objective> set <整数>`（见 `docs/mc-26.3-spec.md` §1.11），
+    而动作参数是任意结构 —— 塞不进一个整数。所以计分板只传 `token`，
+    其余全存在这里。
+    """
+
+    token: int
+    action_name: str
+    values: dict
+    player: str
+    server_id: str
+    cost: int
+    cmd: str
+    deadline: float
+
+
+def new_token(counter: int) -> int:
+    """下一个 token。
+
+    ⚠️ **单调递增、绝不复用**：复用（或随机）都可能让「上一张过期卡的旧 token」
+    撞上「新卡」—— 玩家点旧按钮就执行了新请求。递增从根上避免这件事，
+    而且可复现（好写测试）。
+    """
+    return int(counter) + 1
+
+
+def prune_pending(pending: dict, now: float) -> dict:
+    """丢掉已过期的待确认项。返回**新**字典（不改原对象，便于调用方判断变化）。"""
+    return {k: v for k, v in pending.items() if v.deadline > now}
+
+
+def take_pending(pending: dict, player: str, token, now: float):
+    """取走**属于该玩家**的待确认项（取走即删除，防重复点击）。
+
+    返回 `(PendingAction | None, 可读的原因)`。
+
+    ⚠️ **必须校验玩家**：卡是私聊发的，但 token 是个整数、可被猜到或传抄。
+    只认「发起者本人」能显著缩小面（MC 端的触发词守卫是另一层，不能替代这里）。
+    """
+    try:
+        tk = int(token)
+    except (TypeError, ValueError):
+        return None, "确认码无效"
+    item = pending.get(tk)
+    if item is None:
+        return None, "确认已失效，请重新发起请求"
+    if item.player != player:
+        # ⚠️ 别人的确认不当自己的用；也**不删**它（那是他的，还没过期）
+        return None, "这不是你的确认请求"
+    if item.deadline <= now:
+        pending.pop(tk, None)
+        return None, "确认已过期，请重新发起请求"
+    pending.pop(tk, None)
+    return item, ""
+
+
+def tellraw_escape(text: str) -> str:
+    """把值里会破坏 JSON 的字符**转义**（不是替换）。
+
+    与 `main.py` 的 `_tellraw_json_escape` 同一课：真 26.3 实测，**结构双引号
+    完全没问题**，只有「值里的裸双引号」会报 `Expected literal ,`；
+    把它们换成单引号则会**静默改掉数据**（群名 `A"B` → `A'B`）。
+    """
+    return (text or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def hint_components_json(components) -> str:
+    """把组件映射渲染成 `show_item` 要的 **JSON 对象文本**。
+
+    🔴 实测过两件事（真 26.3）：
+      · `show_item` 是**平铺**的 —— `id` / `count` / `components` 与 `action`
+        同级，**不能**写 `value`（写成 value 会报 `No key id in MapLike`）
+      · `components` 是 **DataComponentPatch**（数据组件映射），
+        与 `/give` 的方括号语法**不同形状**
+    空组件必须给 `{}` —— 否则 `"components":` 后面什么都没有，JSON 直接坏。
+    """
+    if not components:
+        return "{}"
+    return json.dumps(components, ensure_ascii=False, separators=(",", ":"))
+
+
+def render_confirm_card(template: str, values: dict, *, item_id: str,
+                        count: int, cost: int, objective: str,
+                        token: int, components=None) -> str:
+    """按确认卡模板渲染出 `/tellraw` 的 JSON 文本。
+
+    与 `render_command` 同一口径：**显式替换，不用 `str.format`**。
+    """
+    vals = dict(values)
+    vals.update({
+        "item_id": item_id,
+        "count": count,
+        # ⚠️ `show_item.count` 上限 **99**（源码 `ExtraCodecs.intRange(1, 99)`），
+        #    超了**整张卡都发不出去**。所以展示用 count 单独夹一道。
+        "hint_count": max(1, min(int(count), 99)),
+        "hint_components": hint_components_json(components),
+        "cost": cost,
+        "objective": objective,
+        "confirm_code": token,
+    })
+    text = template
+    for k, v in vals.items():
+        text = text.replace("{" + str(k) + "}", str(v))
+    left = _RE_PLACEHOLDER.findall(text)
+    if left:
+        raise ActionError("确认卡模板渲染后仍残留占位符：%s" % ", ".join(left))
+    return text
+
+
 class ActionError(Exception):
     """参数或目录有问题。**调用方应当把 str(e) 原样回给 AI**，让它改参数重试。"""
 

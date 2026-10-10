@@ -366,5 +366,29 @@
     "type": "string",
     "default": "",
     "hint": "留空用 data/plugin_data/netherlink/actions.yaml\n插件自带一份默认目录，首次启动落地一份（不覆盖已有）"
+  },
+  "action_confirm_ttl": {
+    "description": "确认卡有效期",
+    "type": "int",
+    "default": 120,
+    "hint": "单位秒。过期后点击无效，玩家会收到一条提示让他重新发起"
+  },
+  "mc_menu_objective": {
+    "description": "菜单计分板名",
+    "type": "string",
+    "default": "netherlink_menu",
+    "hint": "确认按钮靠 trigger <它> set <token> 回传（玩家只有 0 权限，只能跑 trigger）\n必须与 MC 端配置里的同名项一致"
+  },
+  "template_action_confirm": {
+    "description": "动作确认卡模板",
+    "type": "string",
+    "default": "[\"\",{\"text\":\"\\u2726 \",\"color\":\"gold\",\"bold\":true},{\"text\":\"\\u786e\\u8ba4\\u8bf7\\u6c42 \",\"color\":\"yellow\",\"bold\":true},{\"text\":\"{item}\",\"color\":\"aqua\",\"bold\":true,\"hover_event\":{\"action\":\"show_item\",\"id\":\"{item_id}\",\"count\":{hint_count},\"components\":{hint_components}}},{\"text\":\" \\u00d7{count}\",\"color\":\"gray\",\"bold\":true},{\"text\":\"  \\u82b1\\u8d39 {cost} \\u597d\\u611f\",\"color\":\"gray\",\"bold\":true},{\"text\":\"  \",\"color\":\"white\"},{\"text\":\"[ \\u786e\\u8ba4 ]\",\"color\":\"green\",\"bold\":true,\"hover_event\":{\"action\":\"show_text\",\"value\":\"\\u70b9\\u51fb\\u6267\\u884c\"},\"click_event\":{\"action\":\"run_command\",\"command\":\"trigger {objective} set {confirm_code}\"}},{\"text\":\"  \",\"color\":\"white\"},{\"text\":\"[ \\u53d6\\u6d88 ]\",\"color\":\"red\",\"bold\":true,\"click_event\":{\"action\":\"run_command\",\"command\":\"trigger {objective} set 0\"}}]",
+    "hint": "必须是 /tellraw 的 JSON 数组。占位符 {item} {item_id} {count} {cost} {objective} {confirm_code} {hint_count} {hint_components}\nshow_item 是平铺的（不能写 value），show_text 要 value"
+  },
+  "template_action_done": {
+    "description": "动作完成播报模板",
+    "type": "string",
+    "default": "{player} 花费 {cost} 好感获得 ⌜{item}⌝ ×{count}",
+    "hint": "占位符 {player} {cost} {item} {count} {server}。推群模板，不带颜色码"
   }
 }

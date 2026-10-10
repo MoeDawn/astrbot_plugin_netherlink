@@ -604,6 +604,14 @@ DEFAULT_CROSS_DEATH = '§8[{server}]§f {message}'
 DEFAULT_SERVER_ONLINE = '[{server}] 服务器已连接'
 DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
 
+# 确认卡：私聊发给发起者，`show_item` 预览物品 + 两个按钮。
+# ⚠️ `show_item` 是**平铺**的（id/count/components 与 action 同级，无 value），
+#    而 `show_text` **要** value —— 同一个 hover_event 两种形状（真 26.3 实测）。
+DEFAULT_ACTION_CONFIRM = '["",{"text":"\\u2726 ","color":"gold","bold":true},{"text":"\\u786e\\u8ba4\\u8bf7\\u6c42 ","color":"yellow","bold":true},{"text":"{item}","color":"aqua","bold":true,"hover_event":{"action":"show_item","id":"{item_id}","count":{hint_count},"components":{hint_components}}},{"text":" \\u00d7{count}","color":"gray","bold":true},{"text":"  \\u82b1\\u8d39 {cost} \\u597d\\u611f","color":"gray","bold":true},{"text":"  ","color":"white"},{"text":"[ \\u786e\\u8ba4 ]","color":"green","bold":true,"hover_event":{"action":"show_text","value":"\\u70b9\\u51fb\\u6267\\u884c"},"click_event":{"action":"run_command","command":"trigger {objective} set {confirm_code}"}},{"text":"  ","color":"white"},{"text":"[ \\u53d6\\u6d88 ]","color":"red","bold":true,"click_event":{"action":"run_command","command":"trigger {objective} set 0"}}]'
+
+# 动作完成播报（推群）
+DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 ⌜{item}⌝ ×{count}'
+
 
 
 
@@ -959,6 +967,17 @@ class NetherLinkPlugin(Star):
         self.enable_actions: bool = bool(config.get("enable_actions", True))
         # 目录路径；留空用默认位置（data/plugin_data/netherlink/actions.yaml）
         self.actions_file: str = str(config.get("actions_file") or "").strip()
+        # 确认卡有效期（秒）。卡是私聊发的，玩家可能很久以后才点，
+        # 那时参数（如「给谁」）可能早已不合适 —— 所以要过期。
+        try:
+            _ttl = float(config.get("action_confirm_ttl", 120))
+        except (TypeError, ValueError):
+            _ttl = 120.0
+        self.action_confirm_ttl: float = _ttl if _ttl > 0 else 120.0
+        # 确认按钮靠 `trigger <objective> set <token>` 回传（0 权限）
+        self.mc_menu_objective: str = str(
+            config.get("mc_menu_objective") or "netherlink_menu"
+        ).strip() or "netherlink_menu"
 
         self.mc_ignored_players: set = self._parse_csv(
             config.get("mc_ignored_players", [])
@@ -1201,6 +1220,15 @@ class NetherLinkPlugin(Star):
                 config.get("template_server_offline", DEFAULT_SERVER_OFFLINE)
                 or DEFAULT_SERVER_OFFLINE
             ),
+            # ---- 结构化动作 ----
+            "action_confirm": (
+                config.get("template_action_confirm", DEFAULT_ACTION_CONFIRM)
+                or DEFAULT_ACTION_CONFIRM
+            ),
+            "action_done": (
+                config.get("template_action_done", DEFAULT_ACTION_DONE)
+                or DEFAULT_ACTION_DONE
+            ),
         }
 
         # ---- 运行时状态 ----
@@ -1232,6 +1260,12 @@ class NetherLinkPlugin(Star):
         self._terminating: bool = False
         # 本插件注册的动作名（用于卸载 / 重载时清掉上一轮的，含已从目录删掉的）
         self._action_tool_names: set = set()
+        # 待确认的动作：token(整数) -> actions.PendingAction
+        # 为什么要队列：确认按钮只能 `trigger <obj> set <整数>`（0 权限），
+        # 而动作参数是任意结构 —— 塞不进一个整数。
+        self._pending_actions: dict = {}
+        # token 计数器：**单调递增、绝不复用**（复用会让旧卡的 token 撞上新卡）
+        self._action_token_seq: int = 0
 
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
@@ -1796,37 +1830,158 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 注册动作工具失败: {e}")
 
     async def _run_action_tool(self, action, event, raw_params: dict) -> str:
-        """动作工具的执行入口。
+        """动作工具的执行入口（AI 调它时走这里）。
 
-        ⚠️ 本函数只做到「校验 + 渲染 + 报价」并返回**给 AI 看的文本**；
-        真正的确认卡 / 下发在后续步骤接（第 4、5 步）。现在先把
-        「参数校验与渲染」这条路跑通，错误消息直接回给 AI 让它改参数重试。
+        流程：校验 → 渲染 → 定价 → **需要确认就发卡、不执行**；不需要就直接执行。
+        ⚠️ 参数错的消息是**写给 AI 看的**，直接回，让它改参数重试。
         """
         try:
             values = actions.validate_params(action, raw_params)
         except actions.ActionError as e:
-            # 参数错的消息是**写给 AI 看的**，直接回
             return f"参数有误：{e}"
         try:
             cmd = actions.render_command(action, values)
         except actions.ActionError as e:
             return f"内部错误（模板渲染）：{e}"
         try:
-            cost = actions.resolve_karma(action, values,
-                                        raw_params.get("cost"))
+            cost = actions.resolve_karma(action, values, raw_params.get("cost"))
         except actions.ActionError as e:
             return str(e)
-        # 第 4、5 步会在这里换成「发确认卡 → 等玩家点 → 执行」。
-        # 现在先如实回一条，避免 AI 以为已经执行了。
+        if action.confirm:
+            return await self._offer_action_confirm(action, values, cost, cmd)
+        return await self._execute_action(action, values, cost, cmd,
+                                          server_id="")
+
+    async def _offer_action_confirm(self, action, values, cost, cmd) -> str:
+        """私聊发确认卡 + 登记待确认。**本函数绝不执行指令。**
+
+        执行发生在玩家点击之后（`_handle_action_confirm`）—— 这正是
+        「给物品要确认」的全部意义。
+        """
+        player = str(values.get("player") or "")
+        if not player:
+            return "参数有误：无法确定接收者，无法发起确认。"
+        now = time.monotonic()
+        token = actions.new_token(self._action_token_seq)
+        self._action_token_seq = token
+        # 顺手清掉已过期的，别让队列无限涨
+        self._pending_actions = actions.prune_pending(self._pending_actions, now)
+        self._pending_actions[token] = actions.PendingAction(
+            token=token,
+            action_name=action.name,
+            values=dict(values),
+            player=player,
+            server_id="",
+            cost=cost,
+            cmd=cmd,
+            deadline=now + self.action_confirm_ttl,
+        )
+        try:
+            card = actions.render_confirm_card(
+                self.templates["action_confirm"], values,
+                item_id=str(values.get("item") or ""),
+                count=int(values.get("count") or 1),
+                cost=cost,
+                objective=self.mc_menu_objective,
+                token=token,
+            )
+        except Exception as e:
+            self._pending_actions.pop(token, None)
+            logger.warning(f"NetherLink: 确认卡渲染失败: {e}")
+            return f"内部错误（确认卡渲染）：{e}"
+        ok = await self._send_to_mc(
+            {"type": "command", "id": uuid.uuid4().hex,
+             "cmd": f"tellraw {player} {card}"},
+            "",
+        )
+        if not ok:
+            self._pending_actions.pop(token, None)
+            return "MC 服务器不可用，确认卡没发出去，本次没有执行。"
         logger.info(
-            f"NetherLink: [动作预演] {action.name} 指令={cmd!r} "
-            f"好感={cost} 参数={values}"
+            f"NetherLink: 已发确认卡 | 玩家={player} 动作={action.name} "
+            f"好感={cost} token={token} 有效期={self.action_confirm_ttl:g}s"
         )
         return (
-            f"（未执行）动作 {action.name} 已通过校验：将执行 `{cmd}`，"
-            f"消耗 {cost} 好感。确认卡功能尚未接入，本次没有真正执行。"
+            f"已向 {player} 私聊发送确认卡（含物品预览，点「确认」才执行）。"
+            f"将执行：{cmd}；消耗 {cost} 好感。"
+            f"请等 {player} 点击后再回应，**不要声称已经完成**。"
         )
 
+    async def _handle_action_confirm(self, player: str, token,
+                                     server_id: str = "") -> str:
+        """玩家点了确认：取出待确认项并执行。返回给玩家的回话。
+
+        由 MC 端上报（计分板变更 → `action_confirm{player,token,server_id}`）调用。
+        """
+        if not self.enable_actions:
+            return ""
+        now = time.monotonic()
+        item, why = actions.take_pending(self._pending_actions, player, token, now)
+        if item is None:
+            await self._tell_player(player, why, server_id)
+            return why
+        act = self._find_action(item.action_name)
+        if act is None:
+            msg = "动作已不存在（目录可能改过），请重新发起请求。"
+            await self._tell_player(player, msg, server_id or item.server_id)
+            return msg
+        return await self._execute_action(act, item.values, item.cost, item.cmd,
+                                         server_id=server_id or item.server_id)
+
+    def _find_action(self, name: str):
+        """按名字从**当前**目录里找动作（不缓存：目录可改、重载后要拿新的）。"""
+        if not name:
+            return None
+        try:
+            for a in actions.load_actions(str(self._actions_path())):
+                if a.name == name:
+                    return a
+        except Exception as e:
+            logger.warning(f"NetherLink: 读动作目录失败（{name}）: {e}")
+        return None
+
+    async def _tell_player(self, player: str, text: str,
+                           server_id: str = "") -> None:
+        """私聊给某个玩家一句话（不广播）。用于告知「失效 / 过期 / 不是你的」。"""
+        if not player or not text:
+            return
+        try:
+            await self._send_to_mc(
+                {"type": "command", "id": uuid.uuid4().hex,
+                 "cmd": f"tell {player} {_strip_section_codes(text)}"},
+                server_id,
+            )
+        except Exception as e:
+            logger.warning(f"NetherLink: 私聊告知玩家失败（忽略）: {e}")
+
+    async def _execute_action(self, action, values, cost, cmd, event=None,
+                              server_id: str = "") -> str:
+        """执行一个动作：扣好感 + 下发指令 + 播报。
+
+        复用既有的 `exec_command_for`（原子扣费 + 失败退费 + 审计），
+        不另造一套 —— 那套已经有守卫盯着。
+        """
+        player = str(values.get("player") or "")
+        try:
+            out = await self.exec_command_for(
+                initiator=player, cmd=cmd, source="game",
+                cost=cost, server_id=server_id,
+            )
+        except Exception as e:
+            logger.error(f"NetherLink: 执行动作 {action.name} 失败: {e}")
+            return f"执行失败：{e}"
+        # 播报（模板可配）。失败不连累返回值。
+        try:
+            done = action.done or self.templates.get("action_done", "")
+            if done:
+                line = self._fmt(done, player=player, cost=cost,
+                                 item=str(values.get("item") or ""),
+                                 count=int(values.get("count") or 1),
+                                 server=self._mc_server_display(server_id))
+                await self._broadcast(line)
+        except Exception as e:
+            logger.warning(f"NetherLink: 动作完成播报失败（忽略）: {e}")
+        return out
 
     def _apply_configured_tool_descs(self) -> None:
         """用配置项覆盖工具 schema 的**描述与参数说明**。
@@ -5226,6 +5381,8 @@ class NetherLinkPlugin(Star):
         self._terminating = True
         # 摘掉本插件注册的动作工具，否则热重载会留下僵尸工具
         self._unregister_action_tools()
+        # 待确认的动作随卸载作废（新实例没有那些 token 的上下文）
+        self._pending_actions.clear()
 
         # ① 等 WS 启动 task 落定（`_runner` 由它赋值）
         if self._ws_task is not None:
