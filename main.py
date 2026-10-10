@@ -134,6 +134,14 @@ PANEL_AVAILABLE = (
 # 是因为面板要**夹**这个数：`?limit=` 是外部输入，不夹就会被 `<=0` 弄成空表。
 PANEL_AUDIT_LIMIT = 100
 
+# 卸载时等 WS 相关清理的上限（秒）。**远小于 aiohttp 默认的 60** ——
+# 详见 `terminate` 的 docstring：反顺序之后本不该真正用到，给短值是兜底，
+# 保证保存/卸载不会因为某条连接卡住而拖到一分钟。
+_WS_SHUTDOWN_TIMEOUT = 3.0
+# 单独关一条 MC 连接的上限；超时只记日志（不强行中断 socket，不做私有 attr hack），
+# 整体卸载仍由 runner.cleanup() 的短超时兜底。
+_WS_CLOSE_TIMEOUT = 2.0
+
 
 def _panel_unavailable() -> dict:
     """面板不可用时的兜底返回体。
@@ -1009,6 +1017,15 @@ class NetherLinkPlugin(Star):
 
         # ---- 运行时状态 ----
         self._runner: Optional[web.AppRunner] = None
+        # `_start_ws_server` 那个 task。**必须存引用**：卸载时要等它跑完，
+        # 否则 `_runner` 可能还没被赋值（task 尚未执行到那一行），
+        # runner 就漏了 cleanup —— 端口不释放，重装时报 address already in use。
+        self._ws_task: Optional[asyncio.Task] = None
+        # **所有还活着的 ws**（含尚未握手的）。`_mc_conns` 只装握过手的，
+        # 而卸载时要关的是一切还在跑的连接 —— 否则 aiohttp 的
+        # `runner.cleanup()` 会为那条连接等满它的 shutdown_timeout。
+        # 2026-10-10 实测：漏掉未握手的连接，卸载仍要 6 秒。
+        self._live_ws: set = set()
         # 已握手的 MC 连接：server_id -> McConn（多服并存）。
         # 早先这里是单个 `_mc_ws` 字段，第二台服务器连入会踢掉第一台，
         # 而两端都会重连，于是形成**永不停止的互踢**（见 docs/multi-server-plan.md）。
@@ -1187,7 +1204,8 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.debug(f"NetherLink: 配置差异检查失败（忽略）: {e}")
 
-        asyncio.create_task(self._start_ws_server())
+        # 存引用而不是裸 create_task：卸载时要 await 它（见 terminate）。
+        self._ws_task = asyncio.create_task(self._start_ws_server())
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
         # 扫描过），因此放在 __init__ 末尾；失败不影响工具可用性
         self._apply_configured_tool_descs()
@@ -1904,7 +1922,11 @@ class NetherLinkPlugin(Star):
 
         app = web.Application()
         app.router.add_get("/ws", self._ws_handler)
-        self._runner = web.AppRunner(app)
+        # ⚠️ 显式给短 `shutdown_timeout`：默认是 **60 秒**（aiohttp
+        # web_runner.py），只要还有挂起的 WS handler 就会等满它。
+        # 正常情况下 terminate 已经**先**主动关了连接，这里不会真正用到；
+        # 给短值是兜底——万一还有别的挂起请求，也不该把保存/卸载拖 60 秒。
+        self._runner = web.AppRunner(app, shutdown_timeout=_WS_SHUTDOWN_TIMEOUT)
         await self._runner.setup()
         for label, port in self.ws_bindings:
             tag = f"[{label}] " if label else ""
@@ -2001,8 +2023,26 @@ class NetherLinkPlugin(Star):
         return conn is not None and conn.ws is ws
 
     async def _ws_handler(self, request):
+        """WS 入口：登记连接 → 交给 `_ws_session` → **保证注销**。
+
+        🔴 **为什么拆成两层**：`_ws_session` 里有 4 个提前 `return`（token 失败、
+        端口冲突、重连替换…）。在这 4 处各写一遍注销，漏一个就等于没做；
+        `try/finally` 一处就够。
+
+        ⚠️ 登记的是**所有**活连接（含尚未握手的）——`_mc_conns` 里只有握过手的，
+        而卸载时要关的是一切还在跑的：漏掉未握手的，aiohttp 会为它等满
+        `shutdown_timeout`（2026-10-10 实测 6 秒）。
+        """
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
+        self._live_ws.add(ws)
+        try:
+            return await self._ws_session(ws, request)
+        finally:
+            self._live_ws.discard(ws)
+
+    async def _ws_session(self, ws, request):
+        """一条 WS 连接的实际处理（握手 / 事件循环 / 断开清理）。"""
         # 本连接的本地端口——路线 A 里它就是身份的来源
         try:
             port = int(request.transport.get_extra_info("sockname")[1])
@@ -4704,17 +4744,59 @@ class NetherLinkPlugin(Star):
     # 生命周期
     # ------------------------------------------------------------------
     async def terminate(self):
-        """插件卸载/停用时清理：关闭 WS、取消挂起的指令、好感度落盘。"""
-        if self._runner:
-            await self._runner.cleanup()
-        for conn in list(self._mc_conns.values()):
-            if not conn.closed:
-                try:
-                    await conn.ws.close()
-                except Exception as e:
-                    logger.warning(f"NetherLink: 关闭 MC 连接失败（忽略）: {e}")
+        """插件卸载/停用时清理：关闭 WS、取消挂起的指令、好感度落盘。
+
+        🔴 **顺序是有讲究的：先关连接，最后才 `runner.cleanup()`**。
+        aiohttp 的 `AppRunner.cleanup()` 内部会 `await self._server.shutdown(60.0)`，
+        而只要还有**挂起的 WS handler**，它就把那 60 秒**等满**
+        （`web_runner.py` 的 `shutdown_timeout: float = 60.0`）。
+        我们下一句明明就能把连接关掉 —— 反过来的顺序会让每次保存/卸载卡
+        50 多秒（2026-10-10 用户实测）。
+
+        ⚠️ **先等 `_ws_task`**：`_runner` 由那个 task 赋值，不等它可能还是 None，
+        于是 runner 漏了 cleanup、**端口不释放**（重装时 address already in use）。
+        """
+        # ① 等 WS 启动 task 落定（`_runner` 由它赋值）
+        if self._ws_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._ws_task), timeout=_WS_SHUTDOWN_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("NetherLink: 等待 WS 启动任务超时（继续清理）")
+            except Exception as e:
+                # 起不来也不影响后面的清理。⚠️ 不显式捕 CancelledError——
+                # 吞掉取消会让取消方永远等不到本任务结束。
+                logger.debug(f"NetherLink: WS 启动任务结束（{e}）")
+            self._ws_task = None
+
+        # ② **先**主动关掉所有还活着的连接 —— 这一步做完，aiohttp 那边就没有
+        #    「in-progress handler」可等了，cleanup 会立刻返回。
+        #    ⚠️ 关的是 `_live_ws`（**所有**活连接），不是 `_mc_conns`（只装握过手的）：
+        #    「刚连上、还没发 hello」的连接不在后者里，漏掉它卸载仍要等
+        #    shutdown_timeout（2026-10-10 实测 6 秒）。
+        for ws in list(self._live_ws):
+            try:
+                await asyncio.wait_for(ws.close(), timeout=_WS_CLOSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                # 单个 socket 卡住不该拖住整体卸载。**不动私有属性**强关：
+                # 整体兜底交给下面 runner 的短超时。
+                logger.warning(
+                    f"NetherLink: 关闭 MC 连接超时（{_WS_CLOSE_TIMEOUT}s，忽略）"
+                )
+            except Exception as e:
+                logger.warning(f"NetherLink: 关闭 MC 连接失败（忽略）: {e}")
+        self._live_ws.clear()
         self._mc_conns.clear()
         self._port_owner.clear()
+
+        # ③ **最后**才 cleanup：此时已无挂起 handler，会立即返回
+        if self._runner:
+            try:
+                await self._runner.cleanup()
+            except Exception as e:
+                logger.warning(f"NetherLink: 关闭 WS 服务端失败（忽略）: {e}")
+            self._runner = None
         for fut in self._pending_cmds.values():
             if not fut.done():
                 fut.cancel()
