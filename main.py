@@ -1860,11 +1860,27 @@ class NetherLinkPlugin(Star):
         except actions.ActionError as e:
             return str(e)
         if action.confirm:
-            return await self._offer_action_confirm(action, values, cost, cmd)
-        return await self._execute_action(action, values, cost, cmd,
-                                          server_id="")
+            return await self._offer_action_confirm(action, values, cost, cmd, event)
+        return await self._execute_action(action, values, cost, cmd, event)
 
-    async def _offer_action_confirm(self, action, values, cost, cmd) -> str:
+    def _action_server_id(self, event) -> str:
+        """这次动作该发往哪台 MC 服务器。
+
+        🔴 **必须取来源服**（`netherlink_ctx.server_id`），不能留空 ——
+        留空时 `_send_to_mc` 在多台在线时会**拒发**（那是刻意的保护：
+        宁可丢一条也不要把指令发到错的服务器上）。用户实测两台服在线时
+        就是这个症状：确认卡发不出去、AI 如实回「服务器不可用」。
+
+        QQ 侧发起时没有来源服（`event` 为 None 或不是游戏侧）——
+        那正是 `_send_to_mc` 空串语义该生效的场合。
+        """
+        try:
+            ident = self._game_identity_from(event) if event is not None else None
+        except Exception:
+            ident = None
+        return str(ident.get("server_id") or "") if ident else ""
+
+    async def _offer_action_confirm(self, action, values, cost, cmd, event) -> str:
         """私聊发确认卡 + 登记待确认。**本函数绝不执行指令。**
 
         执行发生在玩家点击之后（`_handle_action_confirm`）—— 这正是
@@ -1873,6 +1889,7 @@ class NetherLinkPlugin(Star):
         player = str(values.get("player") or "")
         if not player:
             return "参数有误：无法确定接收者，无法发起确认。"
+        server_id = self._action_server_id(event)
         now = time.monotonic()
         token = actions.new_token(self._action_token_seq)
         self._action_token_seq = token
@@ -1883,7 +1900,7 @@ class NetherLinkPlugin(Star):
             action_name=action.name,
             values=dict(values),
             player=player,
-            server_id="",
+            server_id=server_id,
             cost=cost,
             cmd=cmd,
             deadline=now + self.action_confirm_ttl,
@@ -1904,7 +1921,7 @@ class NetherLinkPlugin(Star):
         ok = await self._send_to_mc(
             {"type": "command", "id": uuid.uuid4().hex,
              "cmd": f"tellraw {player} {card}"},
-            "",
+             server_id,
         )
         if not ok:
             self._pending_actions.pop(token, None)
@@ -1973,6 +1990,10 @@ class NetherLinkPlugin(Star):
         复用既有的 `exec_command_for`（原子扣费 + 失败退费 + 审计），
         不另造一套 —— 那套已经有守卫盯着。
         """
+        # ⚠️ 留空会走 `_send_to_mc` 的「未指定目标」保护（多台在线时拒发）。
+        #    先从事件取来源服，仍为空才交给空串语义（QQ 侧发起的场合）。
+        if not server_id:
+            server_id = self._action_server_id(event)
         player = str(values.get("player") or "")
         try:
             out = await self.exec_command_for(
