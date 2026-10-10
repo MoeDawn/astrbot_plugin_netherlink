@@ -53,10 +53,8 @@ _RE_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 class PendingAction:
     """一条「等玩家点确认」的请求。
 
-    🔴 **为什么要有它**：`click_event: run_command` 能跑的只有 0 权限的
-    `trigger <objective> set <整数>`（见 `docs/mc-26.3-spec.md` §1.11），
-    而动作参数是任意结构 —— 塞不进一个整数。所以计分板只传 `token`，
-    其余全存在这里。
+    MC 端渲染卡片时把 `token` **捕获进点击回调的闭包**，点击后回报
+    `action_result{token}`；这里按 token 找回整条请求（含要执行的 steps）。
     """
 
     token: int
@@ -69,13 +67,13 @@ class PendingAction:
     deadline: float
 
 
-# 确认卡 token 的起点。**必须与 MC 端本地菜单的码分开**：
-# `netherlink-plugin` 的菜单码是 1 / 10 / 1000+i（都 < 10000），它按
-# 「< 10000 ⇒ 菜单码，本地消费；>= 10000 ⇒ 确认卡 token，上报」分流。
-# 两边共用一个 trigger objective，靠**数值区间**区分，所以这里绝不能从 1 起
-# —— 否则第一张确认卡的 token 就是 1，玩家点了会去开菜单。
-# MC 端有个同名常量 `CONFIRM_TOKEN_BASE`，改动要同步（守卫
-# `test_confirm_token_base_matches_the_mc_side_menu_codes`）。
+# 确认卡 token 的起点。
+#
+# ⚠️ 历史：早先确认卡与本地菜单**共用一个 trigger 计分板**，靠数值区间分流
+# （菜单码 < 10000 / 确认卡 >= 10000），所以这里必须从 10000 起。
+# 2026-10-11 起**菜单与确认卡都改走 Paper 的点击回调**（`ClickEvent.callback`，
+# 真人验证可用），计分板整体退役 —— 但 token 起点**保持不变**：已有的
+# `_pending_actions` 键空间与测试都按它写，没有理由动。
 TOKEN_BASE = 10000
 
 
@@ -86,7 +84,7 @@ def new_token(counter: int) -> int:
     撞上「新卡」—— 玩家点旧按钮就执行了新请求。递增从根上避免这件事，
     而且可复现（好写测试）。
 
-    ⚠️ 从 1 起会把整个 `1..9999` 区间让给 MC 端菜单码 —— 见 `TOKEN_BASE`。
+    起点见 `TOKEN_BASE`。
     """
     return max(int(counter), TOKEN_BASE - 1) + 1
 
@@ -121,59 +119,6 @@ def take_pending(pending: dict, player: str, token, now: float):
     return item, ""
 
 
-def tellraw_escape(text: str) -> str:
-    """把值里会破坏 JSON 的字符**转义**（不是替换）。
-
-    与 `main.py` 的 `_tellraw_json_escape` 同一课：真 26.3 实测，**结构双引号
-    完全没问题**，只有「值里的裸双引号」会报 `Expected literal ,`；
-    把它们换成单引号则会**静默改掉数据**（群名 `A"B` → `A'B`）。
-    """
-    return (text or "").replace("\\", "\\\\").replace('"', '\\"')
-
-
-def hint_components_json(components) -> str:
-    """把组件映射渲染成 `show_item` 要的 **JSON 对象文本**。
-
-    🔴 实测过两件事（真 26.3）：
-      · `show_item` 是**平铺**的 —— `id` / `count` / `components` 与 `action`
-        同级，**不能**写 `value`（写成 value 会报 `No key id in MapLike`）
-      · `components` 是 **DataComponentPatch**（数据组件映射），
-        与 `/give` 的方括号语法**不同形状**
-    空组件必须给 `{}` —— 否则 `"components":` 后面什么都没有，JSON 直接坏。
-    """
-    if not components:
-        return "{}"
-    return json.dumps(components, ensure_ascii=False, separators=(",", ":"))
-
-
-def render_confirm_card(template: str, values: dict, *, item_id: str,
-                        count: int, cost: int, objective: str,
-                        token: int, components=None) -> str:
-    """按确认卡模板渲染出 `/tellraw` 的 JSON 文本。
-
-    与 `render_command` 同一口径：**显式替换，不用 `str.format`**。
-    """
-    vals = dict(values)
-    vals.update({
-        "item_id": item_id,
-        "count": count,
-        # ⚠️ `show_item.count` 上限 **99**（源码 `ExtraCodecs.intRange(1, 99)`），
-        #    超了**整张卡都发不出去**。所以展示用 count 单独夹一道。
-        "hint_count": max(1, min(int(count), 99)),
-        "hint_components": hint_components_json(components),
-        "cost": cost,
-        "objective": objective,
-        "confirm_code": token,
-    })
-    text = template
-    for k, v in vals.items():
-        text = text.replace("{" + str(k) + "}", str(v))
-    left = _RE_PLACEHOLDER.findall(text)
-    if left:
-        raise ActionError("确认卡模板渲染后仍残留占位符：%s" % ", ".join(left))
-    return text
-
-
 class ActionError(Exception):
     """参数或目录有问题。**调用方应当把 str(e) 原样回给 AI**，让它改参数重试。"""
 
@@ -190,6 +135,8 @@ class Action:
     karma: dict = field(default_factory=dict)
     confirm: bool = False          # 是否需要确认卡
     done: str = ""                 # 完成播报模板
+    apply: list = field(default_factory=list)   # 展开成 steps 的规则（spec §10）
+    card: dict = field(default_factory=dict)    # 卡片版式（由 MC 渲染）
 
     @property
     def pricing_rules(self) -> str:
@@ -242,9 +189,15 @@ def parse_actions(doc) -> list:
             params = {}
         if not isinstance(params, dict):
             raise ActionError("动作 %r 的 params 必须是映射" % name)
+        # ⚠️ `template` 与 `apply` **二选一**：
+        #   · 老形态：`template` + 一条命令（AstrBot 拼好整串，MC 只执行）
+        #   · 新形态：`apply` 展开成多步（check/clear/give，MC 按序执行）
+        #   两者都没有 ⇒ 这条动作什么也不做，属于配置错误。
         template = str(item.get("template") or "")
-        if not template:
-            raise ActionError("动作 %r 缺 template" % name)
+        apply_rules = item.get("apply")
+        if not template and not apply_rules:
+            raise ActionError("动作 %r 既没有 template 也没有 apply" % name)
+        apply_rules = apply_rules or []
 
         # 模板里的占位符必须都在 params 里（否则渲染出字面量 `{x}` 发给玩家）
         for ph in _RE_PLACEHOLDER.findall(template):
@@ -267,6 +220,36 @@ def parse_actions(doc) -> list:
         if model == "fixed" and not isinstance(karma.get("cost"), int):
             raise ActionError("动作 %r 的 karma.model=fixed 时必须给整数 cost" % name)
 
+        # 🔴 **apply 的引用在**解析期**就查** —— 坏目录要在启动时报，
+        #    不能等玩家请求了才炸（那症状是「AI 说没这个能力」，与「压根没写」
+        #    长得一样，无从排查）。与 params 的占位符校验同一口径。
+        if apply_rules:
+            if not isinstance(apply_rules, list):
+                raise ActionError("动作 %r 的 apply 必须是列表" % name)
+            for k, rule in enumerate(apply_rules):
+                if not isinstance(rule, dict):
+                    raise ActionError("动作 %r 的 apply 第 %d 条不是映射" % (name, k + 1))
+                op = str(rule.get("op") or "")
+                if op not in ("check", "clear", "give"):
+                    raise ActionError(
+                        "动作 %r 的 apply 第 %d 条 op 只能是 check/clear/give，实际 %r"
+                        % (name, k + 1, op))
+                src = str(rule.get("from") or "")
+                if src not in params:
+                    raise ActionError(
+                        "动作 %r 的 apply 第 %d 条 from=%r，但 params 里没有这一项"
+                        % (name, k + 1, src))
+                cf = str(rule.get("count_from") or "")
+                if cf and cf not in params:
+                    raise ActionError(
+                        "动作 %r 的 apply 第 %d 条 count_from=%r，但 params 里没有这一项"
+                        % (name, k + 1, cf))
+
+        if item.get("confirm") and not (item.get("apply")):
+            # ⚠️ 需要确认却没有 apply ⇒ 玩家点确认后无事可做（静默空转）。
+            #    这类「配了但没生效」正是本项目最怕的失败模式，宁可启动就报。
+            raise ActionError("动作 %r 声明了 confirm 但没有 apply（点确认后无事可做）" % name)
+
         out.append(Action(
             name=name,
             label=str(item.get("label") or name),
@@ -276,6 +259,8 @@ def parse_actions(doc) -> list:
             karma=karma,
             confirm=bool(item.get("confirm", False)),
             done=str(item.get("done") or ""),
+            apply=item.get("apply") or [],
+            card=item.get("card") or {},
         ))
     return out
 
@@ -393,6 +378,11 @@ def _coerce(spec: dict, value, pname: str):
         return normalize_item_id(value)
     if t == "int":
         return normalize_int(value, spec.get("min"), spec.get("max"))
+    if t == "item_list":
+        # 只做**校验**（坏条目立刻报），返回值仍是原串 —— 展开成条目在
+        # `expand_item_list` 里做（那时才知道要不要带显示名）。
+        expand_item_list(value)
+        return str(value).strip()
     if t == "str":
         s = str(value)
         mx = spec.get("max_len")
@@ -400,6 +390,189 @@ def _coerce(spec: dict, value, pname: str):
             raise ActionError("参数 %s 太长（%d > %d）" % (pname, len(s), mx))
         return s
     raise ActionError("参数 %s 的类型 %r 不受支持" % (pname, t))
+
+
+# ---------------------------------------------------------------------------
+# 展开成 MC 可执行的 steps + 卡片数据（spec §10）
+# ---------------------------------------------------------------------------
+#
+# 🔴 **为什么由 AstrBot 展开、而不是 MC 端读模板**：
+#    MC 端只认识 `check` / `clear` / `give` 三种原子操作，**不认识动作名**。
+#    动作定义（这条动作要做什么）只有 AstrBot 一份 —— 加新动作**不用改 MC**，
+#    也不存在「两处模板必然漂移」那个坑。
+#
+# 🔴 **`check` 必须排在所有 `clear` 之前**：
+#    实测（Paper 26.3 + 真玩家）`clear <玩家> 钻石 5` 在玩家只有 2 个时
+#    **会清光 2 个**（不是原子失败）。所以「够不够」必须**先一次性问清**，
+#    全通过才开始扣 —— 否则会出现「扣了一半、后面缺料」的半成品状态。
+
+def expand_item_list(raw_value) -> list:
+    """把 `id*数量=显示名; id*数量=显示名` 解析成 `[{id, count, name}]`。
+
+    格式（用户 2026-10-10 指定）：
+      `minecraft:emerald*8=绿宝石原矿; minecraft:echo_shard*2=回响碎片`
+
+    - 条目用 `;` 分隔
+    - 每条：`id [*数量] [=显示名]`；数量省略 = 1
+    - **任一坏条目 ⇒ 整体抛错**（fail-closed，与其它参数同口径）
+    """
+    s = str(raw_value or "").strip()
+    if not s:
+        raise ActionError("物品列表不能为空")
+    out = []
+    for part in s.split(";"):
+        piece = part.strip()
+        if not piece:
+            continue
+        name = ""
+        if "=" in piece:
+            piece, name = piece.split("=", 1)
+            name = name.strip()
+            if len(name) > 24:
+                raise ActionError("显示名太长（%d > 24）：%r" % (len(name), name))
+        count = 1
+        if "*" in piece:
+            piece, cnt = piece.rsplit("*", 1)
+            cnt = cnt.strip()
+            if not re.match(r"^\d+$", cnt):
+                raise ActionError("数量必须是整数：%r" % cnt)
+            count = int(cnt)
+            if count < 1:
+                raise ActionError("数量必须 >= 1：%d" % count)
+        out.append({
+            "id": normalize_item_id(piece.strip()),
+            "count": count,
+            "name": name,
+        })
+    if not out:
+        raise ActionError("物品列表解析后是空的：%r" % s)
+    return out
+
+
+def expand_steps(action: "Action", values: dict) -> list:
+    """按 `action.apply` 把动作展开成 MC 可执行的步骤列表。
+
+    每步形如 `{"op": "check"|"clear"|"give", "item": ..., "count": ...,
+    "name": ...}`。`name` 只用于 MC 端「材料不足」的私聊文案。
+
+    `apply` 里的 `from` 指向某个**参数名**，其值可以是：
+      · `item_list`（解析成多条，每样一条 step）
+      · `item_id`（单条）
+    """
+    rules = action.apply
+    if not isinstance(rules, list) or not rules:
+        raise ActionError("动作 %r 没有 apply，无法展开成步骤" % action.name)
+    steps = []
+    checks = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ActionError("动作 %r 的第 %d 条 apply 不是映射" % (action.name, i + 1))
+        op = str(rule.get("op") or "")
+        if op not in ("check", "clear", "give"):
+            raise ActionError("动作 %r 的 apply 里 op 只能是 check/clear/give，实际 %r"
+                              % (action.name, op))
+        src = str(rule.get("from") or "")
+        spec = action.params.get(src)
+        if spec is None:
+            raise ActionError("动作 %r 的 apply 指向了不存在的参数 %r" % (action.name, src))
+        val = values.get(src)
+        if val in (None, ""):
+            continue
+        typ = str(spec.get("type") or "str")
+        if typ == "item_list":
+            items = expand_item_list(val)
+        elif typ == "item_id":
+            # 数量可能来自另一个参数（`give_item` 的 item 与 count 是分开的两个参数）
+            cnt_from = str(rule.get("count_from") or "")
+            if cnt_from:
+                if cnt_from not in action.params:
+                    raise ActionError(
+                        "动作 %r 的 apply 里 count_from 指向了不存在的参数 %r"
+                        % (action.name, cnt_from)
+                    )
+                try:
+                    cnt = int(values.get(cnt_from) or 1)
+                except (TypeError, ValueError):
+                    raise ActionError(
+                        "动作 %r 的 %s 不是整数，无法当数量" % (action.name, cnt_from)
+                    )
+            else:
+                try:
+                    cnt = int(rule.get("count") or 1)
+                except (TypeError, ValueError):
+                    raise ActionError(
+                        "动作 %r 的 apply 里 count 必须是整数" % action.name
+                    )
+            items = [{"id": str(val), "count": cnt, "name": ""}]
+        else:
+            raise ActionError(
+                "动作 %r 的 apply 只能引用物品类参数（item_list / item_id），"
+                "实际是 %r" % (action.name, typ)
+            )
+        for it in items:
+            step = {"op": op, "item": it["id"], "count": it["count"]}
+            if it.get("name"):
+                step["name"] = it["name"]
+            # ⚠️ 所有 check 收进前面的桶，保证「全查完才扣」
+            (checks if op == "check" else steps).append(step)
+    return checks + steps
+
+
+def build_card(action: "Action", values: dict, cost: int) -> dict:
+    """产出给 MC 端渲染卡片的**数据**（不是 tellraw JSON）。
+
+    MC 端用 Adventure 构造可点击组件 —— 它能把 token 捕获进闭包，
+    所以**不需要计分板**（见 spec §10.5）。
+    """
+    spec = action.card if isinstance(action.card, dict) else {}
+    title = str(spec.get("title") or action.label or action.name)
+    lines = []
+
+    # 物品类参数：按声明顺序，每个 item_list / item_id 出一行
+    for pname, pspec in action.params.items():
+        val = values.get(pname)
+        if val in (None, ""):
+            continue
+        ptype = str(pspec.get("type") or "")
+        if ptype == "item_list":
+            items = expand_item_list(val)
+        elif ptype == "item_id":
+            # 数量参数（若 apply 里声明了 count_from）—— 卡片要显示真实数量
+            cnt = 1
+            for rule in action.apply:
+                if (isinstance(rule, dict) and rule.get("from") == pname
+                        and rule.get("count_from")):
+                    try:
+                        cnt = int(values.get(rule["count_from"]) or 1)
+                    except (TypeError, ValueError):
+                        cnt = 1
+                    break
+            items = [{"id": str(val), "count": cnt, "name": ""}]
+        else:
+            continue
+        lines.append({
+            # 标签可用 card.<参数名>_label 覆盖，否则用参数名
+            "label": str(spec.get(pname + "_label") or pspec.get("label") or pname),
+            "items": items,
+        })
+
+    # 非物品参数里显眼的也带上（如改名动作的 custom_name）
+    for pname, pspec in action.params.items():
+        if str(pspec.get("type") or "") not in ("str",) or pname == "player":
+            continue
+        val = values.get(pname)
+        if val:
+            lines.append({"label": str(pspec.get("label") or pname), "text": str(val)})
+
+    out = {"title": title, "lines": lines}
+    if cost:
+        out["cost"] = "{cost} 好感"  # MC 渲染时替换
+        out["cost_value"] = cost
+    # 按钮 hover（可选，缺省由 MC 用内置文案）
+    for k in ("confirm_hover", "cancel_hover"):
+        if spec.get(k):
+            out[k] = str(spec[k])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +589,11 @@ def render_command(action: Action, values: dict, extra: Optional[dict] = None) -
     vals = dict(values)
     if extra:
         vals.update(extra)
-    text = action.template
+    text = action.template or ""
+    if not text:
+        # 新形态（apply 展开成 steps）没有模板命令 —— 这不是错误。
+        # 调用方（_run_action_tool）把空 cmd 当「无需回执的命令」处理。
+        return ""
     for k, v in vals.items():
         text = text.replace("{" + str(k) + "}", str(v))
     left = _RE_PLACEHOLDER.findall(text)

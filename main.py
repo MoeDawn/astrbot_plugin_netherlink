@@ -615,13 +615,6 @@ DEFAULT_CROSS_DEATH = '§8[{server}]§f {message}'
 # 服务器上下线播报（推群，**不带 § 色码** —— 推群模板的惯例）。
 DEFAULT_SERVER_ONLINE = '[{server}] 服务器已连接'
 DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
-
-# 确认卡：私聊发给发起者，`show_item` 预览物品 + 两个按钮。
-# ⚠️ `show_item` 是**平铺**的（id/count/components 与 action 同级，无 value），
-#    而 `show_text` **要** value —— 同一个 hover_event 两种形状（真 26.3 实测）。
-DEFAULT_ACTION_CONFIRM = '["",{"text":"\\u2726 ","color":"gold","bold":true},{"text":"\\u786e\\u8ba4\\u8bf7\\u6c42 ","color":"yellow","bold":true},{"text":"{item}","color":"aqua","bold":true,"hover_event":{"action":"show_item","id":"{item_id}","count":{hint_count},"components":{hint_components}}},{"text":" \\u00d7{count}","color":"gray","bold":true},{"text":"  \\u82b1\\u8d39 {cost} \\u597d\\u611f","color":"gray","bold":true},{"text":"  ","color":"white"},{"text":"[ \\u786e\\u8ba4 ]","color":"green","bold":true,"hover_event":{"action":"show_text","value":"\\u70b9\\u51fb\\u6267\\u884c"},"click_event":{"action":"run_command","command":"trigger {objective} set {confirm_code}"}},{"text":"  ","color":"white"},{"text":"[ \\u53d6\\u6d88 ]","color":"red","bold":true,"click_event":{"action":"run_command","command":"trigger {objective} set 0"}}]'
-
-# 动作完成播报（推群）
 DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 ⌜{item}⌝ ×{count}'
 
 
@@ -986,10 +979,6 @@ class NetherLinkPlugin(Star):
         except (TypeError, ValueError):
             _ttl = 120.0
         self.action_confirm_ttl: float = _ttl if _ttl > 0 else 120.0
-        # 确认按钮靠 `trigger <objective> set <token>` 回传（0 权限）
-        self.mc_menu_objective: str = str(
-            config.get("mc_menu_objective") or "netherlink_menu"
-        ).strip() or "netherlink_menu"
 
         self.mc_ignored_players: set = self._parse_csv(
             config.get("mc_ignored_players", [])
@@ -1233,10 +1222,6 @@ class NetherLinkPlugin(Star):
                 or DEFAULT_SERVER_OFFLINE
             ),
             # ---- 结构化动作 ----
-            "action_confirm": (
-                config.get("template_action_confirm", DEFAULT_ACTION_CONFIRM)
-                or DEFAULT_ACTION_CONFIRM
-            ),
             "action_done": (
                 config.get("template_action_done", DEFAULT_ACTION_DONE)
                 or DEFAULT_ACTION_DONE
@@ -1893,6 +1878,14 @@ class NetherLinkPlugin(Star):
         if not player:
             return "参数有误：无法确定接收者，无法发起确认。"
         server_id = self._action_server_id(event)
+        # 展开成 MC 可执行的步骤（spec §10：MC 不认识动作名，只认 check/clear/give）
+        try:
+            steps = actions.expand_steps(action, values)
+            card = actions.build_card(action, values, cost)
+        except actions.ActionError as e:
+            return f"内部错误（动作展开）：{e}"
+        if not steps:
+            return "这条动作没有可执行的内容，请检查动作目录。"
         now = time.monotonic()
         token = actions.new_token(self._action_token_seq)
         self._action_token_seq = token
@@ -1901,37 +1894,29 @@ class NetherLinkPlugin(Star):
         self._pending_actions[token] = actions.PendingAction(
             token=token,
             action_name=action.name,
-            values=dict(values),
+            # ⚠️ 存**展开后的 steps**，不是原始 values —— 玩家点确认时不再回头
+            #    读动作目录（目录可能已经改了，那就前后不一致了）
+            values={"steps": steps, "values": dict(values)},
             player=player,
             server_id=server_id,
             cost=cost,
             cmd=cmd,
             deadline=now + self.action_confirm_ttl,
         )
-        try:
-            card = actions.render_confirm_card(
-                self.templates["action_confirm"], values,
-                item_id=str(values.get("item") or ""),
-                count=int(values.get("count") or 1),
-                cost=cost,
-                objective=self.mc_menu_objective,
-                token=token,
-            )
-        except Exception as e:
-            self._pending_actions.pop(token, None)
-            logger.warning(f"NetherLink: 确认卡渲染失败: {e}")
-            return f"内部错误（确认卡渲染）：{e}"
+        # 卡片由 **MC 端渲染**（它用 Adventure 构造可点击组件，能把 token 捕获
+        # 进回调闭包 ⇒ 不需要计分板）。这里只发数据。
         ok = await self._send_to_mc(
-            {"type": "command", "id": uuid.uuid4().hex,
-             "cmd": f"tellraw {player} {card}"},
-             server_id,
+            {"type": "action_offer", "token": token, "player": player,
+             "action": action.name, "card": card, "steps": steps},
+            server_id,
         )
         if not ok:
             self._pending_actions.pop(token, None)
             return "MC 服务器不可用，确认卡没发出去，本次没有执行。"
         logger.info(
             f"NetherLink: 已发确认卡 | 玩家={player} 动作={action.name} "
-            f"好感={cost} token={token} 有效期={self.action_confirm_ttl:g}s"
+            f"好感={cost} token={token} 步骤={len(steps)} "
+            f"有效期={self.action_confirm_ttl:g}s"
         )
         # 🔴 **必须说死「还没扣费」** —— 2026-10-11 真机暴露：AI 看到
         #    「消耗 2 好感」就对着玩家说「2 点好感跑不掉喵」，玩家以为已经付过钱，
@@ -1945,6 +1930,44 @@ class NetherLinkPlugin(Star):
             f"最多告诉他「卡已发，点一下就好」。"
         )
 
+    async def _handle_action_result(self, player: str, token,
+                                    ok: bool, detail: str = "") -> None:
+        """MC 端执行完 steps 后回报（`action_result{player,token,ok,detail}`）。
+
+        🔴 **执行已经发生了**（在 MC 端），这边只做两件事：
+          ① 从待确认队列取走这条（防重复）
+          ② `ok` 才扣好感 —— 用户 2026-10-11：「发卡前就扣了确认卡意义何在」
+             ⇒ 好感**在玩家点确认之后**才扣
+
+        ⚠️ **已知小口子**：MC 执行完、这个回报到达之前 AstrBot 掉线 ⇒
+           东西给了、好感没扣。接受（与「先扣后退」的复杂度相比更划算）。
+        """
+        now = time.monotonic()
+        item, _why = actions.take_pending(self._pending_actions, player, token, now)
+        if item is None:
+            # 过期/重复/不是他的 —— 静默。MC 那边已经执行了，这边无从补救，
+            # 但也不该把别人的好感算到他头上。
+            logger.warning(
+                f"NetherLink: 收到无法匹配的 action_result | 玩家={player} "
+                f"token={token} ok={ok}"
+            )
+            return
+        if not ok:
+            logger.info(
+                f"NetherLink: 动作未执行（MC 端回报失败）| 玩家={player} "
+                f"token={token} 原因={detail or '未说明'}"
+            )
+            return
+        if item.cost <= 0:
+            return
+        # 与 exec_command_for 同一口径：身份键走唯一入口，扣费不传 origin
+        # （origin 是给「对话触发的自主增减」用的，动作消耗不属于那一类）。
+        key = self._karma_identity_key("game", player, "")
+        await self._karma_add(key, -item.cost)
+        logger.info(
+            f"NetherLink: 动作已执行并扣好感 | 玩家={player} 动作={item.action_name} "
+            f"好感-{item.cost} token={token}"
+        )
     async def _handle_action_confirm(self, player: str, token,
                                      server_id: str = "") -> str:
         """玩家点了确认：取出待确认项并执行。返回给玩家的回话。
@@ -2704,10 +2727,21 @@ class NetherLinkPlugin(Star):
                     if self._is_ignored_player(data.get("player")):
                         continue
                     asyncio.create_task(self._handle_bot_chat(data, server_id))
+                elif mtype == "action_result":
+                    # MC 端执行完确认卡的 steps 后回报（**点击回调**触发）。
+                    # 这边只记结果 + 扣好感 —— **执行早已在 MC 端发生**。
+                    # ⚠️ 单独起 task：要写好感（磁盘 IO），不压在事件路径上。
+                    asyncio.create_task(
+                        self._handle_action_result(
+                            str(data.get("player") or ""),
+                            data.get("token"),
+                            bool(data.get("ok", False)),
+                            str(data.get("detail") or ""),
+                        )
+                    )
                 elif mtype == "action_confirm":
-                    # 玩家点了菜单/确认按钮（MC 端轮询计分板发现 → 上报）。
-                    # ⚠️ **单独起 task**：这里要扣好感 + 下发指令，是慢操作（等回执），
-                    #    压在这条 WS 事件路径上会连累后续事件（与 advancement 同一处理）。
+                    # ⚠️ **旧路径**（计分板轮询上报）。2026-10-11 起确认卡改走
+                    #    `action_result` + 点击回调，这条路只为**回退**保留。
                     asyncio.create_task(
                         self._handle_action_confirm(
                             str(data.get("player") or ""),
