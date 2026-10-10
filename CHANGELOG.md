@@ -1,5 +1,32 @@
 # 更新日志
 
+## 未发布（待定版本号）
+
+### 进服提示改为彩色可点击（`template_bind_hint` 换成 tellraw JSON）
+
+- 默认值从一行纯文本改成 `/tellraw` 的 **JSON 数组**：✦ 金色闪烁、群名青色、
+  **验证码红色**且**点一下即复制**（悬停「点击复制验证码」）、括号内有效期后
+  另有一句「点击码可复制」。
+- **踢出界面仍是纯文本**：`KickCommand` 的 `reason` 走 `MessageArgument`
+  （`Component.literal`，不解析 JSON，上限 256 字符），承载不了 656 字符的 JSON。
+  踢出那句是从**同一份** JSON 里抽 `text` 节点拼出来的，所以只有一个配置项、
+  两边不会漂移。
+- **JSON 模式自动识别**：以 `[` 开头且能解析成数组就走 JSON 路，否则按纯文本
+  走老路 ⇒ **存量配置不用迁移**，行为一字不变。
+- 🔴 **`/tellraw` 不落服务端日志**（与 `/tell` 相反：后者走
+  `MinecraftServer.sendSystemMessage`）。原来的「验证码写进服务端日志」是有意的
+  留痕，换了 tellraw 会消失 ⇒ **改由插件自己 `logger.info` 补一条带码的**。
+- ⚠️ JSON 模式下**不能用 `str.format` 渲染**（花括号会被当占位符，整段原样吐出
+  字面量 `{code}`）—— 改用显式逐个替换已知占位符。`_fmt` 本身没动，纯文本模式
+  仍走它。
+
+### 另两个模板默认值调整
+
+- `template_qq_to_mc`：`§a⌜{group}⌟§f <§d{sender}§f> §b{text}§f`
+  → `§a⌜{group}⌟§f §d{sender}§f: §b{text}§f`（去掉尖括号、发送者后改冒号）
+- `template_bot_reply_game`：`§c⌜{bot}⌟§f : §6{text}§f`
+  → `§c⌜{bot}⌟§f : §b{text}§f`（回复正文金色改青色）
+
 ## v0.1.6
 
 NetherLink 的 AstrBot 插件——把 Minecraft 服务器与 QQ 群双向打通。

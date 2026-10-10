@@ -318,12 +318,12 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 | 配置项 | 默认值 | 场景 |
 |---|---|---|
-| `template_chat` | `⌜{server}⌟ <{player}>: {text}` | MC 聊天 → QQ 群 |
+| `template_chat` | `⌜{server}⌟ [{player}]: {text}` | MC 聊天 → QQ 群 |
 | `template_join` / `template_leave` | `[{server}] {player} 进入了/离开了服务器` | 进服 / 退服 → QQ 群 |
 | `template_death` | `⌜{server}⌟ {message}` | 死亡 → QQ 群 |
-| `template_qq_to_mc` | `§a⌜{group}⌟§f <§b{sender}§f> §d{text}§f` | QQ → 游戏公屏，支持 `§` 码 |
-| `template_bot_reply_game` | `§c⌜{bot}⌟§f : §d{text}§f` | 机器人游戏内回复格式 |
-| `template_bind_hint` | `§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定({ttl}内有效)` | 进服提示，**也是踢出原因**；占位符 `{group}` `{code}` `{player}` `{server}` `{ttl}`，有效期默认渲染成 `5 分钟` |
+| `template_qq_to_mc` | `§a⌜{group}⌟§f §d{sender}§f: §b{text}§f` | QQ → 游戏公屏，支持 `§` 码 |
+| `template_bot_reply_game` | `§c⌜{bot}⌟§f : §b{text}§f` | 机器人游戏内回复格式 |
+| `template_bind_hint` | `/tellraw` 的 JSON 数组，默认彩色 + 点验证码可复制 | 进服提示，**也是踢出原因**；占位符 `{group}` `{code}` `{player}` `{server}` `{ttl}`，有效期默认渲染成 `5 分钟` |
 | `template_bind_success_game` | `玩家 {player} 已完成 QQ 绑定` | 绑定成功 → 游戏内广播 |
 | `template_bind_success_qq` | `{qq_name} ({qq}) 已绑定游戏账号 {player}` | 绑定成功 → 群里回话 |
 

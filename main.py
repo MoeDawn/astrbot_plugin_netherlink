@@ -529,7 +529,11 @@ DEFAULT_BOT_NAME = "ai"
 # ⚠️ 这三份与 _conf_schema.json 的 default 必须逐字一致——另有守卫按整串相等
 #    断言，分叉会让「改代码不生效而测试全绿」（见 claude.md 的
 #    「schema 与代码常量分叉风险」）。
-DEFAULT_BIND_HINT = "§e请到 QQ 群 [{group}] 发送验证码 §b{code}§e 完成绑定({ttl}内有效)"
+# 进服提示（2026-10-10 起是 `/tellraw` 的 JSON 数组）。
+# ⚠️ **不要用 `§` 色码**：tellraw 不解释 `§`，颜色全靠 JSON 的 `color` 键。
+# ⚠️ 占位符只能出现在 `"text"` / `"value"` 里；其余 `{` `}` 是 JSON 结构，不会被替换。
+# ⚠️ 这是一整行 —— 顺手换行会把空白写进玩家看到的文本里。
+DEFAULT_BIND_HINT = '["",{"text":"✦ ","color":"gold","bold":true,"obfuscated":true},{"text":"请到 QQ 群 ","color":"yellow","bold":true},{"text":"[","color":"dark_gray","bold":true},{"text":"{group}","color":"aqua","bold":true},{"text":"] ","color":"dark_gray","bold":true},{"text":"发送验证码","color":"yellow","bold":true},{"text":" {code} ","color":"red","bold":true,"clickEvent":{"action":"copy_to_clipboard","value":"{code}"},"hoverEvent":{"action":"show_text","value":"点击复制验证码"}},{"text":"完成绑定","color":"yellow","bold":true},{"text":" ({ttl}内有效)","color":"gray","bold":true},{"text":" 点击码可复制","color":"gray","bold":true},{"text":" ✦","color":"gold","bold":true,"obfuscated":true}]'
 DEFAULT_BIND_SUCCESS_GAME = "玩家 {player} 已完成 QQ 绑定"
 DEFAULT_BIND_SUCCESS_QQ = "{qq_name} ({qq}) 已绑定游戏账号 {player}"
 
@@ -753,6 +757,78 @@ def _strip_section_codes(text: str) -> str:
     if not text:
         return text
     return _SECTION_CODE_RE.sub("", _SECTION_RGB_RE.sub("", text))
+
+
+def _bind_hint_is_json(tpl: str) -> bool:
+    """`template_bind_hint` 是 tellraw 的 JSON 数组吗？
+
+    **自动识别**（2026-10-10）：以 `[` 开头**且**能 `json.loads` 成 list
+    ⇒ JSON 模式；否则按老规矩当纯文本模板走 `_fmt`。
+    这样**存量配置（纯文本）不用迁移**，行为一字不变。
+
+    ⚠️ 只认 `[` 开头：MC 的组件 JSON 几乎都是数组形式（`["", {...}, ...]`）。
+    纯文本模板里合法地会含 `[{server}]` 这种方括号，但它过不了 `json.loads`，
+    于是正确地落回纯文本路径。
+    """
+    s = (tpl or "").strip()
+    if not s.startswith("["):
+        return False
+    try:
+        return isinstance(json.loads(s), list)
+    except Exception:
+        return False
+
+
+def _fill_placeholders(tpl: str, values: dict) -> str:
+    """显式逐个替换**已知**占位符，其余 `{...}` 原样保留。
+
+    🔴 JSON 模式**必须**用它、不能用 `_fmt`：`str.format` 会把 `{"text":`
+    当成占位符并抛 `KeyError: 'text'`，然后 `_fmt` 兜底成**原样返回**——
+    玩家收到的就是字面量 `{group}` `{code}`。这与 `_render_template` 当年
+    踩的「NBT 花括号」是同一课。
+    """
+    text = tpl
+    for key, val in values.items():
+        if val is None:
+            continue
+        text = text.replace("{" + str(key) + "}", str(val))
+    return text
+
+
+def _bind_hint_plain_text(rendered: str) -> str:
+    """从 tellraw JSON 里抽出纯文本（所有 `text` 节点拼接）。
+
+    踢出原因必须是纯文本：`KickCommand` 的 reason 走 `MessageArgument`
+    → `Component.literal(text)`，不解析 JSON，且上限 **256 字符**，
+    而完整 JSON 有 600+ 字符 —— 直接塞进 `kick` 会 `TOO_LONG` 报错。
+
+    解析失败**抛 ValueError**：模板本身坏了就该让门禁降级（fail-open 放行），
+    而不是发一句 JSON 字面量到玩家脸上。
+    """
+    try:
+        doc = json.loads(rendered)
+    except (ValueError, TypeError) as e:
+        raise ValueError("template_bind_hint 不是合法 JSON: %s" % e) from e
+    if not isinstance(doc, list):
+        raise ValueError("template_bind_hint 必须是 JSON 数组")
+    out = []
+    for node in doc:
+        if isinstance(node, dict):
+            txt = node.get("text")
+            if isinstance(txt, str):
+                out.append(txt)
+    return "".join(out)
+
+
+def _tellraw_quote_safe(text: str) -> str:
+    """把值里的双引号换成单引号。
+
+    `/tellraw <玩家> <JSON>` 是**空格分隔**的指令，JSON 字符串里的双引号
+    会提前闭合它（`/tellraw Steve {"text":"a"b"}` 直接解析错）。
+    占位符的值（群名 / 验证码 / 玩家名）理论上不含双引号，但不能假设。
+    存量的 `_binding_group_names` 本来就产出单引号包裹的群名，与这里一致。
+    """
+    return (text or "").replace('"', "'")
 
 
 class NetherLinkPlugin(Star):
@@ -999,9 +1075,9 @@ class NetherLinkPlugin(Star):
             "join": config.get("template_join", "[{server}] {player} 进入了服务器"),
             "leave": config.get("template_leave", "[{server}] {player} 离开了服务器"),
             "death": config.get("template_death", "⌜{server}⌟ {message}"),
-            "qq_to_mc": config.get("template_qq_to_mc", "§a⌜{group}⌟§f <§d{sender}§f> §b{text}§f"),
+            "qq_to_mc": config.get("template_qq_to_mc", "§a⌜{group}⌟§f §d{sender}§f: §b{text}§f"),
             "bot_reply_game": config.get(
-                "template_bot_reply_game", "§c⌜{bot}⌟§f : §6{text}§f"
+                "template_bot_reply_game", "§c⌜{bot}⌟§f : §b{text}§f"
             ),
             # 绑定相关的三份模板同样是「空串回退默认值」——清空配置项不等于关闭。
             "bind_hint": config.get("template_bind_hint", DEFAULT_BIND_HINT) or DEFAULT_BIND_HINT,
@@ -3903,27 +3979,52 @@ class NetherLinkPlugin(Star):
         # 走到这里 `usable` 必非空、且每个成员都在 `group_names` 里。
         # `{group}` 是**群名**（顿号分隔）；留空配置下就是全部绑定群的名字。
         group_names = self._binding_group_names(usable)
-        reason = self._fmt(self.templates["bind_hint"], server=self._mc_server_display(server_id),
-                           player=player, code=code, group=group_names,
-                           ttl=binding_flow.describe_ttl(self.binding_code_ttl))
-        # ⚠️ § 染色码必须去掉（实测结论，别「优化」回去）：`kick` 与 `/tell` 的
-        # 正文都走 `MessageArgument`——服务端接受 § 但**不解释**它，聊天框里会
-        # 原样显示「§e请到 QQ 群…§bABC123」，纯字面垃圾。这条路上 § 到不了玩家
-        # 眼前能渲染的地方，净化掉只有好处。
-        reason = _strip_section_codes(reason)
+        # ---- 渲染：JSON 模式与纯文本模式各走各的渲染器 ----
+        # 值里的双引号会提前闭合 `/tellraw` 的 JSON，先换成单引号。
+        values = {
+            "server": self._mc_server_display(server_id),
+            "player": player,
+            "code": code,
+            "group": group_names,
+            "ttl": binding_flow.describe_ttl(self.binding_code_ttl),
+        }
+        safe_values = {k: _tellraw_quote_safe(str(v)) for k, v in values.items()}
+        hint_tpl = self.templates["bind_hint"]
+        if _bind_hint_is_json(hint_tpl):
+            # ✅ JSON 模式：显式替换（不碰 JSON 结构）→ 私聊发 tellraw
+            #    踢出原因从同一份 JSON 的 `text` 节点推导，两边不会漂移。
+            rendered = _fill_placeholders(hint_tpl, safe_values)
+            plain = _strip_section_codes(_bind_hint_plain_text(rendered))
+            hint_cmd = f"tellraw {player} {rendered}"
+        else:
+            # 纯文本模式（存量配置）：照旧走 `_fmt`。
+            # ⚠️ `_fmt` 的 ValueError 语义**必须保留**：
+            #    `test_gate_failure_degrades_to_not_gated` 用它验证「渲染炸了也要 fail-open」。
+            plain = _strip_section_codes(self._fmt(hint_tpl, **values))
+            hint_cmd = f"tell {player} {plain}"
         # 提示**始终私聊发**（走到这里说明总开关开着、且拿得到可用群号）。
-        # ⚠️ 用 `command` 帧执行 `/tell` 而非广播：码只该给本人，广播会让同服
-        # 其他玩家抢绑。与下面的 `kick` 共用同一条控制台通道，四端通用。
+        # ⚠️ 不广播：码只该给本人，广播会让同服其他玩家抢绑。
         await self._send_to_mc(
-            {"type": "command", "id": uuid.uuid4().hex,
-             "cmd": f"tell {player} {reason}"},
+            {"type": "command", "id": uuid.uuid4().hex, "cmd": hint_cmd},
             server_id,
+        )
+        # ⚠️🔴 **插件自己记一条**（2026-10-10 用户要求）：
+        # `/tellraw` 走 `ServerPlayer.sendSystemMessage` 只发 packet，**不落服务端日志**；
+        # 而原来的 `/tell` 会走 `MinecraftServer.sendSystemMessage`
+        # = `LOGGER.info("System chat: ...")`。换成 tellraw 后那条留痕会消失，
+        # 所以由插件自己补上（与其他日志同样单行、竖线分隔）。
+        logger.info(
+            f"NetherLink: 绑定验证码已下发 | "
+            f"服务器={values['server']} 玩家={player} "
+            f"验证码={code} 有效期={values['ttl']}"
         )
         if not self.binding_join_gate:
             # 子开关关着 = 只提醒、不踢。玩家照常进服，调用方继续推群。
             return False
+        # 踢出原因必须是**纯文本**：`KickCommand` 的 reason 走
+        # `MessageArgument` → `Component.literal(text)`，不解析 JSON，且上限 256 字符。
         await self._send_to_mc(
-            {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {reason}"},
+            {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {plain}"},
             server_id,
         )
         return True
