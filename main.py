@@ -841,15 +841,23 @@ def _bind_hint_plain_text(rendered: str) -> str:
     return "".join(out)
 
 
-def _tellraw_quote_safe(text: str) -> str:
-    """把值里的双引号换成单引号。
+def _tellraw_json_escape(text: str) -> str:
+    """把值里会破坏 JSON 的字符**转义**（不是替换）。
 
-    `/tellraw <玩家> <JSON>` 是**空格分隔**的指令，JSON 字符串里的双引号
-    会提前闭合它（`/tellraw Steve {"text":"a"b"}` 直接解析错）。
-    占位符的值（群名 / 验证码 / 玩家名）理论上不含双引号，但不能假设。
-    存量的 `_binding_group_names` 本来就产出单引号包裹的群名，与这里一致。
+    🔴 **2026-10-10 实测推翻了两条旧认知**（真 26.3，`probe_quotes.py`）：
+
+    | 情形 | 旧认知 | 实测 |
+    |---|---|---|
+    | JSON **结构**用的双引号 | 「会提前闭合指令」| ✅ **完全没问题**，`tellraw @a {"text":"hi"}` 正常通过 |
+    | 值里转义过的 `\\"` | 未知 | ✅ 正常 |
+    | **值里的裸双引号** | 「换成单引号」| ❌ 真正的问题在这里：`Expected literal ,` |
+
+    旧实现把 `"` **替换**成 `'` —— 那会**静默改掉玩家的数据**
+    （群名 `A"B` 变成 `A'B`），比报错更糟。正确的是**转义**。
+
+    转义顺序：先反斜杠、再引号（反过来会把刚加的转义符再转一遍）。
     """
-    return (text or "").replace('"', "'")
+    return (text or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
 class NetherLinkPlugin(Star):
@@ -4148,7 +4156,7 @@ class NetherLinkPlugin(Star):
             "group": group_names,
             "ttl": binding_flow.describe_ttl(self.binding_code_ttl),
         }
-        safe_values = {k: _tellraw_quote_safe(str(v)) for k, v in values.items()}
+        safe_values = {k: _tellraw_json_escape(str(v)) for k, v in values.items()}
         hint_tpl = self.templates["bind_hint"]
         if _bind_hint_is_json(hint_tpl):
             # ✅ JSON 模式：显式替换（不碰 JSON 结构）→ 私聊发 tellraw
