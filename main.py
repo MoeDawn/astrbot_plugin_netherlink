@@ -1933,10 +1933,16 @@ class NetherLinkPlugin(Star):
             f"NetherLink: 已发确认卡 | 玩家={player} 动作={action.name} "
             f"好感={cost} token={token} 有效期={self.action_confirm_ttl:g}s"
         )
+        # 🔴 **必须说死「还没扣费」** —— 2026-10-11 真机暴露：AI 看到
+        #    「消耗 2 好感」就对着玩家说「2 点好感跑不掉喵」，玩家以为已经付过钱，
+        #    而实际上**分文未扣**。报价单里的数字会被 AI 当成既成事实，所以这句
+        #    必须显式否掉：钱还没动、事还没做，全等玩家点那一下。
         return (
             f"已向 {player} 私聊发送确认卡（含物品预览，点「确认」才执行）。"
-            f"将执行：{cmd}；消耗 {cost} 好感。"
-            f"请等 {player} 点击后再回应，**不要声称已经完成**。"
+            f"**尚未执行、也尚未扣除好感** —— 等 {player} 点「确认」那一刻才会"
+            f"扣 {cost} 好感并执行：{cmd}。"
+            f"就此**停止**：不要再调工具，也不要对玩家宣称已经给到或已经扣费。"
+            f"最多告诉他「卡已发，点一下就好」。"
         )
 
     async def _handle_action_confirm(self, player: str, token,
