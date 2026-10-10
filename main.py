@@ -537,7 +537,7 @@ DEFAULT_BOT_NAME = "ai"
 # ⚠️ **不要用 `§` 色码**：tellraw 不解释 `§`，颜色全靠 JSON 的 `color` 键。
 # ⚠️ 占位符只能出现在 `"text"` / `"value"` 里；其余 `{` `}` 是 JSON 结构，不会被替换。
 # ⚠️ 这是一整行 —— 顺手换行会把空白写进玩家看到的文本里。
-DEFAULT_BIND_HINT = '["",{"text":"✦ ","color":"gold","bold":true,"obfuscated":true},{"text":"请到 QQ 群 ","color":"yellow","bold":true},{"text":"[","color":"dark_gray","bold":true},{"text":"{group}","color":"aqua","bold":true},{"text":"] ","color":"dark_gray","bold":true},{"text":"发送验证码","color":"yellow","bold":true},{"text":" {code} ","color":"red","bold":true,"clickEvent":{"action":"copy_to_clipboard","value":"{code}"},"hoverEvent":{"action":"show_text","value":"点击复制验证码"}},{"text":"完成绑定","color":"yellow","bold":true},{"text":" ({ttl}内有效)","color":"gray","bold":true},{"text":" 点击码可复制","color":"gray","bold":true,"_tellraw_only":true},{"text":" ✦","color":"gold","bold":true,"obfuscated":true}]'
+DEFAULT_BIND_HINT = '["",{"text":"✦ ","color":"gold","bold":true,"obfuscated":true},{"text":"请到 QQ 群 ","color":"yellow","bold":true},{"text":"[","color":"dark_gray","bold":true},{"text":"{group}","color":"aqua","bold":true},{"text":"] ","color":"dark_gray","bold":true},{"text":"发送验证码","color":"yellow","bold":true},{"text":" {code} ","color":"red","bold":true,"click_event":{"action":"copy_to_clipboard","value":"{code}"},"hover_event":{"action":"show_text","value":"点击复制验证码"}},{"text":"完成绑定","color":"yellow","bold":true},{"text":" ({ttl}内有效)","color":"gray","bold":true},{"text":" 点击码可复制","color":"gray","bold":true,"_tellraw_only":true},{"text":" ✦","color":"gold","bold":true,"obfuscated":true}]'
 DEFAULT_BIND_SUCCESS_GAME = "玩家 {player} 已完成 QQ 绑定"
 DEFAULT_BIND_SUCCESS_QQ = "{qq_name} ({qq}) 已绑定游戏账号 {player}"
 
