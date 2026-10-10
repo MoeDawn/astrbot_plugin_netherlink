@@ -74,6 +74,21 @@ NetherLink 的 AstrBot 插件——把 Minecraft 服务器与 QQ 群双向打通
 
 - **身份注入不再静默失败**：`TextPart` 不可用、`req` 缺字段两种情况原本静默
   return 而调用方照打「已注入」，真机排查时无从下手。现在记 error。
+- **保存配置 / 删除插件不再卡 50+ 秒**。原来 `terminate()` 第一句就
+  `await runner.cleanup()`，而 aiohttp 的 `AppRunner.cleanup()` 内部是
+  `await server.shutdown(60.0)` —— 只要还有 in-progress 的 WS 长连接就把
+  60 秒**等满**（`web_runner.py` 的 `shutdown_timeout` 默认值）。
+  而插件下一句明明就能把连接关掉。
+
+  现在：**先关所有活连接、最后才 cleanup**；`AppRunner` 显式给 3 秒超时
+  （兜底，不再是 60）；`terminate` 还等 `_ws_task` 落定，否则 `_runner`
+  可能还没赋值 ⇒ runner 漏清理、**端口不释放**（重装报 address in use）。
+
+  ⚠️ 关的是**所有**活连接（新增 `_live_ws`），不只是 `_mc_conns` 里握过手的：
+  「刚连上、还没发 hello」的漏掉仍要等满超时（实测 6 秒）。
+
+  实测（本机真 WS 服务端 + 真连接）：**45.4 秒 → 0.02 秒**。
+
 ## v0.1.5
 NetherLink 的 AstrBot 插件——把 Minecraft 服务器与 QQ 群双向打通。
 
