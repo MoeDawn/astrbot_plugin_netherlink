@@ -338,7 +338,7 @@ except ImportError:  # 插件以顶层模块方式加载时
     import panel
 
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
-MC_REPLY_MAX_LEN = 900
+MC_REPLY_MAX_LEN = 1500
 
 # 游戏侧在 AstrBot 里的**平台标识**。
 # 唯一来源：平台适配器（迁移后）、合成事件、注入钩子的分流判据、钩子内的 umo 拼装
