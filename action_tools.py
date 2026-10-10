@@ -24,7 +24,13 @@ from typing import Any
 
 from astrbot.api import FunctionTool
 
-import actions as A
+# ⚠️ **双路导入**（与 main.py 里那一串同写法）：AstrBot 把插件当**包**时
+# `from . import x` 成立；当**顶层模块**时只有 `import x` 能用。
+# 写成裸 `import actions` 会让插件整个加载失败（实测：No module named）。
+try:
+    from . import actions as A
+except ImportError:  # 插件以顶层模块方式加载时
+    import actions as A
 
 # 参数类型 → JSON Schema 片段。
 # ⚠️ 只声明 AstrBot/JSON Schema 认识的关键字：ToolSchema 会拿

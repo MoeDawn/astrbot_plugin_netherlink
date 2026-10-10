@@ -34,8 +34,20 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-import action_tools
-import actions
+# ⚠️ 与下面那一串同目录模块**同一个写法**。
+# AstrBot 把插件当**包**导入时 `from . import x` 成立；某些加载路径把它当
+# **顶层模块**，那时只有 `import x` 能用。我最初把它俩写成裸 `import actions`
+# —— 在 AstrBot 上直接 `No module named 'action_tools'`、插件**整个加载失败**
+# （QQ↔MC 互通 / 好感度 / 指令执行全部一起消失，不只是动作层不可用）。
+try:
+    from . import action_tools
+except ImportError:  # 插件以顶层模块方式加载时
+    import action_tools
+
+try:
+    from . import actions
+except ImportError:  # 插件以顶层模块方式加载时
+    import actions
 
 # ⚠️ `astrbot.api.web`（Plugin Pages 的响应 helper）**必须守卫式导入**：
 #    它比 metadata.yaml 声明的 `astrbot_version: ">=4.16,<5"` 新得多
