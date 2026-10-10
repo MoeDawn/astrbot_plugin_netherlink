@@ -69,14 +69,26 @@ class PendingAction:
     deadline: float
 
 
+# 确认卡 token 的起点。**必须与 MC 端本地菜单的码分开**：
+# `netherlink-plugin` 的菜单码是 1 / 10 / 1000+i（都 < 10000），它按
+# 「< 10000 ⇒ 菜单码，本地消费；>= 10000 ⇒ 确认卡 token，上报」分流。
+# 两边共用一个 trigger objective，靠**数值区间**区分，所以这里绝不能从 1 起
+# —— 否则第一张确认卡的 token 就是 1，玩家点了会去开菜单。
+# MC 端有个同名常量 `CONFIRM_TOKEN_BASE`，改动要同步（守卫
+# `test_confirm_token_base_matches_the_mc_side_menu_codes`）。
+TOKEN_BASE = 10000
+
+
 def new_token(counter: int) -> int:
     """下一个 token。
 
     ⚠️ **单调递增、绝不复用**：复用（或随机）都可能让「上一张过期卡的旧 token」
     撞上「新卡」—— 玩家点旧按钮就执行了新请求。递增从根上避免这件事，
     而且可复现（好写测试）。
+
+    ⚠️ 从 1 起会把整个 `1..9999` 区间让给 MC 端菜单码 —— 见 `TOKEN_BASE`。
     """
-    return int(counter) + 1
+    return max(int(counter), TOKEN_BASE - 1) + 1
 
 
 def prune_pending(pending: dict, now: float) -> dict:

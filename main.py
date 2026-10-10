@@ -1277,7 +1277,10 @@ class NetherLinkPlugin(Star):
         # 而动作参数是任意结构 —— 塞不进一个整数。
         self._pending_actions: dict = {}
         # token 计数器：**单调递增、绝不复用**（复用会让旧卡的 token 撞上新卡）
-        self._action_token_seq: int = 0
+        # ⚠️ 初值取 `TOKEN_BASE - 1` 而不是 0：确认卡 token 必须落在
+        #    >= 10000 的区间，与 MC 端本地菜单码（1 / 10 / 1000+i）分开 ——
+        #    两者共用一个 trigger objective，靠数值区间分流。
+        self._action_token_seq: int = actions.TOKEN_BASE - 1
 
         self._pending_cmds: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
@@ -1944,6 +1947,15 @@ class NetherLinkPlugin(Star):
         """
         if not self.enable_actions:
             return ""
+        # 🔴 **纵深防御**：`< TOKEN_BASE` 的整数是 MC 端本地菜单的码
+        # （1 / 10 / 1000+i），它本该在 MC 端就地消费掉、根本不上报。
+        # 万一对面是旧版 jar 仍照旧上报，这里必须**静默忽略**——回一句
+        # 「确认已失效」是错的：那既不是确认请求，玩家也没发过什么请求。
+        try:
+            if int(token) < actions.TOKEN_BASE:
+                return ""
+        except (TypeError, ValueError):
+            pass
         now = time.monotonic()
         item, why = actions.take_pending(self._pending_actions, player, token, now)
         if item is None:
