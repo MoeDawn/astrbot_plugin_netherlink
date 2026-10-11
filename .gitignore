@@ -5,6 +5,7 @@ __pycache__/
 
 # 测试（不随仓库分发；本机开发用）
 tests/
+pytest.ini
 
 # 含明文 NapCat 反连 Token 与服务器 IP，绝不入库。
 # ⚠️ 规则用**通配**而不是精确文件名：现状文件名是 `roubot`（疑为 `robot` 的笔误），

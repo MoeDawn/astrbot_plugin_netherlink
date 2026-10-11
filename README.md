@@ -1,15 +1,16 @@
 # NetherLink — 我的世界服务器 × QQ 群消息互通
 
-**把 Minecraft 服务器和 QQ 群消息连接起来的 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 插件**
+把 Minecraft 服务器和 QQ 群消息连接起来的 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 插件。
 
 | 能力 | 说明 |
 |---|---|
 | 消息互通 | 游戏内聊天 / 进服 / 退服 / 死亡推到群里；群消息广播到游戏公屏，支持 `§` 染色码 |
 | 自然语言执行指令 | 说「把 Steve 改成创造模式」，AI 判断身份与好感后以控制台身份执行，真实输出回传 |
+| 结构化动作 | 给物品、交换物品、改已有物品、收下玩家送的东西，AI 只填参数，插件拼命令并校验 |
 | 游戏内机器人对话 | 玩家发唤醒词开头的话即可与 AI 对话，玩家原话与 AI 回复都同步到群 |
 | 好感度系统 | AI 依对话与请求自主增减好感，好感影响它的态度与指令执行 |
 | QQ ↔ 游戏账号绑定 | 未绑定玩家进服被拦下并收到验证码，在群里发码即完成绑定；绑定后两边共享一份好感 |
-| 管理面板 | AstrBot WebUI 里的插件页面：在线服务器 / 好感度 / 绑定管理 / 配置诊断 / 在线玩家 / 指令审计 / 快捷指令 |
+| 管理面板 | AstrBot WebUI 里的插件页面：在线服务器 / 好感度 / 绑定管理 / 配置诊断 / 在线玩家 / 指令审计 / 快捷指令 / 动作 |
 
 ---
 
@@ -21,7 +22,7 @@
 | Minecraft | **26.3** |
 | MC 服务端 | 三选一：[netherlink-plugin](https://github.com/MoeDawn/netherlink-plugin)、[netherlink-fabric](https://github.com/MoeDawn/netherlink-fabric)、[netherlink-neoforge](https://github.com/MoeDawn/netherlink-neoforge) |
 
-三个 MC 端协议完全相同，接同一个 AstrBot 插件，服务端不用改配置。MC 端按 Minecraft 26.3 的 API 编译，其他 MC 版本未适配，Spigot 不支持。
+三个 MC 端协议完全相同，接同一个 AstrBot 插件。MC 端按 Minecraft 26.3 的 API 编译，其他 MC 版本未适配，Spigot 不支持。
 
 管理面板依赖 AstrBot 的插件页面能力。装了不带该能力的旧版 AstrBot 时面板会安静禁用并记一条 warning，其余功能不受影响。
 
@@ -103,17 +104,19 @@ AstrBot 端与 MC 端都要配**端口**、**密钥**、**唤醒词**：
 
 ### 服务器互通
 
-多台服务器时，一台服的聊天 / 进服 / 退服 / 死亡可以转发到其余在线服务器。默认关，在 `服务器之间消息转发` 里打开。
+多台服务器时，一台服的聊天 / 进服 / 退服 / 死亡可以转发到其余在线服务器。默认关，在 `enable_cross_server` 里打开。
 
-进服与退服显示为**黄色**（与原版公告同色），跨服聊天为蓝色，死亡为深灰。各台模板可分别配置。
+进服与退服显示为黄色，跨服聊天为蓝色，死亡为深灰。各台模板可分别配置。
 
 跨服行只在**别的**服务器出现，本服玩家看不到自己服的消息被重复显示。目标服务器离线时不转发，也不会补发。
+
+服务器上下线播报到所有绑定群，上线立即播，下线延迟 5 秒确认。默认开。
 
 ### 游戏内与 AI 对话
 
 以唤醒词开头，如 `ai 你好`、`ai 列出在线玩家`，回复显示在游戏里并同步到群。
 
-每台服务器 = 一个模拟群，会话按服务器建。在 AstrBot 的 `对话` 里能看到对应的模拟群聊，群名就是该服的显示名。
+每台服务器 = 一个模拟群，会话按服务器建。在 AstrBot 的「对话」里能看到对应的模拟群聊，群名就是该服的显示名。
 
 ### 请 AI 执行指令
 
@@ -121,9 +124,17 @@ QQ 群或游戏内用自然语言描述需求即可，AI 自行判断三件事�
 
 AI 可以执行各种有趣或危险的指令，全权交由提示词判断。想限制它就改人格提示词或各处的系统上下文配置项。
 
+### 结构化动作
+
+给物品、交换物品、改已有物品（改名 / 附魔 / 属性 / 说明）、收下玩家送的东西，走**结构化动作**：AI 只填参数，插件拼命令并校验，需要确认的会先发一张可点击的卡片。
+
+AI 对这些动作只说「看看私信里的卡片」，点「确认」之后才真的执行、才扣好感。
+
+其余需求仍由 AI 手写指令，走 `mc_command`。
+
 ### 不在绑定群名单里的群
 
-消息不转发进游戏，游戏事件也不推过去。但身份注入与好感度对**所有 aiocqhttp 群**生效，未绑定群里的 AI 一样认得出发起者与管理员，`指令工具` / `好感度工具` 照常可用。要彻底断开某个群，用 AstrBot 限制插件生效范围，或把机器人移出那个群。
+消息不转发进游戏，游戏事件也不推过去。但身份注入与好感度对**所有 aiocqhttp 群**生效，未绑定群里的 AI 一样认得出发起者与管理员，`mc_command` / `mc_karma` 照常可用。要彻底断开某个群，用 AstrBot 限制插件生效范围，或把机器人移出那个群。
 
 私聊与其他平台都不会被注入身份，例如 Telegram、网页聊天。
 
@@ -154,10 +165,10 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 ### 开关
 
-- `QQ 绑定功能总开关` 关掉则整块停用，不发码、不提示、不拦截
-- `强制绑定` 默认开。关掉后未绑定玩家照常收提示与验证码、照常进服，只是不被踢
-- `接受验证码的 QQ 群号` 留空则所有消息互通的群都能发码
-- `忽略名单` 与 `门禁豁免的游戏 ID` 里的名字永远不拦
+- `enable_binding` 关掉则整块停用，不发码、不提示、不拦截
+- `binding_join_gate` 默认开。关掉后未绑定玩家照常收提示与验证码、照常进服，只是不被踢
+- `binding_group` 留空则所有消息互通的群都能发码
+- `mc_ignored_players` 与 `binding_exempt_players` 里的名字永远不拦
 
 ### 已知限制
 
@@ -173,9 +184,9 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 ## 好感度系统
 
-好感值以 WebUI 配置项 `好感度记录(JSON)` 为准，可以直接查看和修改。`data/plugin_data/netherlink/karma.json` 是同步写出的镜像，插件启动时不读它。
+好感值以 WebUI 配置项 `karma_records` 为准，可以直接查看和修改。`data/plugin_data/netherlink/karma.json` 是同步写出的镜像，插件启动时不读它。
 
-⚠️ 清空那个配置项 = 记录归零。改动要**重启或热重载**后才生效，否则内存里仍是旧记录，下一次好感变化会把整个快照写回去。
+⚠️ 清空 `karma_records` = 记录归零。改动要**重启或热重载**后才生效，否则内存里仍是旧记录，下一次好感变化会把整个快照写回去。
 
 ### 身份空间
 
@@ -186,15 +197,16 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | 来源 | 谁决定 | 说明 |
 |---|---|---|
 | 对话 | AI | 依 `karma_rules` 自主增减 |
-| 执行指令 | AI 报价 + 插件扣 | 越 OP 的指令消耗越多，价目表在 `mc_command 的 cost 参数说明` |
-| 死亡 | 插件自动 | 可在配置项改成 0 |
-| 获得成就 | AI | 插件把 `成就提示词` 发给 AI，由它决定加多少并回话 |
+| 执行指令 | AI 报价 + 插件扣 | 越 OP 的指令消耗越多，价目表在 `mc_command_cost_param_desc` |
+| 结构化动作 | 动作目录里的定价 | 给物品查表定价，收礼加分 |
+| 死亡 | 插件自动 | 可用 `karma_death_penalty` 改成 0 |
+| 获得成就 | AI | 插件把 `advancement_prompt` 发给 AI，由它决定加多少并回话 |
 
 报价与实际扣减在同一次调用内原子完成。好感不足直接拒绝，执行失败自动退费。
 
 ### 几点须知
 
-- **好感度不可关闭**。想让指令不消耗好感，改提示词——把 `mc_command 的 cost 参数说明` 的价目表全写成免费或传 0。
+- **好感度不可关闭**。想让指令不消耗好感，改提示词——把 `mc_command_cost_param_desc` 的价目表全写成免费或传 0。
 - 管理员待遇由提示词决定。插件只把「谁是管理员」作为事实告诉 AI，尺度写在 `mc_command_tool_desc` 里。
 - **提示词的现值直接决定 AI 行为**，插件不告警也不自动纠正。里面若写着占位文案或与当前机制冲突的说明，AI 就照它执行。留空会回退默认值。
 
@@ -214,7 +226,8 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | 配置诊断 | 管理员名单 / 绑定群 / 端口绑定的解析结果 |
 | 在线玩家 | 对每台在线服务器下发一次 `/list` |
 | 指令审计 | 最近 1000 条，可按发起者 / 指令 / 结局筛选 |
-| 快捷指令 | 由配置项驱动的按钮，点击下发一条 MC 指令 |
+| 快捷指令 | 由 `quick_commands` 驱动的按钮，点击下发一条 MC 指令 |
+| 动作 | 当前生效的动作目录，可重置为默认 |
 
 ### 安全边界
 
@@ -226,7 +239,7 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 ## 配置项
 
-> 配置界面里已按模块分组，下面是同样的顺序。你的实际配置存在 `data/config/astrbot_plugin_netherlink_config.json`，插件目录里的 `_conf_schema.json` 只是默认值模板。提示词类配置项**留空都会回退默认值**——想「不注入」请删掉内容，别清空。
+配置界面的分组与下面一致。实际配置存在 `data/config/astrbot_plugin_netherlink_config.json`。提示词类配置项**留空都会回退默认值**——想「不注入」请删掉内容，别清空。
 
 ### 连接与服务器
 
@@ -235,7 +248,6 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | `ws_host` | 本插件监听的地址，默认 `0.0.0.0`，MC 端主动连入 |
 | `ws_ports` | **必填**。格式 `显示名:端口`，如 `生存服:8765`；也可只填端口号，那样显示为 `MC`。一台 MC 服占一个端口，单服只填一个。⚠️ 留空则不监听并报错；两台服的 `server-name` 必须不同，它默认是 `mc`，同名会互相顶掉 |
 | `auth_token` | 握手鉴权密钥，两侧必须一致 |
-| `server_display_names` | 已删除，显示名改到 `ws_ports` 里配 |
 | `mc_bot_name` | 机器人游戏内名字，用于 `{bot}` 占位符，默认 `ai` |
 
 ### QQ 群互通
@@ -249,18 +261,26 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | `enable_death` | 同步死亡消息，默认开。⚠️ 它同时门控死亡扣好感，是死亡惩罚唯一的门槛 |
 | `enable_qq_to_mc` | QQ 群消息转发进游戏公屏，默认开 |
 | `sync_bot_msgs` | 机器人自己的群消息是否也转发进游戏，默认关，防刷屏 |
-| `mc_ignored_players` | **忽略名单**：这些玩家名产生的 MC 事件一律不处理、也不推群，用于排除机器人账号与小号。⚠️ 按名字**精确**匹配；装了假人 / AI 实体时必须填，否则它会自己和自己对话、白烧 token |
-| `enable_server_status` | 服务器上下线播报，默认开。上线立即播，下线延迟 5 秒确认（避开重连抖动） |
-| `enable_cross_server` | 服务器之间消息转发，默认关。一台服的聊天 / 进服 / 退服 / 死亡转发到其余在线服务器 |
-
+| `mc_ignored_players` | **忽略名单**：这些玩家名产生的 MC 事件一律不处理、也不推群。⚠️ 按名字**精确**匹配；装了假人 / AI 实体时必须填，否则它会自己和自己对话、白烧 token |
+| `enable_server_status` | 服务器上下线播报，默认开 |
+| `enable_cross_server` | 服务器之间消息转发，默认关 |
 
 ### 游戏内对话
 
 | 配置项 | 说明 |
 |---|---|
-| `enable_game_platform` | 游戏内对话走 AstrBot **原生平台管线**，默认开。⚠️ **首次启用需要重启一次 AstrBot**，框架在启动时实例化平台 |
+| `enable_game_platform` | 游戏内对话走 AstrBot **原生平台管线**，默认开。⚠️ **首次启用需要重启一次 AstrBot** |
 | `enable_webui_persona` | 游戏内对话是否使用 WebUI 配置的人格，默认开 |
 | `mc_wake_prefixes` | 游戏内唤醒词，默认 `ai` `助手`。**须与 MC 端的 `wake-prefixes` 一致** |
+
+### 结构化动作
+
+| 配置项 | 说明 |
+|---|---|
+| `enable_actions` | 按动作目录为 AI 注册独立工具，默认开。关掉则只剩 `mc_command` 手写指令 |
+| `actions_file` | 动作目录路径，留空用 `data/plugin_data/netherlink/actions.yaml`。插件自带一份默认目录，首次启动落地一份，**从不覆盖已有** |
+| `action_confirm_ttl` | 确认卡有效期，秒，默认 120。过期后点击无效，玩家会收到提示让他重新发起 |
+| `template_action_done` | 动作完成播报模板，推群。占位符 `{player}` `{cost}` `{items}` `{item}` `{count}` `{server}` |
 
 ### 账号绑定
 
@@ -280,7 +300,7 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | `admin_qq` | 管理员 QQ 号，用于 QQ 侧的身份判定 |
 | `admin_mc` | 管理员游戏 ID。**游戏内管理员只能在这里填**，AstrBot 的全局管理员是 QQ 号，对游戏内无效 |
 
-> 名单只作为参考信息注入提示词，插件不做任何拦截，是否放行由 AI 决定；给管理员的宽松尺度写在 `mc_command_tool_desc` 里。
+名单只作为参考信息注入提示词，插件不做任何拦截，是否放行由 AI 决定；给管理员的宽松尺度写在 `mc_command_tool_desc` 里。
 
 ### 管理面板
 
@@ -300,7 +320,7 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | `log_karma_changes` | 对话引起的好感变化是否记日志，默认开 |
 | `log_command_audit` | 指令审计，默认开。每次 AI 执行指令都会留下结构化记录：来源侧、发起者、目标服务器、指令原文、报价与实际消耗、结局。关掉则日志与记录都不写 |
 | `enable_advancement` | 玩家获得成就时是否通知 AI，默认开 |
-| `advancement_prompt` | 成就通知用的提示词，默认含好感量级 2~10，按成就难度 |
+| `advancement_prompt` | 成就通知用的提示词，占位符 `{player}` `{server}` `{advancement}`，默认含好感量级 2~10 |
 | `karma_records` | 好感度记录，格式 `{"qq:12345": 12}`，可直接在 WebUI 改 |
 
 ### 工具提示词
@@ -318,12 +338,10 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 
 | 配置项 | 说明 |
 |---|---|
-| `template_netherlink_context_qq` | **QQ 侧**注入给 AI 的身份模板，随本轮消息下发。占位符 `{identity}` `{is_admin}` `{binding}` |
-| `template_netherlink_context_game` | **游戏侧**注入给 AI 的身份模板，随本轮消息下发。占位符多一个 `{server}`，默认值含「物品换好感的三步流程」 |
+| `template_netherlink_context_qq` | **QQ 侧**注入给 AI 的身份模板。占位符 `{identity}` `{is_admin}` `{binding}` |
+| `template_netherlink_context_game` | **游戏侧**注入给 AI 的身份模板。占位符多一个 `{server}` |
 
-> `{binding}` 在已绑定时追加一句「已绑定…」，QQ 侧会把该 QQ 绑的全部游戏 ID 用顿号列出；未绑定则是空串。它**不是**必需占位符，缺了不回退默认值。
-
-> 两者**空串都回退默认值**——想「不注入」请删掉模板正文，而不是清空配置项。
+`{binding}` 在已绑定时追加一句「已绑定…」，QQ 侧会把该 QQ 绑的全部游戏 ID 用顿号列出；未绑定则是空串，它**不是**必需占位符。两份模板**空串都回退默认值**——想「不注入」请删掉模板正文，而不是清空配置项。
 
 ### 消息模板
 
@@ -332,39 +350,15 @@ AI 可以执行各种有趣或危险的指令，全权交由提示词判断。�
 | `template_chat` | `⌜{server}⌟ [{player}]: {text}` | MC 聊天 → QQ 群 |
 | `template_join` / `template_leave` | `[{server}] {player} 进入了/离开了服务器` | 进服 / 退服 → QQ 群 |
 | `template_death` | `⌜{server}⌟ {message}` | 死亡 → QQ 群 |
+| `template_server_online` / `template_server_offline` | `[{server}] 服务器已连接` / `[{server}] 服务器已断开` | 服务器上下线 → QQ 群 |
 | `template_qq_to_mc` | `§a⌜{group}⌟§f §d{sender}§f: §b{text}§f` | QQ → 游戏公屏，支持 `§` 码 |
 | `template_bot_reply_game` | `§c⌜{bot}⌟§f : §b{text}§f` | 机器人游戏内回复格式 |
-| `template_bind_hint` | `/tellraw` 的 JSON 数组，默认彩色 + 点验证码可复制 | 进服提示，**也是踢出原因**；占位符 `{group}` `{code}` `{player}` `{server}` `{ttl}`，有效期默认渲染成 `5 分钟` |
+| `template_cross_chat` | `§9[{server}]§f <{player}> {text}` | 跨服：聊天 |
+| `template_cross_join` / `template_cross_leave` | `§e[{server}]§f {player} 加入了/离开了游戏` | 跨服：进服 / 退服 |
+| `template_cross_death` | `§8[{server}]§f {message}` | 跨服：死亡 |
+| `template_bind_hint` | `/tellraw` 的 JSON 数组，默认彩色 + 点验证码可复制 | 进服提示，**也是踢出原因**；占位符 `{group}` `{code}` `{player}` `{server}` `{ttl}` |
 | `template_bind_success_game` | `玩家 {player} 已完成 QQ 绑定` | 绑定成功 → 游戏内广播 |
 | `template_bind_success_qq` | `{qq_name} ({qq}) 已绑定游戏账号 {player}` | 绑定成功 → 群里回话 |
-
----
-
-## 目录结构
-
-```text
-astrbot_plugin_netherlink/
-├── main.py              # 插件主逻辑
-├── karma.py             # 好感度算法与本地存储
-├── bindings.py          # QQ ↔ 游戏账号绑定表（读写与原子落盘）
-├── binding_flow.py      # 绑定流程的纯逻辑（门禁判据 / 验证码 / 迁移规划）
-├── audit.py             # 指令审计结构化落盘（JSONL）
-├── panel.py             # 管理面板的数据整形层（脱离 AstrBot 可单测）
-├── store.py             # 原子 JSON 读写
-├── mc_platform.py       # 注册 MC 模拟平台（游戏内对话走原生管线）
-├── pages/               # 管理面板前端（AstrBot Plugin Pages）
-│   └── admin/           #   页面名 = 目录名；入口 index.html
-│       ├── index.html
-│       ├── app.js
-│       └── style.css
-├── metadata.yaml        # 插件元数据
-├── _conf_schema.json    # WebUI 配置项定义
-├── requirements.txt     # 依赖
-├── CHANGELOG.md         # 更新日志（插件市场详情页显示它）
-├── logo.png
-├── LICENSE
-└── README.md
-```
 
 ---
 
