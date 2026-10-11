@@ -254,10 +254,10 @@ def parse_actions(doc) -> list:
                 if not isinstance(rule, dict):
                     raise ActionError("动作 %r 的 apply 第 %d 条不是映射" % (name, k + 1))
                 op = str(rule.get("op") or "")
-                if op not in ("check", "clear", "give"):
+                if op not in ("check", "clear", "give", "modify"):
                     raise ActionError(
-                        "动作 %r 的 apply 第 %d 条 op 只能是 check/clear/give，实际 %r"
-                        % (name, k + 1, op))
+                        "动作 %r 的 apply 第 %d 条 op 只能是 "
+                        "check/clear/give/modify，实际 %r" % (name, k + 1, op))
                 src = str(rule.get("from") or "")
                 if src not in params:
                     raise ActionError(
@@ -310,10 +310,19 @@ def load_actions(path) -> list:
 # **禁止**：`;` 与换行 —— 它们是「第二条命令」的常见注入载体。
 # 注意：这里做的是**粗筛**，真正的语法校验靠 MC 的 `createItemStack`
 # （造不出来就拒绝），以及 MC 自己的组件解析器（实测拼错会**响亮报错**）。
-_RE_COMPONENTS_OK = re.compile(
-    # 允许：字母数字 _ . / : = - , 各种括号与引号 空格 中文
-    # 禁止：`;` 与换行 —— 它们是「第二条命令」的常见注入载体
-    "^[A-Za-z0-9_./:=\-,\[\]{}()\"' \u4e00-\u9fff]*$"
+# ⚠️ 必须是 **raw 字符串**：普通字符串里 `\[` `\]` `\-` `\uXXXX` 都是非法转义（`re` 认它们，Python 字面量不认 → DeprecationWarning）。
+# ⚠ 分段拼：raw 段放制表转义，普通段放引号。
+#   普通字符串里 `\[` `\]` `\-` 是非法转义（`re` 认，Python 字面量不认 → DeprecationWarning）。
+# ⚠ `-` 必须在字符集**首位**，否则会被当成区间端点（`\[-A-Za-z]` 会被读成「从 [ 到 A」）。引号用普通段拼，别放进 raw 段尾。
+# ⚠ 字符集里 `-` 必须在**首位**，否则会被读成区间端点。
+#   逗号在列（组件的多项分隔符）；引号用普通段拼，别放在 raw 段尾。
+# ⚠ **禁止集**，不是允许集。
+#   允许集我反复写错（漏逗号、`-` 位置、引号收尾），而禁止集小且明确：
+#   分号与换行是「第二条命令」的注入载体；C0 控制字符一律不要。
+#   其余内容交给 MC 的 `createItemStack` —— 实测拼错会**响亮报错**
+#   （`Unknown item component` / `Not a list` / `Failed to parse`）。
+_RE_COMPONENTS_BAD = re.compile(
+    "[;\r\n\x00-\x08\x0b\x0c\x0e-\x1f]"
 )
 
 
@@ -339,11 +348,11 @@ def normalize_components(value) -> str:
         raise ActionError("components 不能为空（要么别传这个参数，要么给内容）")
     if len(s) > 512:
         raise ActionError("components 太长（%d > 512）" % len(s))
-    if not _RE_COMPONENTS_OK.match(s):
-        bad = sorted({c for c in s if not _RE_COMPONENTS_OK.match(c)})
+    m = _RE_COMPONENTS_BAD.search(s)
+    if m:
         raise ActionError(
-            "components 里有不允许的字符 %s。"
-            "分号与换行一律禁止（那是命令注入的载体）" % ("、".join(bad) or "?")
+            "components 里有不允许的字符 %r —— 分号与换行一律禁止"
+            "（那是命令注入的载体），控制字符也不行" % (m.group(),)
         )
     return s
 
@@ -640,7 +649,18 @@ def expand_steps(action: "Action", values: dict) -> list:
                     raise ActionError(
                         "动作 %r 的 apply 里 count 必须是整数" % action.name
                     )
-            items = [{"id": str(val), "count": cnt, "name": ""}]
+            entry = {"id": str(val), "count": cnt, "name": ""}
+            # 组件来自另一个参数（`give_item` 的 item 与 components 是分开的）
+            cf2 = str(rule.get("components_from") or "")
+            if cf2:
+                if cf2 not in action.params:
+                    raise ActionError(
+                        "动作 %r 的 apply 里 components_from 指向了不存在的参数 %r"
+                        % (action.name, cf2))
+                comps2 = str(values.get(cf2) or "").strip()
+                if comps2:
+                    entry["components"] = comps2
+            items = [entry]
         elif typ == "slot_list":
             # 只有 modify 用得上；别的 op 引用它是配置错误
             raise ActionError(

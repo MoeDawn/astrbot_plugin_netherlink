@@ -41,7 +41,9 @@
 # ⚠️ 改动过**语义**时把这个数字 +1。插件会拿它跟落盘的旧文件比对，
 #    更旧就告警（这份文件**从不覆盖**已存在的 —— 那是给人改的）。
 #    1 → 2：confirm 动作现在必须有 apply（展开成 check/clear/give）。
-version: 2
+#    2 → 3：give_item 不再限「纯物品」—— 支持 components（改名/附魔/属性…）；
+#           新增 modify_item（改玩家**已有**物品）。
+version: 3
 
 actions:
   # -------------------------------------------------------------------------
@@ -55,11 +57,11 @@ actions:
   - name: give_item
     label: 给玩家物品
     desc: >-
-      给玩家发放**普通物品**（不带自定义名称 / 附魔 / 属性）。
-      玩家要求这些东西时不要用本工具，改用 mc_command。
+      给玩家发放物品（**可以带自定义名称 / 附魔 / 属性 / 说明**）。
       本工具**只发确认卡、不执行也不扣费**：调用后事情还没发生，
       必须等玩家点「确认」。所以**不要**对玩家说「已给你」或「已经扣了好感」。
       若他问「扣了多少」——告诉他确认后才扣，现在还没扣。
+      要改玩家**身上已有**的东西，用 modify_item，不是这个。
     params:
       player:
         type: player
@@ -74,6 +76,21 @@ actions:
         min: 1
         max: 6400
         default: 1
+      components:
+        type: components
+        required: false
+        desc: >-
+          物品的附加内容，**不填就是普通物品**。写法（只写方括号内部）：
+            改名: custom_name={text:"龙鳞",color:"gold",bold:true}
+            说明: lore=[{text:"第一行",color:"red"},{text:"第二行"}]
+            附魔: enchantments={"minecraft:sharpness":5,"minecraft:unbreaking":3}
+            属性: attribute_modifiers=[{type:"attack_damage",amount:20,operation:"add_value",slot:"mainhand",id:"x"}]
+            不可破坏: unbreakable={}
+            稀有度: rarity="epic"
+          多项用逗号连接，如 custom_name={text:"绝影",color:"aqua"},enchantments={"minecraft:sharpness":5}
+          ⚠️ 名字/说明要带颜色或样式时**必须**写成组件对象 {text:"...",color:"..."}；
+             写成 '{"text":"..."}'（JSON 套引号）会**静默变成字面量**，显示一堆花括号。
+          ⚠️ 组件名写在方括号里、用 = 连接；附魔名要带 minecraft: 前缀。
         desc: 数量，默认 1
       cost:
         type: int
@@ -111,7 +128,7 @@ actions:
     # ⚠️ give_item 是「凭空给」，没有 check（不消耗玩家的东西）。要消耗材料的
     #    动作才需要 check —— 见 swap_items。
     apply:
-      - {op: give, from: item, count_from: count}
+      - {op: give, from: item, count_from: count, components_from: components}
     card:
       title: "确认请求"
       item_label: "获得"
@@ -168,3 +185,64 @@ actions:
       cancel_hover: "否决,无消耗"
     confirm: true
     done: "{player} 交换获得 {gain}"
+
+  # -------------------------------------------------------------------------
+  # 修改玩家**已有**物品（改名 / 附魔 / 属性 / 说明）
+  # -------------------------------------------------------------------------
+  # ⚠️ 与 give_item 的区别：这个是改他**身上那件**，不是发一件新的。
+  #    实现上原地替换同一格（读出来 → 合并组件 → 写回），不会有复制窗口。
+  # ⚠️ **会覆盖**该物品原有的组件：玩家那把武器原本的附魔若没写进 components
+  #    就没了。要保留就把它一起写进来。
+  - name: modify_item
+    label: 修改物品
+    desc: >-
+      修改玩家**身上已有**物品的名称 / 说明 / 附魔 / 属性。**不是发新的**——
+      物品本身、数量、所在格子都不变。
+      玩家说「给手上这把剑改名」「给我穿的这套装备加附魔」时用这个。
+      ⚠️ 只改你写进 components 的那几项，**没写的组件会按新物品重算**，
+         所以要把想保留的一起写上。
+    params:
+      player:
+        type: player
+        required: true
+        desc: 玩家游戏 ID
+      targets:
+        type: slot_list
+        required: true
+        desc: >-
+          要改哪几个槽位，格式 `槽位=卡片上显示的名字`，多个用 ; 隔开。
+          可用槽位：weapon.mainhand / weapon.offhand /
+          armor.head / armor.chest / armor.legs / armor.feet /
+          hotbar.0~8 / inventory.9~35
+          例：单件用 `weapon.mainhand=绝影`；
+              全套装备用 `armor.head=神级头盔; armor.chest=神级胸甲; armor.legs=神级护腿; armor.feet=神级靴子`
+      components:
+        type: components
+        required: true
+        desc: >-
+          要写上去的组件，**同一批 target 共用这一套**。写法同 give_item：
+            改名: custom_name={text:"龙鳞",color:"gold",bold:true}
+            说明: lore=[{text:"第一行",color:"red"}]
+            附魔: enchantments={"minecraft:sharpness":5,"minecraft:unbreaking":3}
+            属性: attribute_modifiers=[{type:"attack_damage",amount:20,operation:"add_value",slot:"mainhand",id:"x"}]
+            不可破坏: unbreakable={}
+          多个组件用逗号连接。
+          ⚠️ 名字带颜色时必须写组件对象 {text:"...",color:"..."}，
+             写成 '{"text":"..."}'（JSON 套引号）会**静默变成字面量**。
+      cost:
+        type: int
+        required: false
+        min: 0
+        desc: 净好感消耗。改属性属于「造物品」量级，通常比给普通物品贵。
+    template: ""
+    # ⚠️ **不要 check** —— `targets` 是要改的槽位、不是材料。槽位是否为空、
+    #    组件是否写得出来，都由 MC 端的 modify 步骤在**动手前**校验。
+    apply:
+      - {op: modify, from: targets, components_from: components}
+    card:
+      title: "修改物品"
+      targets_label: "修改"
+      confirm_hover: "同意,扣除 {cost} 好感"
+      cancel_hover: "否决,无消耗"
+    confirm: true
+    done: "{player} 花费 {cost} 好感修改了物品"
