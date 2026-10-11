@@ -49,11 +49,12 @@ actions:
   # -------------------------------------------------------------------------
   # 给玩家物品
   # -------------------------------------------------------------------------
-  # ⚠️ 本动作**只管"纯物品"**,不带自定义名称 / 附魔 / 属性.
-  #    那类请求属于"造物品",价格量级不同且有物品复制风险(玩家先改名,
-  #    拿到物品,把原物品丢掉,再让 AI 改名 ⇒ 凭空多一件),必须另立
-  #    专用动作做原子操作.目前这类请求让它走 mc_command.
-  #    解释见 design spec §2.4.
+  # ⚠️ 下面这段是**改造前**的说法(当时只能发纯物品、带组件的走 mc_command).
+  #    2026-10-11 起 `give_item` 自己就支持 `components`(见它的 desc),
+  #    "造物品"那套已由它承担;`modify_item` 负责改玩家**已有**的物品.
+  # 历史(design spec §2.4):当时担心"玩家先改名→拿到物品→丢掉原物→再让 AI 改名"
+  #    会凭空多一件,所以发明了独立动作做原子操作 —— 那个担忧正是
+  #    `modify_item` 存在的理由.
   - name: give_item
     label: 给玩家物品
     desc: >-
@@ -192,6 +193,13 @@ actions:
         required: false
         min: 0
         desc: 净好感消耗.这次交换要收多少好感,自己判断(0 = 不收).
+    # 🔴 **必须有 karma 块** —— 只声明 `cost` 参数是**不够**的:
+    #    `resolve_karma` 按 `karma.model` 决定要不要读它,不写这个块就等于
+    #    `model: none`,AI 报的 cost 被**静默忽略**、一分好感不扣
+    #    (2026-10-11 评审发现,两个动作一直如此)。
+    #    这里给 `table_then_ai` + **空表** = 「一律用 AI 报价」——
+    #    本动作连 `item` 参数都没有,不可能命中表,所以语义稳定。
+    karma: {model: table_then_ai, max_cost: 30}
     # ⚠️ 播报取 **gain**(他获得的),不是 pay(他上交的)
     done_items_from: [gain]
     template: ""
@@ -213,8 +221,9 @@ actions:
   # -------------------------------------------------------------------------
   # ⚠️ 与 give_item 的区别:这个是改他**身上那件**,不是发一件新的.
   #    实现上原地替换同一格(读出来 → 合并组件 → 写回),不会有复制窗口.
-  # ⚠️ **会覆盖**该物品原有的组件:玩家那把武器原本的附魔若没写进 components
-  #    就没了.要保留就把它一起写进来.
+  # ⚠️ **不再覆盖**:2026-10-11 起是**合并** —— LLM 没点名的组件一律保留
+  #    玩家原有的(Java 侧 `buildMergedItem` 用 `copyDataFrom` +
+  #    `isDataOverridden`).**唯一例外是附魔**:写 `enchantments` 就是换掉整组.
   - name: modify_item
     label: 修改物品
     desc: >-
@@ -263,6 +272,8 @@ actions:
         required: false
         min: 0
         desc: 净好感消耗.改属性属于"造物品"量级,通常比给普通物品贵.
+    # 🔴 同上,必须有 karma 块,否则 AI 报价被静默忽略(见 swap_items 处的说明)
+    karma: {model: table_then_ai, max_cost: 50}
     template: ""
     # ⚠️ **不要 check** —— `targets` 是要改的槽位,不是材料.槽位是否为空,
     #    组件是否写得出来,都由 MC 端的 modify 步骤在**动手前**校验.
@@ -277,6 +288,96 @@ actions:
     done: "{player} 花费 {cost} 好感修改了物品"
 
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # 传送到坐标
+  # -------------------------------------------------------------------------
+  # 🔴 `apply: [{op: command}]` 是**必须**的 —— `template` 与 `confirm` 共存时,
+  #    若 `apply` 为空,steps 就为空,`_offer_action_confirm` 会把整条动作当成
+  #    「只改好感、不动游戏」**立即结算**,命令永不执行(静默失灵)。
+  #    有了 `command` 这一步,模板才走得进确认卡那条路。
+  - name: teleport_to
+    label: 传送到坐标
+    desc: >-
+      把玩家传送到一组坐标.玩家说"把我传到 100 64 200""送我去主城坐标"用这个.
+      传到**另一个玩家**身边用 teleport_player_to.
+      坐标支持 `~` 相对写法(`~ ~ ~` = 原地,`~0 ~10 ~` = 上方 10 格).
+      ⚠️ 只在**当前维度**内传送;跨维度用 mc_command 手写 execute in.
+      ⚠️ 调用后只发一张私聊确认卡,玩家点了才传送.
+    params:
+      player:
+        type: player
+        required: true
+        desc: 要传送的玩家游戏 ID
+      x:
+        type: coord
+        required: true
+        label: X
+        desc: X 坐标,如 100 或 ~0
+      y:
+        type: coord
+        required: true
+        label: Y
+        desc: Y 坐标,如 64 或 ~
+      z:
+        type: coord
+        required: true
+        label: Z
+        desc: Z 坐标,如 200 或 ~0
+      cost:
+        type: int
+        required: false
+        min: 0
+        desc: 净好感消耗.自己判断(0 = 不收).
+    karma: {model: table_then_ai, max_cost: 30}
+    # ⚠️ **同维度**传送。跨维度（主世界↔下界↔末地）用 mc_command 手写
+    #    `execute in <维度> run tp ...` —— 这里不做，因为 AI **不知道玩家当前
+    #    在哪个维度**（游戏侧上下文里没有这个信息），做成可空参数还会让模板
+    #    残留占位符（`render_command` 会直接报错）。
+    template: "tp {player} {x} {y} {z}"
+    apply:
+      - {op: command, from: player}
+    card:
+      title: "确认传送"
+      confirm_hover: "同意,扣除 {cost} 好感"
+      cancel_hover: "否决,无消耗"
+    confirm: true
+    done: "{player} 被传送到了 {x} {y} {z}"
+
+  # -------------------------------------------------------------------------
+  # 把玩家传送到另一个玩家身边
+  # -------------------------------------------------------------------------
+  - name: teleport_player_to
+    label: 传送到玩家
+    desc: >-
+      把玩家 A 传送到玩家 B 身边.玩家说"把我传到 Steve 那""把 Steve 拉过来"用这个.
+      传到一组坐标用 teleport_to.
+      ⚠️ 调用后只发一张私聊确认卡,玩家点了才传送.
+    params:
+      player:
+        type: player
+        required: true
+        desc: 要被传送的玩家游戏 ID
+      target:
+        type: player
+        required: true
+        label: 目标玩家
+        desc: 目标玩家游戏 ID(传到他身边)
+      cost:
+        type: int
+        required: false
+        min: 0
+        desc: 净好感消耗.自己判断(0 = 不收).
+    karma: {model: table_then_ai, max_cost: 30}
+    template: "tp {player} {target}"
+    apply:
+      - {op: command, from: player}
+    card:
+      title: "确认传送"
+      confirm_hover: "同意,扣除 {cost} 好感"
+      cancel_hover: "否决,无消耗"
+    confirm: true
+    done: "{player} 被传送到了 {target} 身边"
+
   # 收下礼物(玩家送了有价值的东西)
   # -------------------------------------------------------------------------
   # ⚠️ 与 give_item 的区别:**方向相反** —— 是玩家给 AI,不是 AI 给玩家.

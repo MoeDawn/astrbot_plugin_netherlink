@@ -93,6 +93,16 @@ def build_description(action: A.Action) -> str:
     但 AI 在**报价之前**就得看到规则，所以只能放描述（不是参数说明）。
     """
     parts = [p for p in (action.desc or action.label or action.name,)]
+    # 🔴 **价目表必须对 AI 可见**（2026-10-11 评审）：原先 `karma.table` 只存在
+    #    于目录文件里，而 `desc` 与 `pricing_rules` 互相指着「上面的表 / 下面的
+    #    价目表」—— AI 既不知道哪些物品算「表内」，也没依据判断该不该报 cost。
+    #    后果两条：① 表外物品它不报 ⇒ 白多一轮往返；② 表内物品它报了价 ⇒
+    #    查表命中、报价被**静默覆盖**，而它已经对玩家说过那个数了。
+    #    ⚠️ 放在 desc 与 pricing_rules **之间** —— 后者说的「上面的表」才指得到。
+    table = action.karma_table
+    if table:
+        pairs = "、".join("%s %s" % (str(k).split(":")[-1], v) for k, v in table.items())
+        parts.append("已内置价目表(表内物品**不用**报 cost,报了也会被忽略):" + pairs)
     rules = action.pricing_rules.strip()
     if rules:
         parts.append(rules)

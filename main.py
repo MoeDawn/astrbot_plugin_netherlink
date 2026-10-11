@@ -566,13 +566,13 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 接收玩家游戏公屏消息,群名与玩家ID由 AstrBot 附带.
 
 [怎么动手]
-给物品,收物品,换物品,改已有物品(改名/附魔/属性/说明),改玩法状态 —— 这些都有专用
-动作工具(看你的工具列表,如 give_item / swap_items / modify_item).
+给物品,收礼物,换物品,改已有物品(改名/附魔/属性/说明),传送 —— 这些都有专用动作工具
+(看你的工具列表,如 give_item / swap_items / modify_item).
 优先用它们:它们自己会拼指令,不会因为格式写错而失败.
-动作工具表达不了的需求,才用 mc_command 手写.
-动作工具调用后只发一张私信确认卡,此刻什么都没发生 ——
-回一句"已经记下你的需求了,看看私信里的卡片,无误就点执行"就够,
-不要说已给或已扣.
+动作工具表达不了的需求(如改玩法状态:时间/天气/游戏规则),才用 mc_command 手写.
+⚠️ **需要确认的动作**调用后只发一张私信确认卡,此刻什么都没发生 ——
+回一句"已经记下你的需求了,看看私信里的卡片,无误就点执行"就够,不要说已给或已扣.
+⚠️ **拒收礼物(refuse_gift)是例外**:它没有卡片,立刻生效,调用完直接回话即可.
 
 [玩家送你东西时](注意方向:是由他送给你,不是他跟你要)
 - 不得仅凭口头表示就道谢或加好感;东西没真到手之前,不算收到.
@@ -635,7 +635,11 @@ DEFAULT_CROSS_DEATH = '§8[{server}]§f {message}'
 # 服务器上下线播报（推群，**不带 § 色码** —— 推群模板的惯例）。
 DEFAULT_SERVER_ONLINE = '[{server}] 服务器已连接'
 DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
-DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 ⌜{item}⌝ ×{count}'
+# ⚠️ 用 `{items}`（渲染成「⌜显示名⌝ ×数量」），**不要用 `{item}`** ——
+#    那给的是物品 ID（`minecraft:iron_ingot`），公屏上就是一串英文。
+#    2026-10-11 评审：这条**配置项的回退默认值**原先还用着 `{item}`，
+#    而各动作自己的 `done` 早已改对 —— 新增动作没写 `done` 时会踩到。
+DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 {items}'
 
 
 
@@ -1983,6 +1987,9 @@ class NetherLinkPlugin(Star):
             if item is not None:
                 await self._apply_action_karma(item, player)
             await self._announce_action_done(item, player)
+            if item is not None:
+                # 动作名写进审计的 cmd —— 管理员在面板上搜得到
+                self._write_action_audit(item, player, True, via_card=False)
             return (
                 f"已完成（{player} 的好感变化 {self._signed(item.karma_delta)}）。"
                 f"\n你可以就此回一句简短的话，不要再调工具。"
@@ -2009,9 +2016,24 @@ class NetherLinkPlugin(Star):
         # 🔴 **必须给出具体话术**，不能只说「别宣称已完成」——2026-10-11 真机：
         #    AI 回了「跑腿费 2 点好感，已经扣掉了」。不是它不听话，是返回里只写了
         #    禁止项、没写该说什么，模型就自己编了一句像样的。两边都写死。
+        # 🔴 **话术要按 `karma_delta` 与 `cmd` 分支**（2026-10-11 评审）：
+        #    原先写死「扣 {cost} 好感并执行：{cmd}」，对 `offer_karma` 是
+        #    「扣 0 好感」（它其实要**加** 1~2 点），对空 `template` 的动作是
+        #    「并执行：」后面空着 —— AI 会把这些原样复述给玩家。
+        # ⚠️ 用本函数自己的  入参，**不要读 ** ——
+        #     只在上面那个「空 steps」分支里才被赋值，
+        #    走这条路的动作引它会 UnboundLocalError。
+        d = int(karma_delta if karma_delta is not None else 0)
+        if d > 0:
+            what = f"给 {player} 加 {d} 好感"
+        elif d < 0:
+            what = f"扣 {abs(d)} 好感"
+        else:
+            what = "不涉及好感"
+        tail = f"，然后执行：{cmd}" if cmd else ""
         return (
             f"已向 {player} 私聊发送确认卡。此刻什么都没发生：没给东西、没扣好感。"
-            f"等 {player} 点「确认」那一刻，插件才会扣 {cost} 好感并执行：{cmd}"
+            f"等 {player} 点「确认」那一刻，插件才会{what}{tail}"
             f"\n\n你现在只该回一句话，语义类似："
             f"「已经记下你的需求了，看看私信里的卡片，确认无误就点执行吧」。"
             f"\n不许说的：已经给了 / 已经扣了 / 好感我收下了 / 跑腿费付过了 —— "
@@ -2046,16 +2068,49 @@ class NetherLinkPlugin(Star):
                 f"NetherLink: 动作未执行（MC 端回报失败）| 玩家={player} "
                 f"token={token} 原因={detail or '未说明'}"
             )
+            self._write_action_audit(item, player, False, detail, via_card=True)
             return
         await self._apply_action_karma(item, player)
         # 🔴 **成功就必须播报** —— 2026-10-11 真机：改架构时漏了这段，
         #    玩家点了确认、东西到手了，公屏上却什么都没有（静默执行）。
         #    ⚠️ 放在 cost 判断之外 —— 免费动作一样要有播报。
         await self._announce_action_done(item, player)
+        self._write_action_audit(item, player, True, via_card=True)
     @staticmethod
     def _signed(n: int) -> str:
         """好感的带符号写法（给 AI 看的话术里用）。"""
         return ("+" + str(n)) if n > 0 else str(n)
+
+    def _write_action_audit(self, item, player: str, ok: bool,
+                            detail: str = "", via_card: bool = True) -> None:
+        """动作结算落一条审计（与指令审计同一个开关、同一份 audit.jsonl）。
+
+        🔴 **为什么单独一个 helper**：动作不产生「指令原文」，但
+        `_apply_action_karma` 在 `delta == 0` 时**提前返回**
+        ⇒ 免费动作（`model: none`）在那里面记就漏了。所以审计必须挂在
+        **结算点**上，而不是挂在扣好感那一步。四个结算点：
+        `_offer_action_confirm` 的空 steps 分支 / `_handle_action_result` 的
+        成功与失败分支 / `_execute_action`。
+        ⚠️ 2026-10-11 之前**一个都没有** —— 面板审计页对动作零记录（静默）。
+
+        `initiator` / `cmd` / `event` 三个字段要齐 —— 面板的过滤只认它们
+        （`panel.audit_view`）。动作没有指令，`cmd` 就放动作名，管理员搜得到。
+        """
+        try:
+            self._write_audit(
+                "action",
+                initiator=player,
+                cmd=item.action_name,
+                server=item.server_id or "auto",
+                action=item.action_name,
+                token=item.token,
+                ok=bool(ok),
+                via_card=bool(via_card),
+                delta=int(getattr(item, "karma_delta", 0) or 0),
+                note=detail or "",
+            )
+        except Exception as e:
+            logger.warning(f"NetherLink: 动作审计失败（已忽略）: {e}")
 
     async def _apply_action_karma(self, item, player: str) -> None:
         """按 `karma_delta` 改好感（带符号：正加负扣）。
@@ -2097,8 +2152,14 @@ class NetherLinkPlugin(Star):
                     items = actions.render_done_items(act, vals)
                 except Exception as e:
                     logger.warning(f"NetherLink: 播报物品名渲染失败（忽略）: {e}")
-            line = self._fmt(
-                tpl,
+            # 🔴 **把动作声明的每个参数都喂进去**（2026-10-11 加传送动作时发现）：
+            #    `done` 是**目录驱动的**，能用任何参数名，而 `_fmt` 走
+            #    `str.format` —— 少喂一个就 KeyError、被兜底成**原样返回**，
+            #    公屏上就打出字面量 `{x} {y} {z}`。
+            #    `{display_name}` 那次（同一天）是同一个坑的一个实例；
+            #    修法是「全喂」，不是「再补一个」。
+            kw = {k: v for k, v in vals.items() if isinstance(k, str)}
+            kw.update(
                 player=player,
                 cost=item.cost,
                 delta=getattr(item, "karma_delta", 0),
@@ -2108,8 +2169,25 @@ class NetherLinkPlugin(Star):
                 count=int(vals.get("count") or 1),
                 server=self._mc_server_display(item.server_id),
             )
-            await self._send_to_mc({"type": "bot_reply", "line": line},
-                                   item.server_id)
+            line = self._fmt(tpl, **kw)
+            # 🔴 **另发一份结构化部件**（用户 2026-10-11 要求）：公屏那条要把
+            #    提到的物品**染蓝 + 带 show_item 悬停**，而纯文本行办不到。
+            #    按 `{items}` 把模板切成「文本段 / 物品段」——
+            #    QQ 群那条仍用纯文本 `line`（那边没有 hover 这回事）。
+            parts = []
+            if act is not None and "{items}" in tpl:
+                entries = actions.render_done_item_entries(act, vals)
+                kw_no_items = {k: v for k, v in kw.items() if k != "items"}
+                for i, seg in enumerate(tpl.split("{items}")):
+                    if i:
+                        parts.append({"type": "items", "items": entries})
+                    txt = self._fmt(seg, **kw_no_items) if seg else ""
+                    if txt:
+                        parts.append({"type": "text", "text": txt})
+            payload = {"type": "bot_reply", "line": line}
+            if parts:
+                payload["parts"] = parts
+            await self._send_to_mc(payload, item.server_id)
             await self._broadcast(line)
         except Exception as e:
             logger.warning(f"NetherLink: 动作完成播报失败（忽略）: {e}")
@@ -2230,7 +2308,14 @@ class NetherLinkPlugin(Star):
         #    `model: none`（真免费，delta 也是 0）这两种情形。
         if not cost:
             await self._apply_action_karma(item, player)
+        # ⚠️ 动作若有 `reason` 参数，**私聊**转达 —— 这是它 desc 承诺的语义
+        #    （2026-10-11：原先没有任何一处读它，AI 以为说了、玩家什么都没看到）。
+        #    私聊而非公屏：拒收理由上公屏会尴尬。
+        reason = str(values.get("reason") or "").strip()
+        if reason:
+            await self._tell_player(player, reason, server_id)
         await self._announce_action_done(item, player)
+        self._write_action_audit(item, player, True, via_card=False)
         if not cmd:
             return (
                 f"已完成（{player} 的好感变化 {self._signed(item.karma_delta)}）。"

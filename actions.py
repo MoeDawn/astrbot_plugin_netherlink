@@ -40,6 +40,14 @@ from typing import Optional
 #    注意它比正版账号的 `[A-Za-z0-9_]` 宽（含 `. + -`），少数离线服会用。
 _RE_PLAYER = re.compile(r"^[A-Za-z0-9_.+-]{1,16}$")
 
+# 坐标值：绝对数（含负数/小数）、相对 `~`、局部 `^` 都允许，其余一律拒绝。
+# 🔴 **安全关键**：这个值会直接拼进以控制台身份执行的 `tp` 命令，
+#    所以用的是**白名单**（与 `_RE_PLAYER` 同一思路）—— 分号（分隔命令）、
+#    空格、换行、`@`、`$` 全被挡在外面。
+#    允许 `~5` / `^1.5` / `-12.5` / `~` / `100`。
+_RE_COORD = re.compile(r"^(?:[~^]-?\d{0,10}(?:\.\d{1,6})?|-?\d{1,10}(?:\.\d{1,6})?)$")
+
+
 # 物品 ID：`namespace:path` 或裸 `path`（裸的按 minecraft: 归一）。
 # namespace 与 path 的字符集来自 `Identifier`（`isValidNamespace` / `isValidPath`）。
 _RE_NS = re.compile(r"^[a-z0-9_.-]+$")
@@ -84,7 +92,7 @@ TOKEN_BASE = 10000
 # ⚠️ 加一个 op 必须**同时**改 Java 的 `runSteps` / `applyStep`，否则真机上
 #    那一步会被当成「未知的步骤类型」静默失败，而本地测试全绿。
 #    守卫 `test_step_ops_match_the_mc_side` 钉住两边一致。
-STEP_OPS = ("check", "clear", "give", "modify")
+STEP_OPS = ("check", "clear", "give", "modify", "command")
 
 
 def new_token(counter: int) -> int:
@@ -281,6 +289,13 @@ def parse_actions(doc) -> list:
                     raise ActionError(
                         "动作 %r 的 apply 第 %d 条 op 只能是 %s，实际 %r"
                         % (name, k + 1, "/".join(STEP_OPS), op))
+                # 🔴 `command` 步**无法预校验**（命令成不成只有跑了才知道），
+                #    所以它必须**独占** —— 与任何别的步骤共存都会在
+                #    「前面扣了材料、它失败」时留下半成品。
+                if op == "command" and len(apply_rules) != 1:
+                    raise ActionError(
+                        "动作 %r 含 command 步骤，它必须独占（不能与别的步骤共存）："
+                        "command 无法预校验，混着用会留下半成品状态" % name)
                 src = str(rule.get("from") or "")
                 if src not in params:
                     raise ActionError(
@@ -392,6 +407,21 @@ def normalize_player(value) -> str:
     return s
 
 
+def normalize_coord(value) -> str:
+    """校验并归一坐标分量（`x` / `y` / `z` 各调一次）。非法就抛。
+
+    支持绝对数、`~` 相对、`^` 局部 —— 都是原版 `tp` 的合法写法。
+    """
+    s = str(value if value is not None else "").strip()
+    if not _RE_COORD.match(s):
+        raise ActionError(
+            "坐标 %r 非法：只允许数字（可带小数与负号），或 `~` / `^` 开头的"
+            "相对/局部坐标。别的字符一律不行 —— 它会拼进以控制台身份执行的命令"
+            % s
+        )
+    return s
+
+
 def normalize_item_id(value) -> str:
     """校验并归一物品 ID：接受 `name` 或 `ns:name`，返回**带命名空间**的形式。"""
     s = str(value or "").strip().lower()
@@ -486,6 +516,8 @@ def _coerce(spec: dict, value, pname: str):
         #    返回值仍是原串 —— 展开成条目在 `expand_slot_list` 里做。
         expand_slot_list(value)
         return str(value).strip()
+    if t == "coord":
+        return normalize_coord(value)
     if t == "components":
         return normalize_components(value)
     if t == "str":
@@ -642,6 +674,17 @@ def expand_steps(action: "Action", values: dict) -> list:
             continue
         typ = str(spec.get("type") or "str")
 
+        # ---- command：不引用参数，展开成**动作自己的 template** ----
+        # 🔴 **为什么必须有这个 op**：`template` 与 `confirm` 共存在旧写法下会
+        #    **静默失灵** —— `apply` 默认成空列表 ⇒ steps 为空 ⇒
+        #    `_offer_action_confirm` 走「空 steps 立即结算」的分支，
+        #    命令永远不执行。有了这个 op，模板才走得进确认卡那条路。
+        #    `from` 必须指向**某个已声明参数**（规则统一的形状），
+        #    约定填 `player`；真正的文本来自 `template`。
+        if op == "command":
+            steps.append({"op": "command", "cmd": render_command(action, values)})
+            continue
+
         # ---- modify：`from` 指向 slot_list（`槽位=显示名`），组件来自另一个参数 ----
         if op == "modify":
             if typ != "slot_list":
@@ -734,6 +777,18 @@ def render_done_items(action: "Action", values: dict) -> str:
     （`swap_items` 设成 `[gain]`，因为 `pay` 是玩家上交的，
     不该出现在「获得」播报里）。
     """
+    entries = render_done_item_entries(action, values)
+    return " ".join("⌜%s⌝ ×%d" % (e["name"], e["count"]) for e in entries)
+
+
+def render_done_item_entries(action: "Action", values: dict) -> list:
+    """同上的**结构化**版本：`[{id, count, name, components?}]`。
+
+    `render_done_items` 只是把它拼成字符串。拆出来是因为**播报要带 hover**
+    （用户 2026-10-11：「同意确认卡片之后发的那条公告也把提到的物品用蓝色
+    字体显示，同时添加 hover 显示 show_item 详细信息」）——
+    那样 MC 端需要拿到 `id` 与 `components`，光有一行文字办不到。
+    """
     out = []
     for pname in (action.done_items_from or ["item"]):
         spec = action.params.get(pname)
@@ -744,8 +799,13 @@ def render_done_items(action: "Action", values: dict) -> str:
             continue
         ptype = str(spec.get("type") or "")
         if ptype == "item_list":
+            shared = str(values.get("display_name") or "").strip()
             for it in expand_item_list(val):
-                out.append("⌜%s⌝ ×%d" % (it.get("name") or it["id"], it["count"]))
+                e = {"id": it["id"], "count": it["count"],
+                     "name": it.get("name") or shared or it["id"]}
+                if it.get("components"):
+                    e["components"] = it["components"]
+                out.append(e)
         elif ptype == "item_id":
             # 数量可能来自另一个参数（同 expand_steps 的 count_from）
             cnt = 1
@@ -758,8 +818,12 @@ def render_done_items(action: "Action", values: dict) -> str:
                         cnt = 1
                     break
             name = str(values.get("display_name") or "").strip() or str(val)
-            out.append("⌜%s⌝ ×%d" % (name, cnt))
-    return " ".join(out)
+            e = {"id": str(val), "count": cnt, "name": name}
+            comps = _components_param_for(action, pname, values)
+            if comps:
+                e["components"] = comps
+            out.append(e)
+    return out
 
 
 def _components_param_for(action: "Action", pname: str, values: dict) -> str:
@@ -853,8 +917,13 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
     # ⚠️ **`display_name` 除外**：它已经当物品显示名用掉了，再加一行就是重复
     # ⚠️ **`components` 也不再出行**（用户 2026-10-11）：hover 现在能看全，
     #    再拿一排 `改成: custom_name={...}` 的原始组件文本是噪声。
+    # ⚠️ 标量类型都出一行（`str` / `coord` / `dimension` / `player`）——
+    #    2026-10-11 加传送动作时发现：只认 `str` 会让 `coord` 与 `target`
+    #    都不显示，**确认卡是空的**。`player` 排除的是主接收者（那是卡片的
+    #    沉默前提，不是要确认的信息），`target` 这种**另一个**玩家要显示。
     for pname, pspec in action.params.items():
-        if str(pspec.get("type") or "") not in ("str",) or pname == "player":
+        if str(pspec.get("type") or "") not in (
+                "str", "coord", "dimension", "player") or pname == "player":
             continue
         if pname in ("display_name", "components"):
             continue
