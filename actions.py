@@ -762,6 +762,23 @@ def render_done_items(action: "Action", values: dict) -> str:
     return " ".join(out)
 
 
+def _components_param_for(action: "Action", pname: str, values: dict) -> str:
+    """`apply` 里为这个参数声明的 `components_from` 指向哪个参数 —— 取它的值。
+
+    卡片把组件一并交给 MC 端，它据此造**带完整组件的 hover**
+    （与玩家在物品栏里悬停所见一致）。
+
+    找不到就返回空串 —— 那种情况卡片只显示裸物品，
+    由 MC 端自己想办法（`modify_item` 的 `slot_list` 就是如此：
+    它从玩家真实物品上读，见 build_card 里的 `slots`）。
+    """
+    for rule in action.apply:
+        if (isinstance(rule, dict) and rule.get("from") == pname
+                and rule.get("components_from")):
+            return str(values.get(rule["components_from"]) or "").strip()
+    return ""
+
+
 def build_card(action: "Action", values: dict, cost: int) -> dict:
     """产出给 MC 端渲染卡片的**数据**（不是 tellraw JSON）。
 
@@ -788,11 +805,14 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
         if ptype == "slot_list":
             # 改哪几个槽位（`modify_item` 的 targets）。它没有物品 ID，
             # 走 text 通道：显示名优先，没写就退回槽位名。
+            # 🔴 额外带上 `slot`：MC 端据此**去读那个格子里真实的物品**，
+            #    用它做 hover —— 改的是玩家自己那件，组件只有那边知道。
             pairs = expand_slot_list(val)
             lines.append({
                 "label": str(spec.get(pname + "_label")
                              or pspec.get("label") or pname),
                 "text": "、".join(n or s for s, n in pairs),
+                "slots": [s for s, _n in pairs],
             })
             continue
         if ptype == "item_list":
@@ -812,7 +832,15 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
                     except (TypeError, ValueError):
                         cnt = 1
                     break
-            items = [{"id": str(val), "count": cnt, "name": shared_name}]
+            entry = {"id": str(val), "count": cnt, "name": shared_name}
+            # 🔴 组件一并给 MC 端 —— 它用 `ItemStack.asHoverEvent()` 造 hover，
+            #    于是玩家悬停看到的是**带名字/附魔的那件**，不是裸物品。
+            #    （改前只给了 id ⇒ hover 是普通版本，玩家只能从下面的
+            #      component 文本栏看出「其实有名字」，用户 2026-10-11 报的正是这个）
+            comps = _components_param_for(action, pname, values)
+            if comps:
+                entry["components"] = comps
+            items = [entry]
         else:
             continue
         lines.append({
@@ -823,11 +851,12 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
 
     # 非物品参数里显眼的也带上（如改名动作的 custom_name）
     # ⚠️ **`display_name` 除外**：它已经当物品显示名用掉了，再加一行就是重复
+    # ⚠️ **`components` 也不再出行**（用户 2026-10-11）：hover 现在能看全，
+    #    再拿一排 `改成: custom_name={...}` 的原始组件文本是噪声。
     for pname, pspec in action.params.items():
-        if str(pspec.get("type") or "") not in ("str", "components") \
-                or pname == "player":
+        if str(pspec.get("type") or "") not in ("str",) or pname == "player":
             continue
-        if pname == "display_name":
+        if pname in ("display_name", "components"):
             continue
         val = values.get(pname)
         if val:
