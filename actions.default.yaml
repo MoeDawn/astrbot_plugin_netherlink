@@ -1,67 +1,70 @@
-# NetherLink 结构化动作目录（默认值）
+# NetherLink 结构化动作目录(默认值)
 #
 # 这是**给人改的**配置文件 —— 插件首次启动时会把它复制到
 #   data/plugin_data/netherlink/actions.yaml
-# 之后**只读那一份**（升级不覆盖）。
+# 之后**只读那一份**(升级不覆盖).
 #
-# 用途：把「命令文本的生成」从 AI 移出。AI 只填参数，插件按 template 拼命令
-# 并做校验。设计见 docs/superpowers/specs/2026-10-10-structured-actions-and-local-menu-design.md
+# 用途:把"命令文本的生成"从 AI 移出.AI 只填参数,插件按 template 拼命令
+# 并做校验.设计见 docs/superpowers/specs/2026-10-10-structured-actions-and-local-menu-design.md
 #
-# 改完要**重启或热重载**插件才生效。目录里有格式错时插件启动会**响亮报错**，
-# 不会静默跳过某一条。
+# 改完要**重启或热重载**插件才生效.目录里有格式错时插件启动会**响亮报错**,
+# 不会静默跳过某一条.
 #
 # ---------------------------------------------------------------------------
 # 字段说明
 # ---------------------------------------------------------------------------
-#   name      工具名（AI 看到的就是它）。只允许小写字母/数字/下划线，字母开头。
-#             不要用 mc_command / mc_karma（与既有工具撞名）。
+#   name      工具名(AI 看到的就是它).只允许小写字母/数字/下划线,字母开头.
+#             不要用 mc_command / mc_karma(与既有工具撞名).
 #   label     给人看的名字
-#   desc      工具描述的开头（AI 靠它判断该不该用这个工具）
-#   params    参数表。每个参数：
+#   desc      工具描述的开头(AI 靠它判断该不该用这个工具)
+#   params    参数表.每个参数:
 #               type      player | item_id | int | str
-#               required  必填？（**有 default 时不必写 required**）
-#               default   缺省值；写了它就不算必填
+#               required  必填?(**有 default 时不必写 required**)
+#               default   缺省值;写了它就不算必填
 #               min/max   仅 int
 #               max_len   仅 str
-#               desc      参数说明（进 JSON Schema，AI 看得到）
-#   template  命令模板。`{参数名}` 会被替换。**不带前导斜杠**。
-#             ⚠️ 占位符必须在 params 里有对应项，否则启动报错。
-#   karma     定价。三选一：
+#               desc      参数说明(进 JSON Schema,AI 看得到)
+#   template  命令模板.`{参数名}` 会被替换.**不带前导斜杠**.
+#             ⚠️ 占位符必须在 params 里有对应项,否则启动报错.
+#   karma     定价.三选一:
 #               model: none            免费
-#               model: fixed           写死（还要给 cost: <整数>）
-#               model: table_then_ai   表内查表；表外要 AI 按 pricing_rules 报价
-#             table_then_ai 还要给：
+#               model: fixed           写死(还要给 cost: <整数>)
+#               model: table_then_ai   表内查表;表外要 AI 按 pricing_rules 报价
+#             table_then_ai 还要给:
 #               table           {物品ID: 好感}
-#               pricing_rules   给 AI 看的报价规则（注入工具描述）
-#               table_key       用哪个参数查表（默认 item）
-#   confirm   是否先发确认卡（玩家点了才执行）
+#               pricing_rules   给 AI 看的报价规则(注入工具描述)
+#               table_key       用哪个参数查表(默认 item)
+#   confirm   是否先发确认卡(玩家点了才执行)
 #   done      完成播报模板
 # ---------------------------------------------------------------------------
 
-# ⚠️ 改动过**语义**时把这个数字 +1。插件会拿它跟落盘的旧文件比对，
-#    更旧就告警（这份文件**从不覆盖**已存在的 —— 那是给人改的）。
-#    1 → 2：confirm 动作现在必须有 apply（展开成 check/clear/give）。
-#    2 → 3：give_item 不再限「纯物品」—— 支持 components（改名/附魔/属性…）；
-#           新增 modify_item（改玩家**已有**物品）。
+# ⚠️ 改动过**语义**时把这个数字 +1.插件会拿它跟落盘的旧文件比对,
+#    更旧就告警(这份文件**从不覆盖**已存在的 —— 那是给人改的).
+#    1 → 2:confirm 动作现在必须有 apply(展开成 check/clear/give).
+#    2 → 3:give_item 不再限"纯物品"—— 支持 components(改名/附魔/属性…);
+#           新增 modify_item(改玩家**已有**物品).
 version: 3
 
 actions:
   # -------------------------------------------------------------------------
   # 给玩家物品
   # -------------------------------------------------------------------------
-  # ⚠️ 本动作**只管「纯物品」**，不带自定义名称 / 附魔 / 属性。
-  #    那类请求属于「造物品」，价格量级不同且有物品复制风险（玩家先改名、
-  #    拿到物品、把原物品丢掉、再让 AI 改名 ⇒ 凭空多一件），必须另立
-  #    专用动作做原子操作。目前这类请求让它走 mc_command。
-  #    解释见 design spec §2.4。
+  # ⚠️ 本动作**只管"纯物品"**,不带自定义名称 / 附魔 / 属性.
+  #    那类请求属于"造物品",价格量级不同且有物品复制风险(玩家先改名,
+  #    拿到物品,把原物品丢掉,再让 AI 改名 ⇒ 凭空多一件),必须另立
+  #    专用动作做原子操作.目前这类请求让它走 mc_command.
+  #    解释见 design spec §2.4.
   - name: give_item
     label: 给玩家物品
     desc: >-
-      给玩家发放物品（**可以带自定义名称 / 附魔 / 属性 / 说明**）。
-      本工具**只发确认卡、不执行也不扣费**：调用后事情还没发生，
-      必须等玩家点「确认」。所以**不要**对玩家说「已给你」或「已经扣了好感」。
-      若他问「扣了多少」——告诉他确认后才扣，现在还没扣。
-      要改玩家**身上已有**的东西，用 modify_item，不是这个。
+      凭空给玩家**变出**一件新物品(不消耗他的任何东西).
+      可以带自定义名称 / 附魔 / 属性 / 说明,写进 components.
+      玩家说"给我一把钻石剑""给我一箱铁锭""给我一把叫绝影的剑"用这个.
+      玩家要在原有基础上**换**(要交材料,要交出旧装备)用 swap_items.
+      玩家要改自己**身上已有**的东西用 modify_item.
+      ⚠️ 调用本工具**只发一张私聊确认卡,此刻什么都没发生** —— 没给东西,没扣好感.
+      所以**不要**说"已经给你了""好感已经扣了".他若问扣多少,
+      就说"点了确认才扣,现在还没扣".
     params:
       player:
         type: player
@@ -70,43 +73,45 @@ actions:
       item:
         type: item_id
         required: true
-        desc: 物品 ID，如 diamond 或 minecraft:diamond。要带名字/附魔/属性就填 components
+        desc: 物品 ID,如 diamond 或 minecraft:diamond.要带名字/附魔/属性就填 components
       count:
         type: int
         min: 1
         max: 6400
         default: 1
-        desc: 数量，默认 1
+        desc: 数量,默认 1
       display_name:
         type: str
         required: true
         max_len: 24
         desc: >-
-          这件东西在**卡片和播报里**给玩家看的名字，如「铁锭」「一把钻石剑」。
-          ⚠️ 不是物品 ID —— 填 minecraft:iron_ingot 的话公屏上就显示这串英文。
+          这件东西在**卡片和播报里**给玩家看的名字,如"铁锭""一把钻石剑".
+          ⚠️ 不是物品 ID —— 填 minecraft:iron_ingot 的话公屏上就显示这串英文.
       components:
         type: components
         required: false
         desc: >-
-          物品的附加内容，**不填就是普通物品**。写法（只写方括号内部）：
+          物品的附加内容,**不填就是普通物品**.写法(只写方括号内部):
             改名: custom_name={text:"龙鳞",color:"gold",bold:true}
             说明: lore=[{text:"第一行",color:"red"},{text:"第二行"}]
             附魔: enchantments={"minecraft:sharpness":5,"minecraft:unbreaking":3}
             属性: attribute_modifiers=[{type:"attack_damage",amount:20,operation:"add_value",slot:"mainhand",id:"x"}]
             不可破坏: unbreakable={}
             稀有度: rarity="epic"
-          多项用逗号连接，如 custom_name={text:"绝影",color:"aqua"},enchantments={"minecraft:sharpness":5}
-          ⚠️ 名字/说明要带颜色或样式时**必须**写成组件对象 {text:"...",color:"..."}；
-             写成 '{"text":"..."}'（JSON 套引号）会**静默变成字面量**，显示一堆花括号。
-          ⚠️ 组件名写在方括号里、用 = 连接；附魔名要带 minecraft: 前缀。
+          多项用逗号连接,如 custom_name={text:"绝影",color:"aqua"},enchantments={"minecraft:sharpness":5}
+          ⚠️ 名字/说明要带颜色或样式时**必须**写成组件对象 {text:"...",color:"..."};
+             写成 '{"text":"..."}'(JSON 套引号)会**静默变成字面量**,显示一堆花括号.
+          ⚠️ 组件名写在方括号里,用 = 连接;附魔名要带 minecraft: 前缀.
       cost:
         type: int
         min: 0
         required: false
         desc: >-
-          仅当物品**不在**下面的价目表里时才填 —— 按说明里的规则报价。
-          表内物品不用填（填了也会被忽略）。
-          ⚠️ 这里填的只是**报价**，玩家点「确认」之后才真的扣。
+          仅当物品**不在**下面的价目表里时才填 —— 按说明里的规则报价.
+          表内物品不用填(填了也会被忽略).
+          表外**带组件**的(自定义名字 / 附魔 / 属性)是"造物品"量级:
+          按下面规则的档次,再往上加 2~5 点.
+          ⚠️ 这里填的只是**报价**,玩家点"确认"之后才真的扣.
     template: "give {player} {item} {count}"
     karma:
       model: table_then_ai
@@ -123,17 +128,19 @@ actions:
         minecraft:ancient_debris: 5
         minecraft:heart_of_the_sea: 5
       pricing_rules: |-
-        报价规则（物品不在上面的表里时，按它算出一个整数填进 cost）：
-        1 = 原版常见、易得的普通物品（木头、石头、泥土、食物、羊毛等）
-        2 = 需要挖掘或合成、但不算稀有的（铁、铜、红石、青金石、书等）
-        3 = 稀有或需要一定功夫的（金、绿宝石、钻石类工具装备、下界合金相关）
-        5 = 需要探索或定位才拿得到的（海洋之心、远古残骸、回响碎片等）
-        7 = 结构战利品或需要打 Boss 才有的（鞘翅、龙蛋、下界之星、附魔金苹果）
-        拿不准时按 3 算。**只给普通物品**；要求加名称/附魔/属性的一律改用 mc_command。
+        报价规则(物品不在上面的表里时,按它算出一个整数填进 cost):
+        1 = 原版常见,易得的普通物品(木头,石头,泥土,食物,羊毛等)
+        2 = 需要挖掘或合成,但不算稀有的(铁,铜,红石,青金石,书等)
+        3 = 稀有或需要一定功夫的(金,绿宝石,钻石类工具装备,下界合金相关)
+        5 = 需要探索或定位才拿得到的(海洋之心,远古残骸,回响碎片等)
+        7 = 结构战利品或需要打 Boss 才有的(鞘翅,龙蛋,下界之星,附魔金苹果)
+        拿不准时按 3 算.
+        以上是**普通物品**的价.带组件(自定义名称 / 附魔 / 属性)的属于
+        "造物品"量级,在对应档次上**再加 2~5 点**.
     confirm: true
-    # 展开成 MC 可执行的步骤（spec §10）：MC 不认识动作名，只认 check/clear/give。
-    # ⚠️ give_item 是「凭空给」，没有 check（不消耗玩家的东西）。要消耗材料的
-    #    动作才需要 check —— 见 swap_items。
+    # 展开成 MC 可执行的步骤(spec §10):MC 不认识动作名,只认 check/clear/give.
+    # ⚠️ give_item 是"凭空给",没有 check(不消耗玩家的东西).要消耗材料的
+    #    动作才需要 check —— 见 swap_items.
     apply:
       - {op: give, from: item, count_from: count, components_from: components}
     card:
@@ -141,26 +148,29 @@ actions:
       item_label: "获得"
       confirm_hover: "同意,扣除 {cost} 好感"
       cancel_hover: "否决,无消耗"
-    # `{items}` = 「⌜显示名⌝ ×数量」串（见 actions.render_done_items）。
-    # ⚠️ **不要用 `{item}`** —— 那给的是物品 ID（`minecraft:iron_ingot`），
-    #    公屏上会显示一串英文 ID 而不是显示名。
+    # `{items}` = "⌜显示名⌝ ×数量"串(见 actions.render_done_items).
+    # ⚠️ **不要用 `{item}`** —— 那给的是物品 ID(`minecraft:iron_ingot`),
+    #    公屏上会显示一串英文 ID 而不是显示名.
     done: "{player} 花费 {cost} 好感获得 {items}"
   # -------------------------------------------------------------------------
-  # 交换物品（材料换成品）—— **扣材料的唯一归宿**
+  # 交换物品(材料换成品)—— **扣材料的唯一归宿**
   # -------------------------------------------------------------------------
-  # 用途：玩家上交材料换一件/多件物品。服务器设定「超规格物品要消耗绿宝石
-  #      原矿、回响碎片」这类材料，就靠它扣。
-  #      玩家从零要新的、还是把**已有装备**升级，都由 LLM 按提示词决定 ——
-  #      要升级就在 pay 里把「他原本那件装备 + 材料」一起写上。
-  # ⚠️ 收走玩家装备这一步风险最高（`/item replace ... from ...` 是**复制**语义）。
-  #    MC 端按 steps 里的 clear 精确扣（先数后抠），规格见 spec §10。
+  # 用途:玩家上交材料换一件/多件物品.服务器设定"超规格物品要消耗绿宝石
+  #      原矿,回响碎片"这类材料,就靠它扣.
+  #      玩家从零要新的,还是把**已有装备**升级,都由 LLM 按提示词决定 ——
+  #      要升级就在 pay 里把"他原本那件装备 + 材料"一起写上.
+  # ⚠️ 收走玩家装备这一步风险最高(`/item replace ... from ...` 是**复制**语义).
+  #    MC 端按 steps 里的 clear 精确扣(先数后抠),规格见 spec §10.
   - name: swap_items
     label: 交换物品
     desc: >-
-      玩家上交若干材料，换回若干物品。**上交物与下发物都可以不止一种**。
-      材料不足时插件会拒绝并私聊告知，不用你算。
-      玩家要「升级自己身上的装备」时，把**那件装备本身也写进 pay**，
-      把升级后的成品写进 gain。
+      玩家交出若干东西,换回若干东西 —— 这是**唯一会收走玩家物品**的工具.
+      交出的与换回的都可以不止一种.
+      玩家说"用 8 个绿宝石原矿换一把剑""把手上这把剑升级成神剑"用这个.
+      玩家只是要一件新东西,不交出任何东西,用 give_item.
+      ⚠️ 交出物必须真在他背包里:**数量不够就整体拒绝**,一件都不动,也不加好感.
+      所以你不用自己算他够不够,调下去让插件核验即可.
+      升级**已有装备**时,把那件装备本身也写进 pay,把成品写进 gain.
     params:
       player:
         type: player
@@ -170,19 +180,19 @@ actions:
         type: item_list
         required: true
         desc: >-
-          玩家上交的物品。格式 `物品ID*数量=显示名`，多项用 `;` 隔开。
-          例：`minecraft:emerald*8=绿宝石原矿; minecraft:echo_shard*2=回响碎片`
-          数量省略为 1；显示名只用于给玩家看的卡片。
+          玩家上交的物品.格式 `物品ID*数量=显示名`,多项用 `;` 隔开.
+          例:`minecraft:emerald*8=绿宝石原矿; minecraft:echo_shard*2=回响碎片`
+          数量省略为 1;显示名只用于给玩家看的卡片.
       gain:
         type: item_list
         required: true
-        desc: 玩家获得的物品，格式同 pay。例：`minecraft:iron_ingot*3=铁锭`
+        desc: 玩家获得的物品,格式同 pay.例:`minecraft:iron_ingot*3=铁锭`
       cost:
         type: int
         required: false
         min: 0
-        desc: 净好感消耗。这次交换要收多少好感，自己判断（0 = 不收）。
-    # ⚠️ 播报取 **gain**（他获得的），不是 pay（他上交的）
+        desc: 净好感消耗.这次交换要收多少好感,自己判断(0 = 不收).
+    # ⚠️ 播报取 **gain**(他获得的),不是 pay(他上交的)
     done_items_from: [gain]
     template: ""
     apply:
@@ -199,20 +209,25 @@ actions:
     done: "{player} 交换获得 {items}"
 
   # -------------------------------------------------------------------------
-  # 修改玩家**已有**物品（改名 / 附魔 / 属性 / 说明）
+  # 修改玩家**已有**物品(改名 / 附魔 / 属性 / 说明)
   # -------------------------------------------------------------------------
-  # ⚠️ 与 give_item 的区别：这个是改他**身上那件**，不是发一件新的。
-  #    实现上原地替换同一格（读出来 → 合并组件 → 写回），不会有复制窗口。
-  # ⚠️ **会覆盖**该物品原有的组件：玩家那把武器原本的附魔若没写进 components
-  #    就没了。要保留就把它一起写进来。
+  # ⚠️ 与 give_item 的区别:这个是改他**身上那件**,不是发一件新的.
+  #    实现上原地替换同一格(读出来 → 合并组件 → 写回),不会有复制窗口.
+  # ⚠️ **会覆盖**该物品原有的组件:玩家那把武器原本的附魔若没写进 components
+  #    就没了.要保留就把它一起写进来.
   - name: modify_item
     label: 修改物品
     desc: >-
-      修改玩家**身上已有**物品的名称 / 说明 / 附魔 / 属性。**不是发新的**——
-      物品本身、数量、所在格子都不变。
-      玩家说「给手上这把剑改名」「给我穿的这套装备加附魔」时用这个。
-      ⚠️ 只改你写进 components 的那几项，**没写的组件会按新物品重算**，
-         所以要把想保留的一起写上。
+      就地改玩家**身上已有**那件物品的名称 / 说明 / 附魔 / 属性.
+      **不是发新的** —— 物品本身,数量,所在格子都不变(所以不会复制出第二件).
+      玩家说"给手上这把剑改名""给我穿的这套装备加附魔"用这个.
+      ✅ **只写你要改的那几项就行.** 他物品上其余组件(原有附魔,原有说明,
+         原有名字,不可破坏等)**由服务器自动原样保留** ——
+         不用你抄一遍,你也读不到,抄不了.
+         例:他要把剑改名叫"绝影",就只写 custom_name;那把剑的锋利 V 照样在.
+      ⚠️ 唯一的例外:**附魔是整套替换**. 写 enchantments 就是**换掉整组附魔**,
+         不是往里加一条. 所以他要"再加一个附魔"时,要把原来那些一起写上;
+         不确定他原来有什么,先问清楚再动手.
     params:
       player:
         type: player
@@ -222,33 +237,36 @@ actions:
         type: slot_list
         required: true
         desc: >-
-          要改哪几个槽位，格式 `槽位=卡片上显示的名字`，多个用 ; 隔开。
-          可用槽位：weapon.mainhand / weapon.offhand /
+          要改哪几个槽位,格式 `槽位=卡片上显示的名字`,多个用 ; 隔开.
+          可用槽位:weapon.mainhand / weapon.offhand /
           armor.head / armor.chest / armor.legs / armor.feet /
           hotbar.0~8 / inventory.9~35
-          例：单件用 `weapon.mainhand=绝影`；
+          例:单件用 `weapon.mainhand=绝影`;
               全套装备用 `armor.head=神级头盔; armor.chest=神级胸甲; armor.legs=神级护腿; armor.feet=神级靴子`
       components:
         type: components
         required: true
+        label: 改成
         desc: >-
-          要写上去的组件，**同一批 target 共用这一套**。写法同 give_item：
+          要**改**的那几项组件. 没写的项一律保留玩家物品原样(见工具说明),
+          所以不用把原有组件抄一遍.
+          **同一批 target 共用这一套**.写法同 give_item:
             改名: custom_name={text:"龙鳞",color:"gold",bold:true}
             说明: lore=[{text:"第一行",color:"red"}]
             附魔: enchantments={"minecraft:sharpness":5,"minecraft:unbreaking":3}
             属性: attribute_modifiers=[{type:"attack_damage",amount:20,operation:"add_value",slot:"mainhand",id:"x"}]
             不可破坏: unbreakable={}
-          多个组件用逗号连接。
-          ⚠️ 名字带颜色时必须写组件对象 {text:"...",color:"..."}，
-             写成 '{"text":"..."}'（JSON 套引号）会**静默变成字面量**。
+          多个组件用逗号连接.
+          ⚠️ 名字带颜色时必须写组件对象 {text:"...",color:"..."},
+             写成 '{"text":"..."}'(JSON 套引号)会**静默变成字面量**.
       cost:
         type: int
         required: false
         min: 0
-        desc: 净好感消耗。改属性属于「造物品」量级，通常比给普通物品贵。
+        desc: 净好感消耗.改属性属于"造物品"量级,通常比给普通物品贵.
     template: ""
-    # ⚠️ **不要 check** —— `targets` 是要改的槽位、不是材料。槽位是否为空、
-    #    组件是否写得出来，都由 MC 端的 modify 步骤在**动手前**校验。
+    # ⚠️ **不要 check** —— `targets` 是要改的槽位,不是材料.槽位是否为空,
+    #    组件是否写得出来,都由 MC 端的 modify 步骤在**动手前**校验.
     apply:
       - {op: modify, from: targets, components_from: components}
     card:
@@ -260,17 +278,21 @@ actions:
     done: "{player} 花费 {cost} 好感修改了物品"
 
   # -------------------------------------------------------------------------
-  # 收下礼物（玩家送了有价值的东西）
+  # 收下礼物(玩家送了有价值的东西)
   # -------------------------------------------------------------------------
-  # ⚠️ 与 give_item 的区别：**方向相反** —— 是玩家给 AI，不是 AI 给玩家。
-  # ⚠️ 物品必须真在他背包里：`apply` 里的 check 先核验，不够就整体拒绝、不加好感。
-  #    这一步也是防「口头说说就加好感」的技术兜底（提示词那一层管不了谎报）。
+  # ⚠️ 与 give_item 的区别:**方向相反** —— 是玩家给 AI,不是 AI 给玩家.
+  # ⚠️ 物品必须真在他背包里:`apply` 里的 check 先核验,不够就整体拒绝,不加好感.
+  #    这一步也是防"口头说说就加好感"的技术兜底(提示词那一层管不了谎报).
   - name: offer_karma
     label: 收下礼物
     desc: >-
-      玩家送了**有价值**的东西，收下并加好感。物品必须真的在他背包里 ——
-      插件会先核验再收走；核验不过直接失败，**不会加好感**。
-      只加 1 或 2 点。判断标准见系统提示词里的礼物规则。
+      玩家送来**有价值**的东西,收下,把它**收走**,并加 1~2 点好感.
+      什么算有价值见系统提示词里的礼物规则.
+      送的东西没价值或能量产,改用 refuse_gift.
+      ⚠️ 物品必须真在他背包里:**插件先核验再收走,核验不过直接失败,不会加好感**
+         —— 所以光嘴上说"我送你了"是加不到好感的.
+      ⚠️ 调用后**只发一张私聊确认卡,此刻什么都没发生**(东西没拿走,好感没加).
+         他要点"确认"才算.所以别对他说"已经收下了""好感加好了".
     params:
       player:
         type: player
@@ -279,48 +301,50 @@ actions:
       item:
         type: item_id
         required: true
-        desc: 物品 ID，如 diamond 或 minecraft:diamond
+        desc: 物品 ID,如 diamond 或 minecraft:diamond
       count:
         type: int
         min: 1
         max: 6400
         default: 1
-        desc: 数量，默认 1
+        desc: 数量,默认 1
       display_name:
         type: str
         required: true
         max_len: 24
-        desc: 卡片和播报里给玩家看的名字，如「钻石」
+        desc: 这个物品的名字,卡片与播报里给玩家看,如"钻石".就是它显示在方括号里的那个名字
       delta:
         type: int
         required: true
         min: 1
         max: 2
-        desc: 加多少好感，只能 1 或 2
+        desc: 加多少好感,只能 1 或 2
     template: ""
     apply:
       - {op: check, from: item, count_from: count}
       - {op: clear, from: item, count_from: count}
-    # 好感**加** delta（不是扣 cost）—— 见 actions.resolve_karma_delta
+    # 好感**加** delta(不是扣 cost)—— 见 actions.resolve_karma_delta
     karma: {model: param, param: delta}
     card:
-      title: "收下礼物"
-      item_label: "收下"
+      title: "确认提交物品"
+      item_label: "提交物品"
       confirm_hover: "同意"
       cancel_hover: "不用了"
     confirm: true
-    done: "{player} 送出 {items}，好感 +{delta}"
+    done: "{player} 送出 {items},好感 +{delta}"
 
   # -------------------------------------------------------------------------
-  # 拒收礼物（送的东西无价值 / 可量产）
+  # 拒收礼物(送的东西无价值 / 可量产)
   # -------------------------------------------------------------------------
-  # ⚠️ **不拿走他的物品**（所以才没有 clear）。`apply` 是空的。
-  # ⚠️ **不发确认卡** —— AI 决定拒收就该直接拒，让玩家点一下「确认」很奇怪。
+  # ⚠️ **不拿走他的物品**(所以才没有 clear).`apply` 是空的.
+  # ⚠️ **不发确认卡** —— AI 决定拒收就该直接拒,让玩家点一下"确认"很奇怪.
   - name: refuse_gift
     label: 拒收礼物
     desc: >-
-      玩家送的东西无价值或可量产，不收，并按情况扣好感。**不拿走他的物品**。
-      delta：无价值的 -1 或 -2；可量产的 0。
+      不收下玩家送的东西(没价值或能量产),按情况扣一点好感.
+      **不拿走他的物品** —— 东西还在他背包里.
+      delta:无价值的 -1 或 -2;能量产的 0.
+      ⚠️ 调用后**没有确认卡,立刻生效** —— 你调用完就可以直接回话了.
     params:
       player:
         type: player
@@ -330,22 +354,22 @@ actions:
         type: str
         required: true
         max_len: 24
-        desc: 玩家送的东西的名字，如「石头」
+        desc: 他送的那个东西的名字,播报里给玩家看,如"石头"
       delta:
         type: int
         required: true
         min: -2
         max: 0
-        desc: 好感变化，只能 -2 / -1 / 0
+        desc: 好感变化,只能 -2 / -1 / 0
       reason:
         type: str
         required: false
         max_len: 60
-        desc: 一句话理由，会**私聊**转达给玩家（不公屏）
+        desc: 一句话理由,会**私聊**转达给玩家(不公屏)
     template: ""
     apply: []
     karma: {model: param, param: delta}
     confirm: false
-    # 播报取 display_name 那侧（这个动作没有物品参数）
+    # 播报取 display_name 那侧(这个动作没有物品参数)
     done_items_from: []
-    done: "{player} 送出 ⌜{display_name}⌝，被拒收了"
+    done: "{player} 送出 ⌜{display_name}⌝,被拒收了"

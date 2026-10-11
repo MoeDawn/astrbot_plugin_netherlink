@@ -1913,7 +1913,10 @@ class NetherLinkPlugin(Star):
         if action.confirm:
             return await self._offer_action_confirm(
                 action, values, cost, cmd, event, karma_delta)
-        return await self._execute_action(action, values, cost, cmd, event)
+        # ⚠️ `karma_delta` 必须一起传 —— 无卡路径也怕 `model: param`
+        #    （它的 cost 恒为 0，只传 cost 的话 delta 会被丢掉）。
+        return await self._execute_action(action, values, cost, cmd, event,
+                                          karma_delta=karma_delta)
 
     def _action_server_id(self, event) -> str:
         """这次动作该发往哪台 MC 服务器。
@@ -2168,36 +2171,71 @@ class NetherLinkPlugin(Star):
             logger.warning(f"NetherLink: 私聊告知玩家失败（忽略）: {e}")
 
     async def _execute_action(self, action, values, cost, cmd, event=None,
-                              server_id: str = "") -> str:
-        """执行一个动作：扣好感 + 下发指令 + 播报。
+                              server_id: str = "", karma_delta: int = None) -> str:
+        """执行一个动作：改好感 + 下发指令 + 播报（`confirm: false` 的动作走这里）。
 
-        复用既有的 `exec_command_for`（原子扣费 + 失败退费 + 审计），
-        不另造一套 —— 那套已经有守卫盯着。
+        🔴 **两条结算路径必须同口径**（2026-10-11：`refuse_gift` 三条全部踩中）：
+          · `confirm: true`  → `_offer_action_confirm` 只发卡；玩家点确认后
+            MC 回报，由 `_handle_action_result` → `_apply_action_karma`
+            + `_announce_action_done` 结算
+          · `confirm: false` → **本函数**当场结算
+        原先本函数**自己另写了一套**减价与播报，于是两处立刻分叉：
+          ① 只认 `cost`，而 `model: param`（如 `refuse_gift`）的
+             `resolve_karma` 恒返回 0 ⇒ **delta 永远不生效**
+          ② 播报只喂 player/cost/item/count/server，且只 `_broadcast`
+             —— `{display_name}` 不在其中，`_fmt` 兜底**原样输出**；
+             也漏了推 MC 公屏那一步
+          ③ `template: ""` 的动作仍调 `exec_command_for("")`，它返回
+             「错误：指令为空。」⇒ AI 把这条当动作失败
+        ⇒ 现在统一复用上面那对函数，本函数不再碰 `_fmt`。
         """
         # ⚠️ 留空会走 `_send_to_mc` 的「未指定目标」保护（多台在线时拒发）。
         #    先从事件取来源服，仍为空才交给空串语义（QQ 侧发起的场合）。
         if not server_id:
             server_id = self._action_server_id(event)
         player = str(values.get("player") or "")
-        try:
-            out = await self.exec_command_for(
-                initiator=player, cmd=cmd, source="game",
-                cost=cost, server_id=server_id,
+        # 🔴 `cmd` 为空 = 这个动作**没有指令可下发**（`template: ""`，
+        #    如 refuse_gift 只改好感）。此时不要走 exec_command_for：
+        #    它会把空串当用户错误回一句「错误：指令为空。」，而 AI 收到
+        #    工具结果会以为动作失败了。
+        out = ""
+        if cmd:
+            try:
+                out = await self.exec_command_for(
+                    initiator=player, cmd=cmd, source="game",
+                    cost=cost, server_id=server_id,
+                )
+            except Exception as e:
+                logger.error(f"NetherLink: 执行动作 {action.name} 失败: {e}")
+                return f"执行失败：{e}"
+        # 播报与好感都交给与「点确认」路径共用的那对函数。
+        item = actions.PendingAction(
+            token=0,
+            action_name=action.name,
+            # 与 `_offer_action_confirm` 登记的形状一致（`_announce_action_done`
+            # 只读 `values["values"]`，steps 是空列表）
+            values={"steps": [], "values": dict(values)},
+            player=player,
+            server_id=server_id,
+            cost=cost,
+            cmd=cmd,
+            deadline=0.0,
+            karma_delta=(int(karma_delta) if karma_delta is not None
+                         else -int(cost)),
+        )
+        # 🔴 **只在 `cost == 0` 时由这里改好感** —— 否则会和
+        #    `exec_command_for` 的扣费**重复**（`karma_delta` 对非
+        #    param 模型就是 `-cost`，同一笔钱收两遍）。
+        #    `cost == 0` 正是 `model: param`（delta 全靠参数）与
+        #    `model: none`（真免费，delta 也是 0）这两种情形。
+        if not cost:
+            await self._apply_action_karma(item, player)
+        await self._announce_action_done(item, player)
+        if not cmd:
+            return (
+                f"已完成（{player} 的好感变化 {self._signed(item.karma_delta)}）。"
+                f"\n你可以就此回一句简短的话，不要再调工具。"
             )
-        except Exception as e:
-            logger.error(f"NetherLink: 执行动作 {action.name} 失败: {e}")
-            return f"执行失败：{e}"
-        # 播报（模板可配）。失败不连累返回值。
-        try:
-            done = action.done or self.templates.get("action_done", "")
-            if done:
-                line = self._fmt(done, player=player, cost=cost,
-                                 item=str(values.get("item") or ""),
-                                 count=int(values.get("count") or 1),
-                                 server=self._mc_server_display(server_id))
-                await self._broadcast(line)
-        except Exception as e:
-            logger.warning(f"NetherLink: 动作完成播报失败（忽略）: {e}")
         return out
 
     def _apply_configured_tool_descs(self) -> None:

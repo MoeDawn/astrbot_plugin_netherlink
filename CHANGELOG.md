@@ -2,6 +2,88 @@
 
 ## v0.1.7
 
+### 修复：`modify_item` 从上线起就完全不能用
+
+`targets` 声明成 `slot_list`，而 `_coerce` 里**没有这一支** ⇒ 参数永远过不了
+校验。真机日志：AI 试了 **7 种** targets 形状全被拒，**其中一种是完全正确的**
+—— 因为报错只说「类型 slot_list 不受支持」，它只能去猜数组/字典。
+
+顺带把报错改成「槽位 X 不认识。可用：weapon.mainhand、armor.head…」，
+AI 一眼就知道该填什么。
+
+**为什么 821 条测试没拦住**：唯一碰 `slot_list` 的守卫直接调 `build_card`，
+绕过了 `validate_params`。新增结构性守卫
+`test_every_action_survives_validate_and_expand`：每个动作都真跑一遍
+校验→展开→卡片。**加新参数类型时立刻变红。**
+
+### 修复：`swap_items` 的 `pay` 写组件时不生效
+
+`clear` 步骤把 `comps` 丢掉了（只传给 `give`）⇒ 按**物品类型**清，
+可能收走玩家背包里另一把同 id 的物品。「升级我这把附魔剑」尤其危险。
+
+改为：**给了组件就按组件精确匹配**（`ItemStack.isSimilar`），
+没给组件保持只比类型的老行为。`countItem` 与 `takeItems` 共用同一判据。
+
+### 新增：两条跨端契约守卫
+
+- Python 产出的 op 集合必须 == Java 能处理的（加 op 忘了改 Java = 真机静默失败）
+- 每个 `clear` 前面必须有匹配的 `check`（`clear` 非原子，漏了就「扣半截」）
+
+### 修复：拒收礼物（`confirm: false` 的动作）三条全坏
+
+真机实测（2026-10-11）暴露：送泥土时 **AI 回复「已拒收」，但公屏无动静、
+QQ 群里连出好几条 `{player} 送出 ⌜{display_name}⌝，被拒收了`**。
+根因是**两条结算路径各写了一套**，一落地就分叉：
+
+- `_execute_action` 只认 `cost`，而 `model: param` 的 cost 恒为 0
+  ⇒ **`delta: -1` 永远不生效**（好感一动不动）
+- 播报只喂 5 个占位符 ⇒ `{display_name}` 原样输出；且只推 QQ 不推 MC 公屏
+- `template: ""` 仍调 `exec_command_for("")`，它回「错误：指令为空。」
+  ⇒ AI 以为动作失败、**反复重试**，于是群里连出好几条坏播报
+
+修法：`_execute_action` 复用 `_apply_action_karma` + `_announce_action_done`，
+不再自己写一套；`cmd` 为空时不走 `exec_command_for`。
+
+### 修复：确认卡显示物品 ID、还把「显示名」单独列一行
+
+真机截图：收下礼物卡片渲染成
+```
+收下: [minecraft:diamond] ×2
+display_name: 钻石
+```
+`display_name` 本该是**物品的显示名**（⇒ `[钻石] ×2`），编译期却把它
+当成一条独立的文本行。`modify_item` 的卡片更糟 —— `targets`（槽位）与
+`components` 都不进卡片，**是一张只有按钮的空卡**。
+
+### 修复：改物品会把原有附魔/名字/lore 全清掉
+
+真机暴露：`applyModify` 原先是 `buildItem(原id, 原数量, LLM写的组件)`
+—— **整体替换**，于是「给手上这把剑改名」会把剑的附魔与 lore 一起清掉。
+
+⚠️ 我第一版把它当成「提示词该警告 LLM 自己抄回来」，用户指出**这情景不该出现**：
+LLM 读不到玩家物品的现状、抄不了。正确做法是**服务器端自动保留**。
+
+改成合并（真 Paper 26.3 实测 + 反编译源码确认）：
+
+```java
+merged = 原物品.clone();
+merged.copyDataFrom(LLM造的那件, isDataOverridden);   // 只套 LLM 显式写的组件
+```
+
+`isDataOverridden` 区分「显式写的」与「物品类型自带的默认值」，
+所以「只改他点的那几项、其余原样」是**自动的**，提示词里不用再教 LLM 抄组件。
+
+### 变更：按「LLM 读描述」的角度重写五个动作的说明
+
+- 每份都写清**边界**（给新的 / 换 / 改已有，三者互相指路）
+- `give_item` / `offer_karma` 都写明**「只发卡、此刻什么都没发生」**
+  （原先只有前者写了，后者会让 AI 对玩家说「已经收下了」）
+- `modify_item` 改为**合并**语义：LLM 没点名的组件由服务器**原样保留**
+  （见下面「修复：改物品会清掉原有附魔」）
+- `give_item` 的报价规则删掉「要附魔一律改用 mc_command」——
+  那是改造前的老规矩（它现在自己就支持 components），留着会诱导 AI 手写指令
+- 描述文本统一**半角标点**（与插件其余提示词同口径，守卫钉住）
+
 ### 新增：收礼物 / 拒收两个动作
 
 - `offer_karma`：玩家送了有价值的东西 ⇒ 收下并加 1~2 点好感。**发确认卡**

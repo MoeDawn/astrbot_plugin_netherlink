@@ -80,6 +80,13 @@ class PendingAction:
 TOKEN_BASE = 10000
 
 
+# MC 端认识的原子操作 —— **唯一真源**。
+# ⚠️ 加一个 op 必须**同时**改 Java 的 `runSteps` / `applyStep`，否则真机上
+#    那一步会被当成「未知的步骤类型」静默失败，而本地测试全绿。
+#    守卫 `test_step_ops_match_the_mc_side` 钉住两边一致。
+STEP_OPS = ("check", "clear", "give", "modify")
+
+
 def new_token(counter: int) -> int:
     """下一个 token。
 
@@ -270,10 +277,10 @@ def parse_actions(doc) -> list:
                 if not isinstance(rule, dict):
                     raise ActionError("动作 %r 的 apply 第 %d 条不是映射" % (name, k + 1))
                 op = str(rule.get("op") or "")
-                if op not in ("check", "clear", "give", "modify"):
+                if op not in STEP_OPS:
                     raise ActionError(
-                        "动作 %r 的 apply 第 %d 条 op 只能是 "
-                        "check/clear/give/modify，实际 %r" % (name, k + 1, op))
+                        "动作 %r 的 apply 第 %d 条 op 只能是 %s，实际 %r"
+                        % (name, k + 1, "/".join(STEP_OPS), op))
                 src = str(rule.get("from") or "")
                 if src not in params:
                     raise ActionError(
@@ -470,6 +477,15 @@ def _coerce(spec: dict, value, pname: str):
         # `expand_item_list` 里做（那时才知道要不要带显示名）。
         expand_item_list(value)
         return str(value).strip()
+    if t == "slot_list":
+        # 🔴 2026-10-11：这一支原先**漏了** —— `modify_item` 的 `targets`
+        #    永远过不了校验，导致该动作从上线起就 100% 不可用。
+        #    真机日志里 AI 试了 7 种形状全被拒（其中一种是**对的**），
+        #    因为报错说的是「类型不受支持」，它只能去猜数组/字典。
+        #    只做**校验**（坏槽位立刻报，报错里列出可用槽位），
+        #    返回值仍是原串 —— 展开成条目在 `expand_slot_list` 里做。
+        expand_slot_list(value)
+        return str(value).strip()
     if t == "components":
         return normalize_components(value)
     if t == "str":
@@ -613,10 +629,10 @@ def expand_steps(action: "Action", values: dict) -> list:
         if not isinstance(rule, dict):
             raise ActionError("动作 %r 的第 %d 条 apply 不是映射" % (action.name, i + 1))
         op = str(rule.get("op") or "")
-        if op not in ("check", "clear", "give", "modify"):
+        if op not in STEP_OPS:
             raise ActionError(
-                "动作 %r 的 apply 里 op 只能是 check/clear/give/modify，实际 %r"
-                % (action.name, op))
+                "动作 %r 的 apply 里 op 只能是 %s，实际 %r"
+                % (action.name, "/".join(STEP_OPS), op))
         src = str(rule.get("from") or "")
         spec = action.params.get(src)
         if spec is None:
@@ -756,14 +772,35 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
     title = str(spec.get("title") or action.label or action.name)
     lines = []
 
+    # 🔴 `display_name` 是**物品的显示名**，不是一条独立信息 ——
+    #    2026-10-11 真机截图：收下礼物卡片出现了
+    #      `[minecraft:diamond] ×2` 紧跟一行 `display_name: 钻石`。
+    #    正确做法是拿它当物品的显示名 ⇒ 卡片显示 `[钻石] ×2`。
+    #    MC 端已经是这个优先级（`it["name"]` 非空就用它），这边只是没喂。
+    shared_name = str(values.get("display_name") or "").strip()
+
     # 物品类参数：按声明顺序，每个 item_list / item_id 出一行
     for pname, pspec in action.params.items():
         val = values.get(pname)
         if val in (None, ""):
             continue
         ptype = str(pspec.get("type") or "")
+        if ptype == "slot_list":
+            # 改哪几个槽位（`modify_item` 的 targets）。它没有物品 ID，
+            # 走 text 通道：显示名优先，没写就退回槽位名。
+            pairs = expand_slot_list(val)
+            lines.append({
+                "label": str(spec.get(pname + "_label")
+                             or pspec.get("label") or pname),
+                "text": "、".join(n or s for s, n in pairs),
+            })
+            continue
         if ptype == "item_list":
             items = expand_item_list(val)
+            # 条目的 `=显示名` 优先；没写的回退共用 display_name
+            for it in items:
+                if not it.get("name") and shared_name:
+                    it["name"] = shared_name
         elif ptype == "item_id":
             # 数量参数（若 apply 里声明了 count_from）—— 卡片要显示真实数量
             cnt = 1
@@ -775,7 +812,7 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
                     except (TypeError, ValueError):
                         cnt = 1
                     break
-            items = [{"id": str(val), "count": cnt, "name": ""}]
+            items = [{"id": str(val), "count": cnt, "name": shared_name}]
         else:
             continue
         lines.append({
@@ -785,8 +822,12 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
         })
 
     # 非物品参数里显眼的也带上（如改名动作的 custom_name）
+    # ⚠️ **`display_name` 除外**：它已经当物品显示名用掉了，再加一行就是重复
     for pname, pspec in action.params.items():
-        if str(pspec.get("type") or "") not in ("str",) or pname == "player":
+        if str(pspec.get("type") or "") not in ("str", "components") \
+                or pname == "player":
+            continue
+        if pname == "display_name":
             continue
         val = values.get(pname)
         if val:
