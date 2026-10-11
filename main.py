@@ -1257,6 +1257,9 @@ class NetherLinkPlugin(Star):
         self._terminating: bool = False
         # 本插件注册的动作名（用于卸载 / 重载时清掉上一轮的，含已从目录删掉的）
         self._action_tool_names: set = set()
+        # 动作目录读不出来时的原因（空串 = 没出错）。面板要显示它 ——
+        # 目录坏了会导致**一个动作都不注册**，不显示的话就是彻底静默。
+        self._actions_error: str = ""
         # 待确认的动作：token(整数) -> actions.PendingAction
         # 为什么要队列：确认按钮只能 `trigger <obj> set <整数>`（0 权限），
         # 而动作参数是任意结构 —— 塞不进一个整数。
@@ -1498,6 +1501,10 @@ class NetherLinkPlugin(Star):
                          "解绑 QQ ↔ 游戏账号"),
                         ("bindings/migrate", self._api_bindings_migrate, ["POST"],
                          "把 mc: 好感并入 qq:（一次性迁移）"),
+                        ("actions", self._api_actions, ["GET"],
+                         "结构化动作列表（含目录错误）"),
+                        ("actions/reset", self._api_actions_reset, ["POST"],
+                         "把动作目录重置为插件自带默认（先备份原文件）"),
                         ("commands", self._api_commands, ["GET"],
                          "快捷指令（配置项 quick_commands 驱动的面板按钮）"),
                         ("commands/run", self._api_commands_run, ["POST"],
@@ -1511,7 +1518,7 @@ class NetherLinkPlugin(Star):
                     if registered:
                         logger.error(
                             f"NetherLink: 注册面板路由时在第 {registered + 1} 条"
-                            f"（共 13 条）失败——**已注册 {registered} 条**，"
+                            f"（共 15 条）失败——**已注册 {registered} 条**，"
                             f"面板处于半可用状态，其余路由的请求会 404: {e}"
                         )
                     else:
@@ -1758,6 +1765,32 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.warning(f"NetherLink: 落地动作目录失败（忽略）: {e}")
 
+    def _warn_if_actions_stale(self, path) -> None:
+        """落盘的动作目录比插件自带的默认版**旧** ⇒ 记一条 warning。
+
+        🔴 **为什么需要它**：`_ensure_actions_file` **从不覆盖**已存在的文件
+        （那是给人改的，覆盖等于删用户配置）。于是升级插件后，用户机器上
+        还是**旧版**的 `actions.yaml`。2026-10-11 真机就栽在这：旧版
+        `give_item` 有 `confirm` 而无 `apply`，新校验判它坏 ⇒
+        `_register_action_tools` **一个动作都不注册**，而界面上什么都看不见。
+
+        ⚠️ **只告警，不自动改**。用户可能正拿着自己改过的目录 —— 悄悄换掉
+        比不换更糟。要给他「知道该看一眼」的机会，而不是替他做决定。
+        """
+        try:
+            src = Path(__file__).resolve().parent / "actions.default.yaml"
+            _doc, want = actions.load_actions_doc(str(src))
+            _cur, have = actions.load_actions_doc(str(path))
+            if want and have < want:
+                logger.warning(
+                    f"NetherLink: 动作目录 {path} 的 version={have} 比插件自带的"
+                    f"（version={want}）旧 —— 插件**不会自动覆盖**你的目录，"
+                    f"请对照 {src.name} 手动更新（新版动作可能因缺字段而"
+                    f"整个注册不上，症状是「AI 说没有这个工具」）。"
+                )
+        except Exception as e:
+            logger.warning(f"NetherLink: 检查动作目录版本失败（忽略）: {e}")
+
     def _unregister_action_tools(self) -> None:
         """把本插件上一轮注册的动作工具从注册表里摘掉。
 
@@ -1806,15 +1839,21 @@ class NetherLinkPlugin(Star):
             return
         path = self._actions_path()
         self._ensure_actions_file(path)
+        self._warn_if_actions_stale(path)
         try:
             acts = actions.load_actions(str(path))
         except actions.ActionError as e:
             # 目录坏了要**响亮**：不注册任何动作，并说明是哪一条、为什么
             logger.error(f"NetherLink: 动作目录不可用，本次不注册任何动作 —— {e}")
+            # ⚠️ 存下来给**面板**看。只记日志的话，症状是「AI 说没这个工具」，
+            #    与「压根没配」长得一样 —— 2026-10-11 真机就栽在这。
+            self._actions_error = str(e)
             return
         except Exception as e:
             logger.error(f"NetherLink: 读取动作目录失败（本次不注册任何动作）: {e}")
+            self._actions_error = str(e)
             return
+        self._actions_error = ""
         if not acts:
             logger.info(f"NetherLink: 动作目录 {path} 里没有动作")
             return
@@ -3778,6 +3817,76 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 面板读取配置诊断失败: {e}")
             return error_response("读取配置诊断失败")
+
+    async def _api_actions(self):
+        """GET 结构化动作列表（含目录错误）。
+
+        🔴 **目录错误必须能看见**：`_register_action_tools` 在目录有坏条目时
+        **一个动作都不注册**（宁可全不注册，也不要半套规则）。只记一条 ERROR 的话，
+        症状是「AI 说没这个工具」，与「压根没配」一模一样 —— 2026-10-11 真机
+        就栽在这：落地的 `actions.yaml` 是旧版（缺 `apply`），新校验判它坏，
+        `give_item` / `swap_items` 全没注册，而面板上什么都看不见。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            acts = []
+            if self.enable_actions:
+                try:
+                    acts = actions.load_actions(str(self._actions_path()))
+                except Exception as e:
+                    # 面板这条路径自己读一遍：可能比注册时更糟（用户刚改坏）
+                    self._actions_error = str(e)
+            return json_response(panel.actions_view(
+                acts, self.enable_actions, str(self._actions_path()),
+                self._actions_error,
+            ))
+        except Exception as e:
+            logger.error(f"NetherLink: 面板读取动作列表失败: {e}")
+            return error_response("读取动作列表失败")
+
+    async def _api_actions_reset(self):
+        """POST 把动作目录重置为**插件自带默认**（先备份原文件）。
+
+        🔴 **为什么要有这个按钮**：`_ensure_actions_file` **从不覆盖**已存在的
+        文件（那是给人改的），所以升级插件后用户目录还是旧版。2026-10-11 真机
+        就栽在这：旧版 `give_item` 有 `confirm` 无 `apply`，新校验判它坏 ⇒
+        **一个动作都不注册**，而界面上什么都看不见。
+
+        ⚠️ **必须先备份**：用户可能改过那份目录，直接覆盖等于删他的配置。
+        备份名带 `.bak`，同目录、可手动找回。
+        ⚠️ 重置后**要热重载或重启**才生效（工具注册发生在插件加载期）。
+        """
+        if not PANEL_AVAILABLE:
+            return _panel_unavailable()
+        try:
+            src = Path(__file__).resolve().parent / "actions.default.yaml"
+            if not src.is_file():
+                return error_response("找不到插件自带的默认动作目录")
+            dst = self._actions_path()
+            backup = ""
+            if dst.exists():
+                backup = str(dst) + ".bak"
+                dst.replace(backup)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            logger.info(f"NetherLink: 动作目录已重置为默认 -> {dst}（原文件备份在 {backup or '无'}）")
+            # 重置后顺手重读一次，让面板立刻反映新状态
+            try:
+                acts = actions.load_actions(str(dst))
+                self._actions_error = ""
+            except Exception as e:
+                acts = []
+                self._actions_error = str(e)
+            return json_response({
+                "ok": True,
+                "backup": backup,
+                "actions": len(acts),
+                "note": "已重置为默认动作目录。需**热重载或重启插件**后才生效。",
+            })
+        except Exception as e:
+            logger.error(f"NetherLink: 重置动作目录失败: {e}")
+            return error_response("重置动作目录失败: %s" % e)
 
     async def _query_players_one(self, server_id: str) -> dict:
         """对**一台**服务器下发 `list` 并整形出一行结果。

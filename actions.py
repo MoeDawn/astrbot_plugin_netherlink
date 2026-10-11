@@ -153,6 +153,30 @@ class Action:
 # 目录加载
 # ---------------------------------------------------------------------------
 
+def doc_version(doc) -> int:
+    """读目录的 `version`（缺失/非法按 0，代表「比任何默认都旧」）。"""
+    if not isinstance(doc, dict):
+        return 0
+    try:
+        return int(doc.get("version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def load_actions_doc(path):
+    """读 YAML 并返回 `(doc, version)`。**文件不存在返回 (None, 0)**。"""
+    import os
+    if not path or not os.path.isfile(path):
+        return None, 0
+    import yaml
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+    except Exception as e:
+        raise ActionError("动作目录 %s 读不出来：%s" % (path, e)) from e
+    return doc, doc_version(doc)
+
+
 def parse_actions(doc) -> list:
     """把已解析的 YAML 文档整形成 `[Action]`。**坏目录一律抛 `ActionError`。**
 
@@ -271,15 +295,9 @@ def load_actions(path) -> list:
     ⚠️ 用 `yaml.safe_load`：**绝不用 `yaml.load`**（能构造任意 Python 对象，
     而这份文件是可编辑的）。
     """
-    import os
-    if not path or not os.path.isfile(path):
+    doc, _v = load_actions_doc(path)
+    if doc is None:
         return []
-    import yaml
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            doc = yaml.safe_load(f)
-    except Exception as e:
-        raise ActionError("动作目录 %s 读不出来：%s" % (path, e)) from e
     return parse_actions(doc)
 
 

@@ -59,6 +59,9 @@
           在线玩家
         </button>
         <button type="button" class="tab" data-target="audit">指令审计</button>
+        <button type="button" class="tab" data-target="actions">
+          动作
+        </button>
         <button type="button" class="tab" data-target="commands">
           快捷指令
         </button>
@@ -275,6 +278,49 @@
           </div>
         </section>
 
+        <!-- ================= 结构化动作 ================= -->
+        <section class="panel" id="section-actions" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title">结构化动作</h2>
+            <span class="panel__hint">
+              来自 <code>actions.yaml</code>。每个动作注册成一个 LLM 工具，
+              AI 只填参数、命令由插件拼
+            </span>
+          </div>
+          <p class="msg" id="actions-msg" role="status"></p>
+          <p class="msg" id="actions-error" role="alert" hidden></p>
+          <p class="panel__hint" id="actions-path"></p>
+
+          <div class="row-actions">
+            <button type="button" class="btn" id="actions-reload">
+              重新读取
+            </button>
+            <button type="button" class="btn btn--danger" id="actions-reset">
+              重置为默认目录
+            </button>
+            <button type="button" class="btn" id="actions-reset-cancel" hidden>
+              取消
+            </button>
+          </div>
+          <p class="msg" id="actions-reset-result" role="status"></p>
+
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>工具名</th>
+                  <th>说明</th>
+                  <th>确认卡</th>
+                  <th>定价</th>
+                  <th>步骤</th>
+                  <th>参数</th>
+                </tr>
+              </thead>
+              <tbody id="actions-body"></tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- ================= 在线玩家（I1 补齐） ================= -->
         <section class="panel" id="section-players" hidden>
           <div class="panel__head">
@@ -425,6 +471,45 @@
         </button>
         <button type="button" class="btn btn--danger" id="bindings-migrate-confirm">
           确认迁移
+        </button>
+      </div>
+    </dialog>
+
+    <!--
+      🔴 「重置动作目录」的二次确认对话框。
+
+         与好感迁移那份同一个理由：`actions/reset` 会**覆盖**用户手改过的
+         `actions.yaml`（后端会先备份成 `.bak`，但界面不能拿这个当免责），
+         而后端刻意不收 `confirm` 这类形式参数（那种布尔值总能被绕开）。
+         拦人的责任因此落在「触发器」+「确认按钮」这对结构上——
+         下发请求的函数只挂在后者身上。
+    -->
+    <dialog
+      class="dialog"
+      id="actions-reset-dialog"
+      aria-labelledby="actions-reset-dialog-title"
+    >
+      <h3 class="dialog__title" id="actions-reset-dialog-title">
+        用插件自带的默认动作目录覆盖当前目录？
+      </h3>
+      <p class="dialog__text">
+        用途：插件升级后动作格式变了，而你机器上那份 <code>actions.yaml</code>
+        还是旧版（插件**从不覆盖**已存在的配置文件），于是动作可能一个都注册不上
+        ——症状是 AI 说「没有这个工具」。
+      </p>
+      <p class="dialog__text dialog__text--warn">
+        当前文件会先备份成同目录的 <code>actions.yaml.bak</code>，
+        但那份备份**不会**被插件读取。你手改过的内容需要自己粘回来。
+      </p>
+      <p class="dialog__text">
+        重置后要<strong>热重载或重启插件</strong>才生效。
+      </p>
+      <div class="dialog__actions">
+        <button type="button" class="btn" id="actions-reset-dialog-cancel">
+          取消
+        </button>
+        <button type="button" class="btn btn--danger" id="actions-reset-confirm">
+          确认重置
         </button>
       </div>
     </dialog>

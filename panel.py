@@ -325,3 +325,50 @@ def quick_commands_view(entries) -> list:
             continue
         out.append({"index": len(out), "name": name, "cmd": cmd, "server": server})
     return out
+
+def actions_view(actions: list, enabled: bool, path: str,
+                 error: str = "") -> dict:
+    """结构化动作列表 → 面板展示用。
+
+    🔴 **为什么要把 `error` 也带上**：目录有坏条目时 `_register_action_tools`
+    会**一个动作都不注册**（宁可全不注册，也不要半套规则）。症状是
+    「AI 说没有这个工具」——与「压根没配」长得一样，**静默**。
+    2026-10-11 真机就栽在这：用户机器上落地的 `actions.yaml` 是旧版（缺 `apply`），
+    新的校验把它判成坏条目 ⇒ `give_item` / `swap_items` 全没注册，
+    而界面上什么都看不见。所以**错误必须显示在面板上**。
+
+    ⚠️ 参数逐个归一：面板是 JSON 接口，`Action` 是 dataclass，直接塞对象
+    `json_response` 序列化不了（同 `diagnostics_view` 对 set 的处理）。
+    ⚠️ `steps` 展示的是 `apply` 里声明的 op 序列（给人看的），不是展开结果
+    —— 展开要具体参数值，面板没有。
+    """
+    out = []
+    for a in actions or ():
+        params = []
+        for pname, spec in (getattr(a, "params", None) or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            params.append({
+                "name": str(pname),
+                "type": str(spec.get("type") or "str"),
+                "required": bool(spec.get("required")) and "default" not in spec,
+                "desc": str(spec.get("desc") or ""),
+            })
+        rules = getattr(a, "apply", None) or []
+        card = getattr(a, "card", None) or {}
+        out.append({
+            "name": str(getattr(a, "name", "")),
+            "label": str(getattr(a, "label", "")),
+            "desc": str(getattr(a, "desc", "") or "").strip(),
+            "confirm": bool(getattr(a, "confirm", False)),
+            "pricing": str((getattr(a, "karma", None) or {}).get("model") or "none"),
+            "params": params,
+            "steps": [str(r.get("op")) for r in rules if isinstance(r, dict)],
+            "card_title": str(card.get("title") or ""),
+        })
+    return {
+        "enabled": bool(enabled),
+        "path": str(path or ""),
+        "error": str(error or ""),
+        "actions": out,
+    }
