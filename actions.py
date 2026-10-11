@@ -305,6 +305,49 @@ def load_actions(path) -> list:
 # 参数校验
 # ---------------------------------------------------------------------------
 
+# 组件块内部的字符集。**允许**的东西：
+#   字母数字 _ . / : - = , { } [ ] ( ) " ' 空格 以及中文（名字/lore 里会有）
+# **禁止**：`;` 与换行 —— 它们是「第二条命令」的常见注入载体。
+# 注意：这里做的是**粗筛**，真正的语法校验靠 MC 的 `createItemStack`
+# （造不出来就拒绝），以及 MC 自己的组件解析器（实测拼错会**响亮报错**）。
+_RE_COMPONENTS_OK = re.compile(
+    # 允许：字母数字 _ . / : = - , 各种括号与引号 空格 中文
+    # 禁止：`;` 与换行 —— 它们是「第二条命令」的常见注入载体
+    "^[A-Za-z0-9_./:=\-,\[\]{}()\"' \u4e00-\u9fff]*$"
+)
+
+
+def normalize_components(value) -> str:
+    """校验 `components` 字符串（组件块**内部**语法，不带外层方括号）。
+
+    真 26.3 实测两种写法都合法，但结果天差地别：
+
+        custom_name={text:"龙鳞",color:"gold"}      ✅ 显示「龙鳞」金色
+        custom_name='{"text":"X"}'                  ❌ **静默**变成字面量
+
+    ⇒ 提示词里一律给**组件对象**形式的示例（见 docs/mc-26.3-spec.md 铁律 1）。
+
+    ⚠️ **本函数不做语法解析** —— 组件的语法很复杂（映射/列表/组件对象嵌套）。
+        真正的校验有两道：
+          ① MC 的组件解析器：拼错会**响亮报错**（实测：`Unknown item component`
+             / `Not a list` / `Expected '='`），**不静默**
+          ② MC 端 `createItemStack` 试造一次：造不出来就拒绝
+        这里只挡住**最危险的一类**：分号与换行（可能透传成第二条命令）。
+    """
+    s = str(value or "").strip()
+    if not s:
+        raise ActionError("components 不能为空（要么别传这个参数，要么给内容）")
+    if len(s) > 512:
+        raise ActionError("components 太长（%d > 512）" % len(s))
+    if not _RE_COMPONENTS_OK.match(s):
+        bad = sorted({c for c in s if not _RE_COMPONENTS_OK.match(c)})
+        raise ActionError(
+            "components 里有不允许的字符 %s。"
+            "分号与换行一律禁止（那是命令注入的载体）" % ("、".join(bad) or "?")
+        )
+    return s
+
+
 def normalize_player(value) -> str:
     """校验并归一玩家名。非法则抛 `ActionError`。"""
     s = str(value or "").strip()
@@ -401,6 +444,8 @@ def _coerce(spec: dict, value, pname: str):
         # `expand_item_list` 里做（那时才知道要不要带显示名）。
         expand_item_list(value)
         return str(value).strip()
+    if t == "components":
+        return normalize_components(value)
     if t == "str":
         s = str(value)
         mx = spec.get("max_len")
@@ -431,8 +476,12 @@ def expand_item_list(raw_value) -> list:
       `minecraft:emerald*8=绿宝石原矿; minecraft:echo_shard*2=回响碎片`
 
     - 条目用 `;` 分隔
-    - 每条：`id [*数量] [=显示名]`；数量省略 = 1
+    - 每条：`id [*数量] [=显示名] [|组件]`；数量省略 = 1
+    - `|` 之后是**组件块内部**语法（不带外层方括号），见 `normalize_components`
     - **任一坏条目 ⇒ 整体抛错**（fail-closed，与其它参数同口径）
+
+    ⚠️ `|` 只做「切出组件段」，组件内容仍交给 `normalize_components` 校验
+    （分号与换行在那里被挡下）。
     """
     s = str(raw_value or "").strip()
     if not s:
@@ -442,6 +491,10 @@ def expand_item_list(raw_value) -> list:
         piece = part.strip()
         if not piece:
             continue
+        comps = ""
+        if "|" in piece:
+            piece, comps = piece.split("|", 1)
+            comps = normalize_components(comps.strip())
         name = ""
         if "=" in piece:
             piece, name = piece.split("=", 1)
@@ -457,14 +510,58 @@ def expand_item_list(raw_value) -> list:
             count = int(cnt)
             if count < 1:
                 raise ActionError("数量必须 >= 1：%d" % count)
-        out.append({
+        entry = {
             "id": normalize_item_id(piece.strip()),
             "count": count,
             "name": name,
-        })
+        }
+        if comps:
+            entry["components"] = comps
+        out.append(entry)
     if not out:
         raise ActionError("物品列表解析后是空的：%r" % s)
     return out
+
+
+def expand_slot_list(raw_value) -> list:
+    """把 `槽位=显示名; 槽位=显示名` 解析成 `[(slot, name)]`。
+
+    用于 `modify_item` 的批量改（「给身上全套装备改名」）：
+        `armor.head=神级头盔; armor.chest=神级胸甲`
+    显示名可省（`armor.head`）。槽位必须**在已知清单里** —— fail-closed。
+    """
+    s = str(raw_value or "").strip()
+    if not s:
+        raise ActionError("槽位列表不能为空")
+    out = []
+    for part in s.split(";"):
+        piece = part.strip()
+        if not piece:
+            continue
+        name = ""
+        if "=" in piece:
+            piece, name = piece.split("=", 1)
+            name = name.strip()
+            if len(name) > 24:
+                raise ActionError("显示名太长（%d > 24）：%r" % (len(name), name))
+        slot = piece.strip()
+        if slot not in _SLOTS:
+            raise ActionError(
+                "槽位 %r 不认识。可用：%s" % (slot, "、".join(sorted(_SLOTS))))
+        out.append((slot, name))
+    if not out:
+        raise ActionError("槽位列表解析后是空的：%r" % s)
+    return out
+
+
+# 允许 modify 的槽位。**故意不含 `contents` 这类范围槽**（那是多格，
+# `setItem` 语义不清），也不含末影箱等需要在别的容器上操作的槽。
+_SLOTS = frozenset(
+    ["weapon.mainhand", "weapon.offhand", "armor.head", "armor.chest",
+     "armor.legs", "armor.feet"]
+    + ["hotbar.%d" % i for i in range(9)]
+    + ["inventory.%d" % i for i in range(9, 36)]
+)
 
 
 def expand_steps(action: "Action", values: dict) -> list:
@@ -486,9 +583,10 @@ def expand_steps(action: "Action", values: dict) -> list:
         if not isinstance(rule, dict):
             raise ActionError("动作 %r 的第 %d 条 apply 不是映射" % (action.name, i + 1))
         op = str(rule.get("op") or "")
-        if op not in ("check", "clear", "give"):
-            raise ActionError("动作 %r 的 apply 里 op 只能是 check/clear/give，实际 %r"
-                              % (action.name, op))
+        if op not in ("check", "clear", "give", "modify"):
+            raise ActionError(
+                "动作 %r 的 apply 里 op 只能是 check/clear/give/modify，实际 %r"
+                % (action.name, op))
         src = str(rule.get("from") or "")
         spec = action.params.get(src)
         if spec is None:
@@ -497,6 +595,27 @@ def expand_steps(action: "Action", values: dict) -> list:
         if val in (None, ""):
             continue
         typ = str(spec.get("type") or "str")
+
+        # ---- modify：`from` 指向 slot_list（`槽位=显示名`），组件来自另一个参数 ----
+        if op == "modify":
+            if typ != "slot_list":
+                raise ActionError(
+                    "动作 %r 的 modify 步骤只能引用 slot_list 参数，实际 %r"
+                    % (action.name, typ))
+            comps_from = str(rule.get("components_from") or "")
+            comps = ""
+            if comps_from:
+                if comps_from not in action.params:
+                    raise ActionError(
+                        "动作 %r 的 modify 里 components_from 指向了不存在的参数 %r"
+                        % (action.name, comps_from))
+                comps = str(values.get(comps_from) or "")
+            for slot, name in expand_slot_list(val):
+                st = {"op": "modify", "slot": slot, "raw": comps}
+                if name:
+                    st["name"] = name
+                steps.append(st)
+            continue
         if typ == "item_list":
             items = expand_item_list(val)
         elif typ == "item_id":
@@ -522,15 +641,22 @@ def expand_steps(action: "Action", values: dict) -> list:
                         "动作 %r 的 apply 里 count 必须是整数" % action.name
                     )
             items = [{"id": str(val), "count": cnt, "name": ""}]
+        elif typ == "slot_list":
+            # 只有 modify 用得上；别的 op 引用它是配置错误
+            raise ActionError(
+                "动作 %r 的 %s 步骤引用了 slot_list 参数，但只有 modify 能用它"
+                % (action.name, op))
         else:
             raise ActionError(
-                "动作 %r 的 apply 只能引用物品类参数（item_list / item_id），"
-                "实际是 %r" % (action.name, typ)
+                "动作 %r 的 apply 只能引用 item_list / item_id（或 modify 用 "
+                "slot_list），实际是 %r" % (action.name, typ)
             )
         for it in items:
             step = {"op": op, "item": it["id"], "count": it["count"]}
             if it.get("name"):
                 step["name"] = it["name"]
+            if it.get("components"):
+                step["components"] = it["components"]
             # ⚠️ 所有 check 收进前面的桶，保证「全查完才扣」
             (checks if op == "check" else steps).append(step)
     return checks + steps
