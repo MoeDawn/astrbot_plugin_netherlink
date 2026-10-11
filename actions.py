@@ -65,6 +65,9 @@ class PendingAction:
     cost: int
     cmd: str
     deadline: float
+    # 这次动作对好感的**带符号**变化：普通动作是 -cost，送礼（`model: param`）是
+    # 玩家该加的值。`_handle_action_result` 用它，不再写死 `-cost`。
+    karma_delta: int = 0
 
 
 # 确认卡 token 的起点。
@@ -75,6 +78,13 @@ class PendingAction:
 # 真人验证可用），计分板整体退役 —— 但 token 起点**保持不变**：已有的
 # `_pending_actions` 键空间与测试都按它写，没有理由动。
 TOKEN_BASE = 10000
+
+
+# MC 端认识的原子操作 —— **唯一真源**。
+# ⚠️ 加一个 op 必须**同时**改 Java 的 `runSteps` / `applyStep`，否则真机上
+#    那一步会被当成「未知的步骤类型」静默失败，而本地测试全绿。
+#    守卫 `test_step_ops_match_the_mc_side` 钉住两边一致。
+STEP_OPS = ("check", "clear", "give", "modify")
 
 
 def new_token(counter: int) -> int:
@@ -137,6 +147,9 @@ class Action:
     done: str = ""                 # 完成播报模板
     apply: list = field(default_factory=list)   # 展开成 steps 的规则（spec §10）
     card: dict = field(default_factory=dict)    # 卡片版式（由 MC 渲染）
+    # `done` 播报里 `{items}` 从哪些参数取物品（默认只取 `item`）。
+    # `swap_items` 要设成 `[gain]` —— 播报该说「获得」的那侧，不是他上交的。
+    done_items_from: list = field(default_factory=lambda: ["item"])
 
     @property
     def pricing_rules(self) -> str:
@@ -218,8 +231,12 @@ def parse_actions(doc) -> list:
         #   · 新形态：`apply` 展开成多步（check/clear/give，MC 按序执行）
         #   两者都没有 ⇒ 这条动作什么也不做，属于配置错误。
         template = str(item.get("template") or "")
+        # ⚠️ `apply` **显式写成空列表** 与「压根没写」含义不同：
+        #    · 没写 + 没 template ⇒ 配置错误（什么都不做）
+        #    · 显式 `apply: []` + 没 template ⇒ **合法**：「只改好感、不动游戏」
+        #      （`refuse_gift` 就是这类 —— 拒收，物品留在玩家背包）
         apply_rules = item.get("apply")
-        if not template and not apply_rules:
+        if not template and apply_rules is None:
             raise ActionError("动作 %r 既没有 template 也没有 apply" % name)
         apply_rules = apply_rules or []
 
@@ -236,13 +253,19 @@ def parse_actions(doc) -> list:
         # ⚠️ **不写 karma 是合法的**，等同于 `model: none`（免费）。
         #    要求每条动作都显式写 karma 只会让目录啰嗦，不增加安全感。
         model = str(karma.get("model") or "none")
-        if model not in ("table_then_ai", "fixed", "none"):
+        if model not in ("table_then_ai", "fixed", "none", "param"):
             raise ActionError(
-                "动作 %r 的 karma.model 只支持 table_then_ai / fixed / none，实际 %r"
-                % (name, model)
+                "动作 %r 的 karma.model 只支持 table_then_ai / fixed / none / param，"
+                "实际 %r" % (name, model)
             )
         if model == "fixed" and not isinstance(karma.get("cost"), int):
             raise ActionError("动作 %r 的 karma.model=fixed 时必须给整数 cost" % name)
+        if model == "param":
+            pname = str(karma.get("param") or "")
+            if pname not in params:
+                raise ActionError(
+                    "动作 %r 的 karma.model=param 必须指向一个已声明的参数，实际 %r"
+                    % (name, pname))
 
         # 🔴 **apply 的引用在**解析期**就查** —— 坏目录要在启动时报，
         #    不能等玩家请求了才炸（那症状是「AI 说没这个能力」，与「压根没写」
@@ -254,10 +277,10 @@ def parse_actions(doc) -> list:
                 if not isinstance(rule, dict):
                     raise ActionError("动作 %r 的 apply 第 %d 条不是映射" % (name, k + 1))
                 op = str(rule.get("op") or "")
-                if op not in ("check", "clear", "give", "modify"):
+                if op not in STEP_OPS:
                     raise ActionError(
-                        "动作 %r 的 apply 第 %d 条 op 只能是 "
-                        "check/clear/give/modify，实际 %r" % (name, k + 1, op))
+                        "动作 %r 的 apply 第 %d 条 op 只能是 %s，实际 %r"
+                        % (name, k + 1, "/".join(STEP_OPS), op))
                 src = str(rule.get("from") or "")
                 if src not in params:
                     raise ActionError(
@@ -285,6 +308,7 @@ def parse_actions(doc) -> list:
             done=str(item.get("done") or ""),
             apply=item.get("apply") or [],
             card=item.get("card") or {},
+            done_items_from=item.get("done_items_from") or ["item"],
         ))
     return out
 
@@ -453,6 +477,15 @@ def _coerce(spec: dict, value, pname: str):
         # `expand_item_list` 里做（那时才知道要不要带显示名）。
         expand_item_list(value)
         return str(value).strip()
+    if t == "slot_list":
+        # 🔴 2026-10-11：这一支原先**漏了** —— `modify_item` 的 `targets`
+        #    永远过不了校验，导致该动作从上线起就 100% 不可用。
+        #    真机日志里 AI 试了 7 种形状全被拒（其中一种是**对的**），
+        #    因为报错说的是「类型不受支持」，它只能去猜数组/字典。
+        #    只做**校验**（坏槽位立刻报，报错里列出可用槽位），
+        #    返回值仍是原串 —— 展开成条目在 `expand_slot_list` 里做。
+        expand_slot_list(value)
+        return str(value).strip()
     if t == "components":
         return normalize_components(value)
     if t == "str":
@@ -584,18 +617,22 @@ def expand_steps(action: "Action", values: dict) -> list:
       · `item_id`（单条）
     """
     rules = action.apply
-    if not isinstance(rules, list) or not rules:
-        raise ActionError("动作 %r 没有 apply，无法展开成步骤" % action.name)
+    if not isinstance(rules, list):
+        raise ActionError("动作 %r 的 apply 不是列表" % action.name)
+    if not rules:
+        # ⚠️ **空 apply 是合法的**：只改好感、不动游戏（`refuse_gift`）。
+        #    parse_actions 已经区分过「没写」与「显式空」了。
+        return []
     steps = []
     checks = []
     for i, rule in enumerate(rules):
         if not isinstance(rule, dict):
             raise ActionError("动作 %r 的第 %d 条 apply 不是映射" % (action.name, i + 1))
         op = str(rule.get("op") or "")
-        if op not in ("check", "clear", "give", "modify"):
+        if op not in STEP_OPS:
             raise ActionError(
-                "动作 %r 的 apply 里 op 只能是 check/clear/give/modify，实际 %r"
-                % (action.name, op))
+                "动作 %r 的 apply 里 op 只能是 %s，实际 %r"
+                % (action.name, "/".join(STEP_OPS), op))
         src = str(rule.get("from") or "")
         spec = action.params.get(src)
         if spec is None:
@@ -682,6 +719,49 @@ def expand_steps(action: "Action", values: dict) -> list:
     return checks + steps
 
 
+def render_done_items(action: "Action", values: dict) -> str:
+    """把动作**产出**的物品渲染成一行显示名，供 `done` 播报的 `{items}` 用。
+
+    🔴 **为什么需要它**：原先 `done` 模板只有 `{item}`，那给的是**物品 ID**
+    （`minecraft:iron_ingot`）—— 2026-10-11 用户报「公屏播报显示的是物品 id
+    而不是显示名」。显示名的来源按优先级：
+
+      1. `display_name` 参数（单物品动作才有，如 give_item）
+      2. 物品条目自带的显示名（`item_list` 的 `=显示名` 段）
+      3. 物品 ID（兜底）
+
+    ⚠️ 只取**产出**那侧 —— 取哪些参数由 `Action.done_items_from` 决定
+    （`swap_items` 设成 `[gain]`，因为 `pay` 是玩家上交的，
+    不该出现在「获得」播报里）。
+    """
+    out = []
+    for pname in (action.done_items_from or ["item"]):
+        spec = action.params.get(pname)
+        if spec is None:
+            continue
+        val = values.get(pname)
+        if val in (None, ""):
+            continue
+        ptype = str(spec.get("type") or "")
+        if ptype == "item_list":
+            for it in expand_item_list(val):
+                out.append("⌜%s⌝ ×%d" % (it.get("name") or it["id"], it["count"]))
+        elif ptype == "item_id":
+            # 数量可能来自另一个参数（同 expand_steps 的 count_from）
+            cnt = 1
+            for rule in action.apply:
+                if (isinstance(rule, dict) and rule.get("from") == pname
+                        and rule.get("count_from")):
+                    try:
+                        cnt = int(values.get(rule["count_from"]) or 1)
+                    except (TypeError, ValueError):
+                        cnt = 1
+                    break
+            name = str(values.get("display_name") or "").strip() or str(val)
+            out.append("⌜%s⌝ ×%d" % (name, cnt))
+    return " ".join(out)
+
+
 def build_card(action: "Action", values: dict, cost: int) -> dict:
     """产出给 MC 端渲染卡片的**数据**（不是 tellraw JSON）。
 
@@ -692,14 +772,35 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
     title = str(spec.get("title") or action.label or action.name)
     lines = []
 
+    # 🔴 `display_name` 是**物品的显示名**，不是一条独立信息 ——
+    #    2026-10-11 真机截图：收下礼物卡片出现了
+    #      `[minecraft:diamond] ×2` 紧跟一行 `display_name: 钻石`。
+    #    正确做法是拿它当物品的显示名 ⇒ 卡片显示 `[钻石] ×2`。
+    #    MC 端已经是这个优先级（`it["name"]` 非空就用它），这边只是没喂。
+    shared_name = str(values.get("display_name") or "").strip()
+
     # 物品类参数：按声明顺序，每个 item_list / item_id 出一行
     for pname, pspec in action.params.items():
         val = values.get(pname)
         if val in (None, ""):
             continue
         ptype = str(pspec.get("type") or "")
+        if ptype == "slot_list":
+            # 改哪几个槽位（`modify_item` 的 targets）。它没有物品 ID，
+            # 走 text 通道：显示名优先，没写就退回槽位名。
+            pairs = expand_slot_list(val)
+            lines.append({
+                "label": str(spec.get(pname + "_label")
+                             or pspec.get("label") or pname),
+                "text": "、".join(n or s for s, n in pairs),
+            })
+            continue
         if ptype == "item_list":
             items = expand_item_list(val)
+            # 条目的 `=显示名` 优先；没写的回退共用 display_name
+            for it in items:
+                if not it.get("name") and shared_name:
+                    it["name"] = shared_name
         elif ptype == "item_id":
             # 数量参数（若 apply 里声明了 count_from）—— 卡片要显示真实数量
             cnt = 1
@@ -711,7 +812,7 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
                     except (TypeError, ValueError):
                         cnt = 1
                     break
-            items = [{"id": str(val), "count": cnt, "name": ""}]
+            items = [{"id": str(val), "count": cnt, "name": shared_name}]
         else:
             continue
         lines.append({
@@ -721,8 +822,12 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
         })
 
     # 非物品参数里显眼的也带上（如改名动作的 custom_name）
+    # ⚠️ **`display_name` 除外**：它已经当物品显示名用掉了，再加一行就是重复
     for pname, pspec in action.params.items():
-        if str(pspec.get("type") or "") not in ("str",) or pname == "player":
+        if str(pspec.get("type") or "") not in ("str", "components") \
+                or pname == "player":
+            continue
+        if pname == "display_name":
             continue
         val = values.get(pname)
         if val:
@@ -782,6 +887,9 @@ def resolve_karma(action: Action, values: dict, ai_cost=None) -> int:
     model = str(action.karma.get("model") or "none")
     if model == "none":
         return 0
+    if model == "param":
+        # 它不产生「消耗」，只产生带符号的好感变化 —— 见 resolve_karma_delta。
+        return 0
     if model == "fixed":
         n = action.karma.get("cost")
         return n if isinstance(n, int) else 0
@@ -798,3 +906,27 @@ def resolve_karma(action: Action, values: dict, ai_cost=None) -> int:
             "物品 %r 不在价目表里，需要你按本工具的说明报一个 cost" % (key,)
         )
     return normalize_int(ai_cost, 0, action.karma.get("max_cost"))
+
+def resolve_karma_delta(action: "Action", values: dict, cost: int) -> int:
+    """这次动作对好感的**带符号**变化量。
+
+    · 普通动作：**扣** `cost` ⇒ 返回 `-cost`
+    · `karma.model: param`（送礼）：**加**玩家参数里的值 ⇒ 返回 `+delta`
+
+    ⚠️ 与 `resolve_karma` 分开：那个管「这次要收多少」（永远非负），
+    这个管「好感往哪边动」。合成一个会让 `param` 那套被迫返回负数，
+    而 schema 里 `delta` 的 min/max 是按**玩家语义**写的（加 1~2）。
+    """
+    model = str(action.karma.get("model") or "none")
+    if model != "param":
+        return -int(cost)
+    pname = str(action.karma.get("param") or "")
+    if pname not in values:
+        raise ActionError(
+            "动作 %r 的 karma.model=param 指向参数 %r，但这次没给值"
+            % (action.name, pname))
+    try:
+        return int(values[pname])
+    except (TypeError, ValueError):
+        raise ActionError(
+            "动作 %r 的参数 %s 不是整数，无法当好感变化量" % (action.name, pname))

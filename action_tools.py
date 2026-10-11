@@ -35,9 +35,16 @@ except ImportError:  # 插件以顶层模块方式加载时
 # 参数类型 → JSON Schema 片段。
 # ⚠️ 只声明 AstrBot/JSON Schema 认识的关键字：ToolSchema 会拿
 # `jsonschema.Draft202012Validator.META_SCHEMA` 校验，多写不认识的关键字会抛。
+# ⚠️ 没列出来的类型会走 `{"type": "string"}` 兜底。下面前三个本来就该是
+# 字符串（`item_list` 是 `id*数量=名; ...`、`slot_list` 是 `槽位=名; ...`、
+# `components` 是 `key=value,key=value`），列出来是为了让这张表**诚实** ——
+# 否则读者会以为「没列 = 没支持」，去改兜底反而改坏。
 _SCHEMA_TYPE = {
     "player": {"type": "string"},
     "item_id": {"type": "string"},
+    "item_list": {"type": "string"},
+    "slot_list": {"type": "string"},
+    "components": {"type": "string"},
     "int": {"type": "integer"},
     "str": {"type": "string"},
 }
