@@ -730,12 +730,13 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
 
     out = {"title": title, "lines": lines}
     if cost:
-        out["cost"] = "{cost} 好感"  # MC 渲染时替换
         out["cost_value"] = cost
-    # 按钮 hover（可选，缺省由 MC 用内置文案）
+    # 🔴 **按钮 hover 里的 `{cost}` 必须在这里替换掉** —— 2026-10-11 真机暴露：
+    #    原样发下去，MC 端只是照字面渲染，玩家看到的是 `{cost}` 这四个字符。
+    #    （MC 端不做占位符替换 —— 它不认识卡片里的模板语法。）
     for k in ("confirm_hover", "cancel_hover"):
         if spec.get(k):
-            out[k] = str(spec[k])
+            out[k] = str(spec[k]).replace("{cost}", str(cost))
     return out
 
 

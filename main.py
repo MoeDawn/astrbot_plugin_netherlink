@@ -431,6 +431,7 @@ DEFAULT_KARMA_RULES = """\
 DEFAULT_MC_COMMAND_TOOL_DESC = """\
 在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.执行前先判断:
 一律拒绝(无论好感多少):清空或重置成就进度这类可让对方反复刷成就的指令;召唤末影龙/凋零等明显影响服务器的高危指令;破坏他人建筑,清空区域,封禁他人等伤害其他玩家的指令.另,刷怪笼(spawner),原版无法获得的方块,各类刷怪蛋(spawn_egg)一律不给玩家,玩家头颅除外.遇到这类请求直接说明原因并拒绝,不要调用本工具.
+给物品,交换物品,改已有物品(改名,附魔,属性,说明)这类需求:先看你的工具列表里有没有对应的动作工具(如 give_item / swap_items / modify_item);有就用它,它自动拼指令,不会写错格式,没有才用本工具手写.
 其余情形按 cost 参数说明报价与执行.
 好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减(不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次;mc_karma 只用于对话性的好感增减,不用于支付指令费用.
 若当前发起者是管理员(身份见本轮消息中附带的 <netherlink_context>),可在非一律拒绝,非严重超标,非禁止物品范围内适当放宽裁量;但一律拒绝,严重超标和禁止物品规则对管理员同样适用.好感不足时不得手动加减好感,仍以插件原子扣减结果为准;若插件拒绝则如实拒绝."""
@@ -557,6 +558,7 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 你处于我的世界服务器:{server}
 当前发起者:{identity},{is_admin}{binding}
 接收玩家游戏公屏消息,群名与玩家ID由 AstrBot 附带.
+给物品 / 交换物品 / 改已有物品(改名,附魔,属性,说明)时,优先用专用动作工具(名称见你的工具列表,如 give_item,swap_items,modify_item):它们会自动拼好指令,不会因为指令格式写错而失败;只有动作工具表达不了的需求,才用 mc_command 手写.动作工具调用后只发一张私信确认卡,什么都没发生,此时你只需回一句"已经记下你的需求了,看看私信里的卡片,无误就点执行",不要说已给或已扣.
 玩家试图或暗示赠送物品时:
 - 不得仅凭口头表示就道谢或加好感;物品未实际到手前,不得视为已收到.
 - 木头,石头,沙子等无价值或你不喜欢的物品:拒绝并生气(扣好感)
@@ -1961,12 +1963,17 @@ class NetherLinkPlugin(Star):
         #    「消耗 2 好感」就对着玩家说「2 点好感跑不掉喵」，玩家以为已经付过钱，
         #    而实际上**分文未扣**。报价单里的数字会被 AI 当成既成事实，所以这句
         #    必须显式否掉：钱还没动、事还没做，全等玩家点那一下。
+        # 🔴 **必须给出具体话术**，不能只说「别宣称已完成」——2026-10-11 真机：
+        #    AI 回了「跑腿费 2 点好感，已经扣掉了」。不是它不听话，是返回里只写了
+        #    禁止项、没写该说什么，模型就自己编了一句像样的。两边都写死。
         return (
-            f"已向 {player} 私聊发送确认卡（含物品预览，点「确认」才执行）。"
-            f"**尚未执行、也尚未扣除好感** —— 等 {player} 点「确认」那一刻才会"
-            f"扣 {cost} 好感并执行：{cmd}。"
-            f"就此**停止**：不要再调工具，也不要对玩家宣称已经给到或已经扣费。"
-            f"最多告诉他「卡已发，点一下就好」。"
+            f"已向 {player} 私聊发送确认卡。此刻什么都没发生：没给东西、没扣好感。"
+            f"等 {player} 点「确认」那一刻，插件才会扣 {cost} 好感并执行：{cmd}"
+            f"\n\n你现在只该回一句话，语义类似："
+            f"「已经记下你的需求了，看看私信里的卡片，确认无误就点执行吧」。"
+            f"\n不许说的：已经给了 / 已经扣了 / 好感我收下了 / 跑腿费付过了 —— "
+            f"好感是玩家点确认时才扣的，现在还是原样。"
+            f"\n也不要再调任何工具（包括 mc_karma）；就此停下，等他点。"
         )
 
     async def _handle_action_result(self, player: str, token,
@@ -1997,16 +2004,47 @@ class NetherLinkPlugin(Star):
                 f"token={token} 原因={detail or '未说明'}"
             )
             return
-        if item.cost <= 0:
-            return
-        # 与 exec_command_for 同一口径：身份键走唯一入口，扣费不传 origin
-        # （origin 是给「对话触发的自主增减」用的，动作消耗不属于那一类）。
-        key = self._karma_identity_key("game", player, "")
-        await self._karma_add(key, -item.cost)
-        logger.info(
-            f"NetherLink: 动作已执行并扣好感 | 玩家={player} 动作={item.action_name} "
-            f"好感-{item.cost} token={token}"
-        )
+        if item.cost > 0:
+            # 与 exec_command_for 同一口径：身份键走唯一入口，扣费不传 origin
+            # （origin 是给「对话触发的自主增减」用的，动作消耗不属于那一类）。
+            key = self._karma_identity_key("game", player, "")
+            await self._karma_add(key, -item.cost)
+            logger.info(
+                f"NetherLink: 动作已执行并扣好感 | 玩家={player} "
+                f"动作={item.action_name} 好感-{item.cost} token={token}"
+            )
+        # 🔴 **成功就必须播报** —— 2026-10-11 真机：改架构时漏了这段，
+        #    玩家点了确认、东西到手了，公屏上却什么都没有（静默执行）。
+        #    ⚠️ 放在 cost 判断之外 —— 免费动作一样要有播报。
+        await self._announce_action_done(item, player)
+    async def _announce_action_done(self, item, player: str) -> None:
+        """动作执行成功后播报（公屏 + 绑定群）。
+
+        模板取动作自己的 `done`，缺省回退配置项 `template_action_done`。
+        ⚠️ 播报失败不能连累扣费/执行（那已经发生了），只记一条 warning。
+        """
+        try:
+            act = self._find_action(item.action_name)
+            tpl = (getattr(act, "done", "") if act else "") or \
+                self.templates.get("action_done", "")
+            if not tpl:
+                return
+            vals = (item.values or {}).get("values") or {}
+            line = self._fmt(
+                tpl,
+                player=player,
+                cost=item.cost,
+                item=str(vals.get("item") or vals.get("display_name") or ""),
+                display_name=str(vals.get("display_name") or ""),
+                count=int(vals.get("count") or 1),
+                server=self._mc_server_display(item.server_id),
+            )
+            await self._send_to_mc({"type": "bot_reply", "line": line},
+                                   item.server_id)
+            await self._broadcast(line)
+        except Exception as e:
+            logger.warning(f"NetherLink: 动作完成播报失败（忽略）: {e}")
+
     async def _handle_action_confirm(self, player: str, token,
                                      server_id: str = "") -> str:
         """玩家点了确认：取出待确认项并执行。返回给玩家的回话。
@@ -5482,6 +5520,7 @@ class NetherLinkPlugin(Star):
     async def mc_command(self, event, cmd: str, cost: int, server: str = "") -> str:
         """在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.执行前先判断:
         一律拒绝(无论好感多少):清空或重置成就进度这类可让对方反复刷成就的指令;召唤末影龙/凋零等明显影响服务器的高危指令;破坏他人建筑,清空区域,封禁他人等伤害其他玩家的指令.另,刷怪笼(spawner),原版无法获得的方块,各类刷怪蛋(spawn_egg)一律不给玩家,玩家头颅除外.遇到这类请求直接说明原因并拒绝,不要调用本工具.
+        给物品,交换物品,改已有物品(改名,附魔,属性,说明)这类需求:先看你的工具列表里有没有对应的动作工具(如 give_item / swap_items / modify_item);有就用它,它自动拼指令,不会写错格式,没有才用本工具手写.
         其余情形按 cost 参数说明报价与执行.
         好感扣除由本工具自己完成:你在 cost 里报出价格,插件会在同一次调用内原子扣减(不足则拒绝,执行失败则退回).不要用 mc_karma 再扣一次;mc_karma 只用于对话性的好感增减,不用于支付指令费用.
         若当前发起者是管理员(身份见本轮消息中附带的 <netherlink_context>),可在非一律拒绝,非严重超标,非禁止物品范围内适当放宽裁量;但一律拒绝,严重超标和禁止物品规则对管理员同样适用.好感不足时不得手动加减好感,仍以插件原子扣减结果为准;若插件拒绝则如实拒绝.
