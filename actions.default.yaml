@@ -70,12 +70,20 @@ actions:
       item:
         type: item_id
         required: true
-        desc: 物品 ID，如 diamond 或 minecraft:diamond（不带组件的纯物品）
+        desc: 物品 ID，如 diamond 或 minecraft:diamond。要带名字/附魔/属性就填 components
       count:
         type: int
         min: 1
         max: 6400
         default: 1
+        desc: 数量，默认 1
+      display_name:
+        type: str
+        required: true
+        max_len: 24
+        desc: >-
+          这件东西在**卡片和播报里**给玩家看的名字，如「铁锭」「一把钻石剑」。
+          ⚠️ 不是物品 ID —— 填 minecraft:iron_ingot 的话公屏上就显示这串英文。
       components:
         type: components
         required: false
@@ -91,7 +99,6 @@ actions:
           ⚠️ 名字/说明要带颜色或样式时**必须**写成组件对象 {text:"...",color:"..."}；
              写成 '{"text":"..."}'（JSON 套引号）会**静默变成字面量**，显示一堆花括号。
           ⚠️ 组件名写在方括号里、用 = 连接；附魔名要带 minecraft: 前缀。
-        desc: 数量，默认 1
       cost:
         type: int
         min: 0
@@ -134,7 +141,10 @@ actions:
       item_label: "获得"
       confirm_hover: "同意,扣除 {cost} 好感"
       cancel_hover: "否决,无消耗"
-    done: "{player} 花费 {cost} 好感获得 ⌜{item}⌟ ×{count}"
+    # `{items}` = 「⌜显示名⌝ ×数量」串（见 actions.render_done_items）。
+    # ⚠️ **不要用 `{item}`** —— 那给的是物品 ID（`minecraft:iron_ingot`），
+    #    公屏上会显示一串英文 ID 而不是显示名。
+    done: "{player} 花费 {cost} 好感获得 {items}"
   # -------------------------------------------------------------------------
   # 交换物品（材料换成品）—— **扣材料的唯一归宿**
   # -------------------------------------------------------------------------
@@ -172,6 +182,8 @@ actions:
         required: false
         min: 0
         desc: 净好感消耗。这次交换要收多少好感，自己判断（0 = 不收）。
+    # ⚠️ 播报取 **gain**（他获得的），不是 pay（他上交的）
+    done_items_from: [gain]
     template: ""
     apply:
       - {op: check, from: pay}
@@ -184,7 +196,7 @@ actions:
       confirm_hover: "同意,扣除 {cost} 好感"
       cancel_hover: "否决,无消耗"
     confirm: true
-    done: "{player} 交换获得 {gain}"
+    done: "{player} 交换获得 {items}"
 
   # -------------------------------------------------------------------------
   # 修改玩家**已有**物品（改名 / 附魔 / 属性 / 说明）
@@ -246,3 +258,94 @@ actions:
       cancel_hover: "否决,无消耗"
     confirm: true
     done: "{player} 花费 {cost} 好感修改了物品"
+
+  # -------------------------------------------------------------------------
+  # 收下礼物（玩家送了有价值的东西）
+  # -------------------------------------------------------------------------
+  # ⚠️ 与 give_item 的区别：**方向相反** —— 是玩家给 AI，不是 AI 给玩家。
+  # ⚠️ 物品必须真在他背包里：`apply` 里的 check 先核验，不够就整体拒绝、不加好感。
+  #    这一步也是防「口头说说就加好感」的技术兜底（提示词那一层管不了谎报）。
+  - name: offer_karma
+    label: 收下礼物
+    desc: >-
+      玩家送了**有价值**的东西，收下并加好感。物品必须真的在他背包里 ——
+      插件会先核验再收走；核验不过直接失败，**不会加好感**。
+      只加 1 或 2 点。判断标准见系统提示词里的礼物规则。
+    params:
+      player:
+        type: player
+        required: true
+        desc: 玩家游戏 ID
+      item:
+        type: item_id
+        required: true
+        desc: 物品 ID，如 diamond 或 minecraft:diamond
+      count:
+        type: int
+        min: 1
+        max: 6400
+        default: 1
+        desc: 数量，默认 1
+      display_name:
+        type: str
+        required: true
+        max_len: 24
+        desc: 卡片和播报里给玩家看的名字，如「钻石」
+      delta:
+        type: int
+        required: true
+        min: 1
+        max: 2
+        desc: 加多少好感，只能 1 或 2
+    template: ""
+    apply:
+      - {op: check, from: item, count_from: count}
+      - {op: clear, from: item, count_from: count}
+    # 好感**加** delta（不是扣 cost）—— 见 actions.resolve_karma_delta
+    karma: {model: param, param: delta}
+    card:
+      title: "收下礼物"
+      item_label: "收下"
+      confirm_hover: "同意"
+      cancel_hover: "不用了"
+    confirm: true
+    done: "{player} 送出 {items}，好感 +{delta}"
+
+  # -------------------------------------------------------------------------
+  # 拒收礼物（送的东西无价值 / 可量产）
+  # -------------------------------------------------------------------------
+  # ⚠️ **不拿走他的物品**（所以才没有 clear）。`apply` 是空的。
+  # ⚠️ **不发确认卡** —— AI 决定拒收就该直接拒，让玩家点一下「确认」很奇怪。
+  - name: refuse_gift
+    label: 拒收礼物
+    desc: >-
+      玩家送的东西无价值或可量产，不收，并按情况扣好感。**不拿走他的物品**。
+      delta：无价值的 -1 或 -2；可量产的 0。
+    params:
+      player:
+        type: player
+        required: true
+        desc: 玩家游戏 ID
+      display_name:
+        type: str
+        required: true
+        max_len: 24
+        desc: 玩家送的东西的名字，如「石头」
+      delta:
+        type: int
+        required: true
+        min: -2
+        max: 0
+        desc: 好感变化，只能 -2 / -1 / 0
+      reason:
+        type: str
+        required: false
+        max_len: 60
+        desc: 一句话理由，会**私聊**转达给玩家（不公屏）
+    template: ""
+    apply: []
+    karma: {model: param, param: delta}
+    confirm: false
+    # 播报取 display_name 那侧（这个动作没有物品参数）
+    done_items_from: []
+    done: "{player} 送出 ⌜{display_name}⌝，被拒收了"

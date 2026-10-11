@@ -583,13 +583,12 @@ DEFAULT_NETHERLINK_CONTEXT_GAME = """\
 ⚠️ 这套规则只管由他送给你;玩家找你要东西是完全另一回事 ——
    要泥土/石头这种一文不值的,照给(走动作工具),不要扣好感,也不要嘲讽;
    要值钱的东西按价目表正常收费.绝不要把上面拒绝无价值物品套到他要东西上.
-注意:收礼物目前没有专用工具,必须严格按下面三步走,不得跳步:
-1. 用 data get entity <玩家ID> Inventory[{id:"minecraft:物品ID"}] 查对方背包;
-   找不到就告知没有,不 clear,不加好感.
-2. 仅按玩家说出的数量执行,如 clear <玩家ID> minecraft:diamond 3;
-   严禁不带数量执行 clear(那会清光该物品全部).
-3. 确认物品已取走后,再按价值调用 mc_karma 加好感,并回复已拿到.
-只说没动手(没到第 2 步)的,不算收到.
+收不收由你判断,但**收下来这件事交给工具**:
+  · 有价值 -> 调 offer_karma.它自己会先核验物品真在不在,不在就直接失败,
+    不会白加好感(所以谎报[我送你了]加不到好感).
+  · 无价值 / 可量产 -> 调 refuse_gift.它**不拿走物品**,只改好感.
+  ⚠️ 两件都**不要手写 data get / clear** —— 工具替你做了,写错格式还会出岔子.
+工具报[材料不足]就是没收到,别加好感.
 
 回复前先调用 mc_karma(delta 传 0)查一次发起者的好感值,再决定说话的语气与态度.
 </netherlink_context>"""
@@ -1907,8 +1906,13 @@ class NetherLinkPlugin(Star):
             cost = actions.resolve_karma(action, values, raw_params.get("cost"))
         except actions.ActionError as e:
             return str(e)
+        try:
+            karma_delta = actions.resolve_karma_delta(action, values, cost)
+        except actions.ActionError as e:
+            return str(e)
         if action.confirm:
-            return await self._offer_action_confirm(action, values, cost, cmd, event)
+            return await self._offer_action_confirm(
+                action, values, cost, cmd, event, karma_delta)
         return await self._execute_action(action, values, cost, cmd, event)
 
     def _action_server_id(self, event) -> str:
@@ -1928,7 +1932,8 @@ class NetherLinkPlugin(Star):
             ident = None
         return str(ident.get("server_id") or "") if ident else ""
 
-    async def _offer_action_confirm(self, action, values, cost, cmd, event) -> str:
+    async def _offer_action_confirm(self, action, values, cost, cmd, event,
+                                    karma_delta: int = None) -> str:
         """私聊发确认卡 + 登记待确认。**本函数绝不执行指令。**
 
         执行发生在玩家点击之后（`_handle_action_confirm`）—— 这正是
@@ -1944,8 +1949,9 @@ class NetherLinkPlugin(Star):
             card = actions.build_card(action, values, cost)
         except actions.ActionError as e:
             return f"内部错误（动作展开）：{e}"
-        if not steps:
-            return "这条动作没有可执行的内容，请检查动作目录。"
+        # ⚠️ **没有 steps 是合法的** —— 有些动作只改好感、不动游戏
+        #    （如 refuse_gift：拒不收，物品留在玩家背包）。
+        #    原先这里直接返回错误，那类动作就完全没法用。
         now = time.monotonic()
         token = actions.new_token(self._action_token_seq)
         self._action_token_seq = token
@@ -1962,7 +1968,22 @@ class NetherLinkPlugin(Star):
             cost=cost,
             cmd=cmd,
             deadline=now + self.action_confirm_ttl,
+            # 带符号：普通动作 -cost，送礼（model=param）+delta
+            karma_delta=(int(karma_delta) if karma_delta is not None
+                         else -int(cost)),
         )
+        # 🔴 **没有 steps ⇒ 不用发卡、不用等玩家点**：直接结算好感。
+        #    理由：MC 端收到空的 steps 会渲染出一张「点了什么也不会发生」的卡，
+        #    对玩家是纯干扰（refuse_gift 就是这类 —— 它只是「拒收 + 扣好感」）。
+        if not steps:
+            item = self._pending_actions.pop(token, None)
+            if item is not None:
+                await self._apply_action_karma(item, player)
+            await self._announce_action_done(item, player)
+            return (
+                f"已完成（{player} 的好感变化 {self._signed(item.karma_delta)}）。"
+                f"\n你可以就此回一句简短的话，不要再调工具。"
+            )
         # 卡片由 **MC 端渲染**（它用 Adventure 构造可点击组件，能把 token 捕获
         # 进回调闭包 ⇒ 不需要计分板）。这里只发数据。
         ok = await self._send_to_mc(
@@ -2023,19 +2044,35 @@ class NetherLinkPlugin(Star):
                 f"token={token} 原因={detail or '未说明'}"
             )
             return
-        if item.cost > 0:
-            # 与 exec_command_for 同一口径：身份键走唯一入口，扣费不传 origin
-            # （origin 是给「对话触发的自主增减」用的，动作消耗不属于那一类）。
-            key = self._karma_identity_key("game", player, "")
-            await self._karma_add(key, -item.cost)
-            logger.info(
-                f"NetherLink: 动作已执行并扣好感 | 玩家={player} "
-                f"动作={item.action_name} 好感-{item.cost} token={token}"
-            )
+        await self._apply_action_karma(item, player)
         # 🔴 **成功就必须播报** —— 2026-10-11 真机：改架构时漏了这段，
         #    玩家点了确认、东西到手了，公屏上却什么都没有（静默执行）。
         #    ⚠️ 放在 cost 判断之外 —— 免费动作一样要有播报。
         await self._announce_action_done(item, player)
+    @staticmethod
+    def _signed(n: int) -> str:
+        """好感的带符号写法（给 AI 看的话术里用）。"""
+        return ("+" + str(n)) if n > 0 else str(n)
+
+    async def _apply_action_karma(self, item, player: str) -> None:
+        """按 `karma_delta` 改好感（带符号：正加负扣）。
+
+        🔴 **原先这里写死 `-item.cost`** —— 只会做减法，送礼那种要**加**好感的
+        动作根本没法表达。现在统一走带符号的 `karma_delta`。
+
+        ⚠️ 与 `exec_command_for` 同一口径：身份键走唯一入口，不传 origin
+        （origin 是给「对话触发的自主增减」用的，动作结算不属于那一类）。
+        """
+        delta = int(getattr(item, "karma_delta", 0) or 0)
+        if delta == 0:
+            return
+        key = self._karma_identity_key("game", player, "")
+        await self._karma_add(key, delta)
+        logger.info(
+            f"NetherLink: 动作结算好感 | 玩家={player} 动作={item.action_name} "
+            f"好感{self._signed(delta)} token={item.token}"
+        )
+
     async def _announce_action_done(self, item, player: str) -> None:
         """动作执行成功后播报（公屏 + 绑定群）。
 
@@ -2049,10 +2086,20 @@ class NetherLinkPlugin(Star):
             if not tpl:
                 return
             vals = (item.values or {}).get("values") or {}
+            # `{items}` 走 render_done_items —— 它按「显示名 → ID」的优先级取，
+            # 修的是用户报的「播报显示物品 id 而不是显示名」。
+            items = ""
+            if act is not None:
+                try:
+                    items = actions.render_done_items(act, vals)
+                except Exception as e:
+                    logger.warning(f"NetherLink: 播报物品名渲染失败（忽略）: {e}")
             line = self._fmt(
                 tpl,
                 player=player,
                 cost=item.cost,
+                delta=getattr(item, "karma_delta", 0),
+                items=items,
                 item=str(vals.get("item") or vals.get("display_name") or ""),
                 display_name=str(vals.get("display_name") or ""),
                 count=int(vals.get("count") or 1),
