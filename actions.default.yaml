@@ -171,7 +171,9 @@ actions:
       玩家只是要一件新东西,不交出任何东西,用 give_item.
       ⚠️ 交出物必须真在他背包里:**数量不够就整体拒绝**,一件都不动,也不加好感.
       所以你不用自己算他够不够,调下去让插件核验即可.
-      升级**已有装备**时,把那件装备本身也写进 pay,把成品写进 gain.
+      升级**已有装备**时,用**槽位寻址**把那件写进 pay(如 `weapon.mainhand=旧剑`),
+      把成品写进 gain —— 服务器会去读那一格**真实的**物品,你不用猜.
+      他同一种物品有好几件(如两把剑)时,你也**必须**用槽位写法说清是哪一件.
     params:
       player:
         type: player
@@ -184,10 +186,22 @@ actions:
           玩家上交的物品.格式 `物品ID*数量=显示名`,多项用 `;` 隔开.
           例:`minecraft:emerald*8=绿宝石原矿; minecraft:echo_shard*2=回响碎片`
           数量省略为 1;显示名只用于给玩家看的卡片.
+          **另一种写法是槽位寻址**:直接写槽位名代替物品 ID,表示"他身上那一格的东西",
+          如 `weapon.mainhand=旧剑`.升级他**已有**的装备时**必须用这种写法** ——
+          你不知道那一格是什么,猜出来的物品与组件对不上,插件会拒绝执行.
+          可用槽位:weapon.mainhand / weapon.offhand / armor.head / armor.chest /
+          armor.legs / armor.feet / hotbar.0~8 / inventory.9~35.
+          ⚠️ **先查再决定**(26.3 的指令,你没有它的训练数据,照抄即可):
+            · 手上与身上的装备:`data get entity <玩家ID> equipment`
+            · 背包某一格:`data get entity <玩家ID> Inventory[{Slot:5b}]`(Slot 从 0 数)
+          ⚠️ 26.3 的 `/data get` 读列表会**省略元素**(4 个以上就写成 `...`),
+          所以**逐个槽位查**,别指望一次读出整背包.
       gain:
         type: item_list
         required: true
-        desc: 玩家获得的物品,格式同 pay.例:`minecraft:iron_ingot*3=铁锭`
+        desc: >-
+          玩家获得的物品,格式同 pay.例:`minecraft:iron_ingot*3=铁锭`
+          ⚠️ 这里**不能**用槽位写法 —— 槽位是"从他身上取",而这里是"给他".
       cost:
         type: int
         required: false
@@ -195,10 +209,10 @@ actions:
         desc: 净好感消耗.这次交换要收多少好感,自己判断(0 = 不收).
     # 🔴 **必须有 karma 块** —— 只声明 `cost` 参数是**不够**的:
     #    `resolve_karma` 按 `karma.model` 决定要不要读它,不写这个块就等于
-    #    `model: none`,AI 报的 cost 被**静默忽略**、一分好感不扣
-    #    (2026-10-11 评审发现,两个动作一直如此)。
-    #    这里给 `table_then_ai` + **空表** = 「一律用 AI 报价」——
-    #    本动作连 `item` 参数都没有,不可能命中表,所以语义稳定。
+    #    `model: none`,AI 报的 cost 被**静默忽略**,一分好感不扣
+    #    (2026-10-11 评审发现,两个动作一直如此).
+    #    这里给 `table_then_ai` + **空表** = "一律用 AI 报价"——
+    #    本动作连 `item` 参数都没有,不可能命中表,所以语义稳定.
     karma: {model: table_then_ai, max_cost: 30}
     # ⚠️ 播报取 **gain**(他获得的),不是 pay(他上交的)
     done_items_from: [gain]
@@ -281,7 +295,9 @@ actions:
       - {op: modify, from: targets, components_from: components}
     card:
       title: "修改物品"
-      targets_label: "修改"
+      # 卡片两行的标签（可选，默认就是「当前 / 改成」）
+      # current_label: "当前"
+      # modified_label: "改成"
       confirm_hover: "同意,扣除 {cost} 好感"
       cancel_hover: "否决,无消耗"
     confirm: true

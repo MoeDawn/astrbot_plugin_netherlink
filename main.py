@@ -2235,14 +2235,24 @@ class NetherLinkPlugin(Star):
         return None
 
     async def _tell_player(self, player: str, text: str,
-                           server_id: str = "") -> None:
-        """私聊给某个玩家一句话（不广播）。用于告知「失效 / 过期 / 不是你的」。"""
+                           server_id: str = "", color: str = "gray") -> None:
+        """私聊给某个玩家一句话（不广播）。用于告知「失效 / 过期 / 不是你的」。
+
+        🔴 **用 `tellraw` 而不是 `tell`**（用户 2026-10-12）：原版 `tell` 会在
+        消息前面加「某某某悄悄对你说」那种前缀，看着像玩家在跟他说话；
+        `tellraw` 指定目标发的是干净的文本组件，还能上色。
+        ⚠️ 与进服提示同一套：值里的双引号要**转义**（不是替换成单引号 ——
+        那会静默改掉数据，见 `_tellraw_json_escape`）。`\n` 转义成 JSON 的换行。
+        """
         if not player or not text:
             return
         try:
+            safe = (_tellraw_json_escape(_strip_section_codes(text))
+                    .replace("\n", "\\n"))
+            payload = ('[{"text":"%s","color":"%s"}]' % (safe, color))
             await self._send_to_mc(
                 {"type": "command", "id": uuid.uuid4().hex,
-                 "cmd": f"tell {player} {_strip_section_codes(text)}"},
+                 "cmd": f"tellraw {player} {payload}"},
                 server_id,
             )
         except Exception as e:

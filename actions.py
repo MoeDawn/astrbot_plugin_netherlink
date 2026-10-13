@@ -543,6 +543,28 @@ def _coerce(spec: dict, value, pname: str):
 #    **会清光 2 个**（不是原子失败）。所以「够不够」必须**先一次性问清**，
 #    全通过才开始扣 —— 否则会出现「扣了一半、后面缺料」的半成品状态。
 
+# 允许寻址的槽位（`modify` 的 targets 与 `item_list` 的槽位寻址共用）。
+# **故意不含 `contents`** 这类范围槽 —— 那是多格，语义不清；也不含末影箱等
+# 需要在别的容器上操作的槽。
+_SLOTS = frozenset(
+    ["weapon.mainhand", "weapon.offhand", "armor.head", "armor.chest",
+     "armor.legs", "armor.feet"]
+    + ["hotbar.%d" % i for i in range(9)]
+    + ["inventory.%d" % i for i in range(9, 36)]
+)
+
+# 供 AI 查询槽位用的原版指令（MC 26.3）。**AI 没有 26.3 的训练数据**，
+# 不能让它自己编 —— 所以写进工具描述，让它照着跑。
+SLOT_QUERY_HINT = (
+    "想知道玩家身上/背包里到底是什么，先**查**，别猜：\n"
+    "  · 手上与身上的装备：data get entity <玩家ID> equipment\n"
+    "  · 背包某几格：data get entity <玩家ID> Inventory[{Slot:5b}]（只列了 Slot 5 的那格）\n"
+    "  · 交互过的方块（末影箱等）：查不到，别猜\n"
+    "⚠️ 26.3 的 `/data get` 读**列表/映射**时会省略元素（约 4 个以上就写成 ...），"
+    "所以**逐个槽位查**，不要指望一次读出整背包。"
+)
+
+
 def expand_item_list(raw_value) -> list:
     """把 `id*数量=显示名; id*数量=显示名` 解析成 `[{id, count, name}]`。
 
@@ -584,11 +606,21 @@ def expand_item_list(raw_value) -> list:
             count = int(cnt)
             if count < 1:
                 raise ActionError("数量必须 >= 1：%d" % count)
-        entry = {
-            "id": normalize_item_id(piece.strip()),
-            "count": count,
-            "name": name,
-        }
+        # 🔴 **槽位寻址**（2026-10-12 用户要求）：条目可以写成
+        #    `weapon.mainhand=旧剑` —— 表示「他身上那一格的东西」。
+        #    **为什么需要**：LLM **读不到**玩家物品的组件，只能看到名字；
+        #    而它凭对话猜的组件写进 `pay` 后，按组件匹配必然失败
+        #    （「升级我手上这把剑」实测必挂）。用槽位寻址就由**服务器**
+        #    去读那一格真实的物品，不用猜。
+        key = piece.strip()
+        if key in _SLOTS:
+            entry = {"slot": key, "count": count, "name": name}
+        else:
+            entry = {
+                "id": normalize_item_id(key),
+                "count": count,
+                "name": name,
+            }
         if comps:
             entry["components"] = comps
         out.append(entry)
@@ -630,14 +662,6 @@ def expand_slot_list(raw_value) -> list:
 
 # 允许 modify 的槽位。**故意不含 `contents` 这类范围槽**（那是多格，
 # `setItem` 语义不清），也不含末影箱等需要在别的容器上操作的槽。
-_SLOTS = frozenset(
-    ["weapon.mainhand", "weapon.offhand", "armor.head", "armor.chest",
-     "armor.legs", "armor.feet"]
-    + ["hotbar.%d" % i for i in range(9)]
-    + ["inventory.%d" % i for i in range(9, 36)]
-)
-
-
 def expand_steps(action: "Action", values: dict) -> list:
     """按 `action.apply` 把动作展开成 MC 可执行的步骤列表。
 
@@ -752,6 +776,13 @@ def expand_steps(action: "Action", values: dict) -> list:
                 "slot_list），实际是 %r" % (action.name, typ)
             )
         for it in items:
+            if "slot" in it:
+                # 槽位寻址的条目：**只给槽位**，物品由 MC 端去读
+                step = {"op": op, "slot": it["slot"], "count": it["count"]}
+                if it.get("name"):
+                    step["name"] = it["name"]
+                (checks if op == "check" else steps).append(step)
+                continue
             step = {"op": op, "item": it["id"], "count": it["count"]}
             if it.get("name"):
                 step["name"] = it["name"]
@@ -801,8 +832,14 @@ def render_done_item_entries(action: "Action", values: dict) -> list:
         if ptype == "item_list":
             shared = str(values.get("display_name") or "").strip()
             for it in expand_item_list(val):
-                e = {"id": it["id"], "count": it["count"],
-                     "name": it.get("name") or shared or it["id"]}
+                # ⚠️ 条目可能是**槽位寻址**（只有 `slot`，没有 `id`）——
+                #    播报拿不到物品 ID（那是服务器才知道的），用显示名兜底。
+                key = it.get("id") or it.get("slot") or "?"
+                e = {"count": it["count"], "name": it.get("name") or shared or key}
+                if it.get("id"):
+                    e["id"] = it["id"]
+                if it.get("slot"):
+                    e["slot"] = it["slot"]
                 if it.get("components"):
                     e["components"] = it["components"]
                 out.append(e)
@@ -867,17 +904,28 @@ def build_card(action: "Action", values: dict, cost: int) -> dict:
             continue
         ptype = str(pspec.get("type") or "")
         if ptype == "slot_list":
-            # 改哪几个槽位（`modify_item` 的 targets）。它没有物品 ID，
-            # 走 text 通道：显示名优先，没写就退回槽位名。
-            # 🔴 额外带上 `slot`：MC 端据此**去读那个格子里真实的物品**，
-            #    用它做 hover —— 改的是玩家自己那件，组件只有那边知道。
+            # 改哪几个槽位（`modify_item` 的 targets）。
+            # 🔴 **出两行**（用户 2026-10-12）：改东西时卡片只写一句
+            #    「修改物品 + 显示名」看不出改前改后。现在：
+            #      · 「当前」—— MC 端按 `slot` 去读玩家**真实**那件
+            #        （改的是他身上那件，组件只有服务器知道）
+            #      · 「改成」—— 同一件为基底 + LLM 给的组件
+            #        （MC 端走 `buildMergedItem`，与真正执行时**同口径**）
+            #    两行都是普通 `items` 条目 ⇒ 自动带 `show_item` 悬停。
+            #    ⚠️ 条目的 `slot` 是新的取值路径：MC 端据此取基底物品
+            #      （有 `components` 就再套上去）。
             pairs = expand_slot_list(val)
             lines.append({
-                "label": str(spec.get(pname + "_label")
-                             or pspec.get("label") or pname),
-                "text": "、".join(n or s for s, n in pairs),
-                "slots": [s for s, _n in pairs],
+                "label": str(spec.get("current_label") or "当前"),
+                "items": [{"slot": s, "name": n or s} for s, n in pairs],
             })
+            comps = _components_param_for(action, pname, values)
+            if comps:
+                lines.append({
+                    "label": str(spec.get("modified_label") or "改成"),
+                    "items": [{"slot": s, "components": comps,
+                               "name": n or s} for s, n in pairs],
+                })
             continue
         if ptype == "item_list":
             items = expand_item_list(val)
