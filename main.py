@@ -307,6 +307,31 @@ except ImportError:  # 插件以顶层模块方式加载时
         render_karma_rules,
     )
 
+# 配置解析纯函数（2026-10-13 外移到 nl_config.py；与 nl_protocol.py
+# 同一个双路导入写法，名字仍在 main 上可见）。
+try:
+    from .nl_config import (
+        _as_str_list,
+        _parse_csv,
+        _parse_group_names,
+        _parse_ws_ports,
+        _quick_command_entries,
+        _read_int,
+        find_stale_config,
+        load_bundled_schema,
+    )
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_config import (
+        _as_str_list,
+        _parse_csv,
+        _parse_group_names,
+        _parse_ws_ports,
+        _quick_command_entries,
+        _read_int,
+        find_stale_config,
+        load_bundled_schema,
+    )
+
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 1500
 
@@ -572,76 +597,8 @@ DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
 DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 {items}'
 
 
-
-
-# 已从 schema 删除、但**存量配置里可能还留着**的键。
-# ⚠️ 与 test_every_config_get_key_exists_in_schema 的 LEGACY_READS 是同一份名单：
-#    那里管「代码会读的旧键」，这里管「该提醒用户清理的旧键」。
-_OBSOLETE_CONFIG_KEYS = ("target_groups",)
-
 # 键名 → 模式里的字段名（对不上的直接跳过，不臆造）
 _SCHEMA_KEY_ALIASES: dict = {}
-
-
-def find_stale_config(conf: dict, schema: dict) -> dict:
-    """检查存量配置，分两类返回。
-
-    为什么要它：AstrBot 的 `check_config_integrity` **只补缺失的键、从不覆盖
-    已有的值**（`elif key not in conf: new_conf[key] = value`）。所以插件改了
-    默认值，存量部署那边一点动静都没有——2026-09-23 的两个真 bug 都源于此
-    （价目表没生效、名单被删空导致 QQ→MC 全断）。
-
-    ⚠️ **两类必须分开，不能混成一个警告**：
-
-    | 类别 | 含义 | 处理 |
-    |---|---|---|
-    | `obsolete` | 已废弃的键里**还有值** | **WARNING**——可操作，且正是咬过我们的情形 |
-    | `customized` | 与当前默认值不同 | INFO 计数——**自定义是正常行为**，做成警告就是刷屏 |
-
-    本项目自己的参考配置 40 项里有 17 项与默认不同，全报出来等于噪声。
-
-    这个函数**只报告、不修改**：改配置是用户的事，插件擅自覆盖更危险。
-
-    返回 `{"obsolete": [(键, 说明)], "customized": [(键, 说明)]}`。
-    """
-    obsolete: list = []
-    customized: list = []
-    for key in _OBSOLETE_CONFIG_KEYS:
-        try:
-            if conf.get(key):
-                obsolete.append((key, f"已废弃，值为 {conf[key]!r:.60}——插件不再读取，可清空"))
-        except Exception:
-            pass
-
-    for key, item in (schema or {}).items():
-        if key in _OBSOLETE_CONFIG_KEYS:
-            continue
-        try:
-            if key not in conf:
-                continue
-            cur, default = conf[key], item.get("default")
-            if cur == default:
-                continue
-        except Exception:
-            continue
-        if isinstance(cur, str) and isinstance(default, str):
-            customized.append((key, f"你的 {len(cur)} 字符 / 默认 {len(default)} 字符"))
-        else:
-            customized.append((key, f"你的 {cur!r:.60} / 默认 {default!r:.60}"))
-    return {"obsolete": obsolete, "customized": customized}
-
-
-def load_bundled_schema() -> dict:
-    """读取**插件目录里**的 _conf_schema.json（默认值的权威来源）。
-
-    读不到就返回空 dict——`find_stale_config` 对空 schema 自然只报废弃键，
-    不会因为读文件失败而连累插件启动。
-    """
-    try:
-        path = Path(__file__).resolve().parent / "_conf_schema.json"
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
 
 
 class NetherLinkPlugin(Star):
@@ -656,7 +613,7 @@ class NetherLinkPlugin(Star):
         # 多服务器功能落地后已删除（用户 2026-09-19 确认）。
         # 形如 "8765,8766"（server-name 取 MC 端上报值）
         # 或   "survival:8765,creative:8766"（显式指定 server-name，推荐）
-        self.ws_bindings: list = self._parse_ws_ports(config.get("ws_ports", []))
+        self.ws_bindings: list = _parse_ws_ports(config.get("ws_ports", []))
         # 显示名：由 `ws_ports` 里的 `显示名:端口` 提供（2026-10-07 起并入）。
         # ⚠️ 同一个端口重复出现时只保留第一条（`_parse_ws_ports` 已去重）。
         self.port_display_names: dict = dict(
@@ -672,7 +629,7 @@ class NetherLinkPlugin(Star):
         # ⚠️ 这一项是**显式指定**，多机器人部署下才可控；
         # 不填时行为与历史一致（用最后发言的那个机器人）。
         self.qq_platform_id: str = str(config.get("qq_platform_id") or "").strip()
-        self.admin_qq: set[str] = self._parse_csv(config.get("admin_qq", []))
+        self.admin_qq: set[str] = _parse_csv(config.get("admin_qq", []))
         # 游戏内机器人唤醒词（前缀），默认与 QQ 侧唤醒一致。
         # ⚠️ 走 _as_str_list 而不是自己 split：该配置项 2026-09-23 起是
         # `type: "list"`（WebUI 的「修改列表项」弹窗），但已部署实例拿到的
@@ -699,10 +656,10 @@ class NetherLinkPlugin(Star):
             _ttl = 120.0
         self.action_confirm_ttl: float = _ttl if _ttl > 0 else 120.0
 
-        self.mc_ignored_players: set = self._parse_csv(
+        self.mc_ignored_players: set = _parse_csv(
             config.get("mc_ignored_players", [])
         )
-        self.mc_wake_prefixes: list[str] = self._as_str_list(
+        self.mc_wake_prefixes: list[str] = _as_str_list(
             config.get("mc_wake_prefixes", ["ai", "助手"])
         )
         # 名称与占位符：模板里可用 {server}/{group}/{bot} 分别替换为
@@ -726,7 +683,7 @@ class NetherLinkPlugin(Star):
         # _parse_group_names 的 else 分支保证，不是这里补的。
         # ❌ 曾经还有一个独立的 `target_groups` 配置项，与这一项的键完全重复，
         #    两个地方各填一遍群号，改一个忘一个就静默失效，故合并删除。
-        self.group_names: dict[str, str] = self._parse_group_names(
+        self.group_names: dict[str, str] = _parse_group_names(
             config.get("group_names") or []
         )
         # ⚠️ **存量配置兼容**（2026-09-23 修的真实 bug）：`target_groups` 配置项已删除，
@@ -740,7 +697,7 @@ class NetherLinkPlugin(Star):
         #    **空列表**，而那不会有任何提示说「你的群号在另一个已废弃的项里」。
         #    静默失效正是本项目一直在防的失败模式（见 claude.md「五个坑」）。
         if not self.group_names:
-            legacy = self._parse_csv(config.get("target_groups", []))
+            legacy = _parse_csv(config.get("target_groups", []))
             if legacy:
                 self.group_names = {g: g for g in sorted(legacy)}
                 logger.warning(
@@ -784,8 +741,8 @@ class NetherLinkPlugin(Star):
         #
         # 归一规则：先各自兜底成整数，再**强制 lo < hi**（倒置区间会让
         # clamp_value 恒返回 lo，等于把所有人的好感钉死，必须挡住）。
-        self.karma_min: int = self._read_int(config, "karma_min", -50)
-        self.karma_max: int = self._read_int(config, "karma_max", 100)
+        self.karma_min: int = _read_int(config, "karma_min", -50)
+        self.karma_max: int = _read_int(config, "karma_max", 100)
         if self.karma_min >= self.karma_max:
             logger.warning(
                 f"NetherLink: karma_min({self.karma_min}) >= karma_max({self.karma_max})，"
@@ -851,7 +808,7 @@ class NetherLinkPlugin(Star):
             or DEFAULT_KARMA_DELTA_PARAM_DESC
         )
         # 管理员游戏 ID（AstrBot 全局管理员的 admins_id 是 QQ 号，对游戏内无效）
-        self.admin_mc: set[str] = self._parse_csv(config.get("admin_mc", []))
+        self.admin_mc: set[str] = _parse_csv(config.get("admin_mc", []))
         # 匹配用的小写副本：MC 登录名不区分大小写，而 getName() 返回**规范拼写**。
         # 用户填 moedawn、游戏里是 MoeDawn 时，区分大小写的比对永远匹配不上，
         # 且完全静默。admin_mc 本身保留原样，用于提示词里展示名单。
@@ -880,14 +837,15 @@ class NetherLinkPlugin(Star):
         self.log_command_audit: bool = bool(config.get("log_command_audit", True))
         # ---- 账号绑定（QQ ↔ 游戏 ID）----
         # 第二轮：进服门禁 + 验证码绑定。策略在 binding_flow.py，表由 bindings.py 读写。
-        # ⚠️ 两个解析函数都是本类的 staticmethod，必须经 self. 调用——
-        #    裸写 _read_int(...) 运行时会 NameError，而静态扫描的守卫看不出来。
+        # ⚠️ 两个解析函数（_read_int / _parse_csv）已外移到 nl_config.py，
+        #    经双路导入重新导出到本模块顶层——**裸调用**即可。写成 self.xxx
+        #    会 AttributeError（类上已无这些名字）。
         self.enable_binding: bool = bool(config.get("enable_binding", True))
         self.binding_group: str = str(config.get("binding_group") or "").strip()
         self.binding_join_gate: bool = bool(config.get("binding_join_gate", True))
-        self.binding_code_length: int = self._read_int(config, "binding_code_length", 6)
-        self.binding_code_ttl: int = self._read_int(config, "binding_code_ttl", 300)
-        self.binding_exempt_players: set = self._parse_csv(
+        self.binding_code_length: int = _read_int(config, "binding_code_length", 6)
+        self.binding_code_ttl: int = _read_int(config, "binding_code_ttl", 300)
+        self.binding_exempt_players: set = _parse_csv(
             config.get("binding_exempt_players", [])
         )
         # 绑定流程的码簿（内存态）：进程重启后旧码失效是合理的。
@@ -1253,167 +1211,12 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # 工具函数
     # ------------------------------------------------------------------
-    # 中文输入法下极易打出的分隔符——它们不是半角逗号，直接 split(",") 会把
-    # 整串当成一个元素（如 admin_mc 变成 {"MoeDawn，Steve"}，永远匹配不上）。
-    # 统一归一化成半角逗号再切分。
-    _SEPARATORS = str.maketrans({"，": ",", "、": ",", "；": ",", ";": ",", "\u3000": ","})
-
-    @staticmethod
-    def _as_str_list(raw) -> "list[str]":
-        """把配置值归一成**字符串列表**。
-
-        ⚠️ **为什么必须同时接受 str 与 list**（2026-09-23）：
-        这几个"可配多个"的配置项已从 `type: "string"`（逗号分隔）改成
-        `type: "list"`（WebUI 里的「修改列表项」弹窗）。但 AstrBot 的
-        `check_config_integrity` **只补缺失的键、不覆盖用户已有的值**
-        （源码里是 `elif key not in conf: new_conf[key] = value`），
-        所以**已部署的实例拿到的仍是旧字符串**，而新装的拿到 list。
-
-        两种都必须能解析，否则升级会直接让这些配置失效——且是静默失效。
-        """
-        if raw is None:
-            return []
-        if isinstance(raw, str):
-            # 旧形态：单串，按分隔符切（容错中文分隔符，见 _SEPARATORS）
-            text = raw.translate(NetherLinkPlugin._SEPARATORS)
-            return [s.strip() for s in text.split(",") if s.strip()]
-        if isinstance(raw, (list, tuple, set)):
-            out = []
-            for item in raw:
-                text = str(item).translate(NetherLinkPlugin._SEPARATORS)
-                # 元素内部也可能有分隔符（用户在单个条目里粘了 "a,b"）
-                out.extend(s.strip() for s in text.split(",") if s.strip())
-            return out
-        logger.warning(f"NetherLink: 配置项类型无法识别的 {type(raw).__name__}，按空处理")
-        return []
-
-    @staticmethod
-    def _quick_command_entries(raw) -> list:
-        """`quick_commands` 配置项 → 「一条条目一个字符串」的列表。
-
-        🔴 **这里刻意不走 `_as_str_list` 的列表分支**——全仓库唯一一处这样做的地方，
-        理由必须写下来，否则将来会有人把它「修」回去：
-
-        `_as_str_list` 对**每一条列表项**还会再按半角逗号切一刀（它的注释写着
-        「元素内部也可能有分隔符（用户在单个条目里粘了 "a,b"）」）。那条约定对
-        `admin_mc` / `ws_ports` / `group_names` 是对的——那些项装的是**简单值**，
-        多出来的逗号没有意义。而 `quick_commands` 的每一条是**任意指令文本**，
-        逗号在指令里**有意义**：
-
-            setblock 1 2 3 minecraft:chest{Items:[{id:"minecraft:diamond",count:1b}]}
-
-        按逗号切不是「少一条」，而是**劈出来的两段各自都还带着名称与指令段**，
-        于是双双被当成**合法按钮**注册进面板——管理员点下去执行的是一条他从没写过
-        的（截断的）命令，而面板上看不出任何异常。切成两段都还合法的情形更糟：
-        `tp @s 100 64 100, 200 64 200` 会静默跑成 `tp @s 100 64 100`。
-
-        两种形态的数据形状**本来就不一样**，所以分开处理：
-
-        - **str**（旧形态：逗号分隔的单串）→ 仍交 `_as_str_list`，兼容存量配置。
-          单串形态里写不下带逗号的指令，那是它的固有限制。
-        - **list / tuple / set**（`type: "list"` 的新形态）→ 每条**原样**取用，
-          只去掉首尾空白，**不切逗号**。
-        """
-        if isinstance(raw, str):
-            return NetherLinkPlugin._as_str_list(raw)
-        if isinstance(raw, (list, tuple, set)):
-            return [str(item).strip() for item in raw if str(item).strip()]
-        if raw is None:
-            return []
-        logger.warning(
-            f"NetherLink: quick_commands 配置项类型无法识别的 "
-            f"{type(raw).__name__}，按空处理"
-        )
-        return []
-
-    @staticmethod
-    def _read_int(config, key: str, default: int) -> int:
-        """读一个整数配置项，任何异常都回退默认值。
-
-        与 `_parse_csv` 等解析函数同一口径：配置来自 WebUI 手填，是外部输入，
-        不能因为填了非数字就崩掉插件加载。
-        """
-        try:
-            return int(config.get(key, default))
-        except (TypeError, ValueError, OverflowError):
-            logger.warning(f"NetherLink: 配置项 {key} 不是合法整数，已回退默认值 {default}")
-            return default
 
     def _render_karma_rules(self, text: str) -> str:
         """把 karma_rules 里的范围占位符替换成实际配置值。"""
         return render_karma_rules(
             text, self.karma_min, self.karma_max, self.karma_initial
         )
-
-    @staticmethod
-    def _parse_csv(raw) -> set[str]:
-        """把配置解析成无重复集合。
-
-        接受三种形态：旧的逗号分隔**字符串**（"111, 222"）、新的 **list**
-        （["111","222"]）、以及 None/空。前者是已部署实例的存量形态，
-        后者是 `type: "list"` 之后的新形态——两者都必须支持，见 _as_str_list。
-        """
-        return set(NetherLinkPlugin._as_str_list(raw))
-
-    @staticmethod
-    def _parse_group_names(raw: str) -> dict[str, str]:
-        """把 '群号:群名, 987654:生存服' 形式的配置解析成 {群号: 群名}。
-
-        同样容错中文分隔符（全角逗号 / 顿号），并把全角冒号也归一化——
-        `group_names` 走这里，写错一个字符就会
-        静默失效。
-        """
-        result: dict[str, str] = {}
-        for part in NetherLinkPlugin._as_str_list(raw):
-            part = part.replace("：", ":")
-            if not part:
-                continue
-            if ":" in part:
-                gid, name = part.split(":", 1)
-                gid, name = gid.strip(), name.strip()
-                if gid and name:
-                    result[gid] = name
-            else:
-                result[part] = part  # 只填群号时群名用群号代替
-        return result
-
-    @staticmethod
-    def _parse_ws_ports(raw) -> list:
-        """解析 ws_ports 配置 → [(显示名, port), ...]。
-
-        - 留空/全非法 → []，插件**不监听任何端口**（启动时会明确告警）
-        - "8765,8766" → [("", 8765), ("", 8766)]，这两台没有显示名，回退常量 "MC"
-        - "生存服:8765" → [("生存服", 8765)]
-
-        🔴 **冒号前那一段是「显示名」，不是身份**（2026-10-07 改版，用户要求）：
-        内部身份、定向发指令、会话键**一律用 MC 端上报的 server-name**。
-        显示名只用于展示（QQ 群消息前缀 / 面板 / 模板 `{server}`）。
-
-        ⚠️ **空串表示「这台没有显示名」**，回退 `DEFAULT_SERVER_DISPLAY`。
-        ⚠️ 以前这里写的是 `server_name`（port→id 的绑定），身份优先取它、其次才取
-        上报名；那条路已删除——**身份只认上报名**，不再有第二来源。
-        """
-        out: list = []
-        seen: set = set()
-        for part in NetherLinkPlugin._as_str_list(raw):
-            part = part.replace("：", ":")
-            name, _, port_s = part.rpartition(":")
-            if not port_s:
-                name, port_s = "", part
-            try:
-                port = int(port_s)
-            except (TypeError, ValueError):
-                logger.warning(f"NetherLink: ws_ports 里的端口非法，已跳过: {part!r}")
-                continue
-            if not (0 < port < 65536):
-                logger.warning(f"NetherLink: ws_ports 里的端口越界，已跳过: {part!r}")
-                continue
-            if port in seen:
-                logger.warning(f"NetherLink: ws_ports 里的端口重复，已跳过: {part!r}")
-                continue
-            seen.add(port)
-            out.append((name.strip(), port))
-        return out
 
     # ------------------------------------------------------------------
     # 好感度存取（本地文件 + 配置项双写）
@@ -3927,7 +3730,7 @@ class NetherLinkPlugin(Star):
         两条路由各解析一次就会出现「点第 2 个按钮、跑了第 3 条指令」，且不报错。
         """
         return panel.quick_commands_view(
-            self._quick_command_entries(self.config.get("quick_commands"))
+            _quick_command_entries(self.config.get("quick_commands"))
         )
 
     @staticmethod
