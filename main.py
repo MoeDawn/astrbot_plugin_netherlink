@@ -307,6 +307,13 @@ except ImportError:  # 插件以顶层模块方式加载时
         render_karma_rules,
     )
 
+# 绑定域服务（2026-10-13 阶段二从 main.py 外移）：绑定表 / 码簿 / 落盘路径 /
+# 进服门禁 / 群内发码。与 nl_protocol.py 同一个双路导入写法。
+try:
+    from .nl_binding_svc import BindingService
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_binding_svc import BindingService
+
 # 配置解析纯函数（2026-10-13 外移到 nl_config.py；与 nl_protocol.py
 # 同一个双路导入写法，名字仍在 main 上可见）。
 try:
@@ -848,10 +855,8 @@ class NetherLinkPlugin(Star):
         self.binding_exempt_players: set = _parse_csv(
             config.get("binding_exempt_players", [])
         )
-        # 绑定流程的码簿（内存态）：进程重启后旧码失效是合理的。
-        # 码簿是跨协程的共享可变状态，读写都要拿锁。
-        self._bind_codes: dict = {}
-        self._bind_code_lock = asyncio.Lock()
+        # ⚠️ 绑定流程的码簿（`codes`）与那把锁（`lock`）2026-10-13 已随绑定域
+        #    移入 `BindingService`——构造点在下面 `_karma_dir` 设好之后。
         # 成就处理：enable_advancement 开启时，玩家获得成就就把提示词发给 AI，
         # 由 AI 决定好感变化并回话（与死亡扣减不同——那是 AI 不在场的代码扣减）。
         # 留空则用默认提示词（与其他提示词字段一致：空串不表示"关闭"，用开关关）。
@@ -966,16 +971,11 @@ class NetherLinkPlugin(Star):
         self._karma_dir: Path = Path(get_astrbot_plugin_data_path()) / "netherlink"
         self._karma_path: Path = self._karma_dir / "karma.json"
 
-        # 绑定表：QQ ↔ 游戏 ID。与 karma.json 同目录。
-        # ⚠️ `_binding_table` 就是运行期**唯一**那份表（好感键读它）——重绑落地时
-        # 必须**重新赋值这个属性**；只写盘不赋值，内存里会一直是旧表直到重启。
-        self._bindings_path: Path = bindings.bindings_path(self._karma_dir.parent)
-        try:
-            self._binding_table: dict = bindings.load(self._bindings_path)
-        except Exception as e:
-            # 绑定表坏了不该挡住插件加载——退化为「谁都没绑定」
-            logger.error(f"NetherLink: 绑定表加载失败（按空表继续）: {e}")
-            self._binding_table = {}
+        # 绑定域服务（2026-10-13 阶段二外移）：绑定表 / 码簿 / 落盘路径 / 进服
+        # 门禁 / 群内发码全归它。⚠️ 表是运行期**唯一**那份（好感键读它）——
+        # 整体替换走 `self.bindings.table`（或 `commit_table`），只写盘不赋值
+        # 等于没改。⚠️ 必须在 `_karma_dir` 设好**之后**构造（服务经它定位数据目录）。
+        self.bindings = BindingService(self)
         # 指令审计落盘位置，与 karma.json 同目录（便于整体备份）。
         # ⚠️ `audit_path` 收的是**插件数据根**，会自己拼上 `netherlink/`。
         # `_karma_dir` 已经含 `netherlink/` 那一层，所以取它的 `.parent`；
@@ -1086,7 +1086,7 @@ class NetherLinkPlugin(Star):
         # 免得插件升级时静默改掉玩家数据。
         try:
             pending = binding_flow.plan_migration(
-                self._binding_table, self._karma.snapshot(),
+                self.bindings.table, self._karma.snapshot(),
                 self.karma_min, self.karma_max,
             )
             if pending:
@@ -2083,20 +2083,20 @@ class NetherLinkPlugin(Star):
                 return "degraded", [], []
             snapshot = self._karma.snapshot()
             plan = binding_flow.plan_migration(
-                self._binding_table, snapshot, self.karma_min, self.karma_max
+                self.bindings.table, snapshot, self.karma_min, self.karma_max
             )
             if not plan:
                 return "nothing", [], []
             # ⚠️ 要删哪些 `mc:` 键**由 binding_flow 给**，不在这里重写一遍判据：
             #    两处各写一份迟早分叉，而分叉的表现是删错/漏删、全程静默。
-            consumed = binding_flow.migrated_keys(self._binding_table, snapshot)
+            consumed = binding_flow.migrated_keys(self.bindings.table, snapshot)
 
             changes = []
             for qq_key in sorted(plan):
                 qq = qq_key[len("qq:"):]
                 players = [
                     k[3:] for k in consumed
-                    if bindings.lookup(self._binding_table, k[3:]) == qq
+                    if bindings.lookup(self.bindings.table, k[3:]) == qq
                 ]
                 changes.append({
                     "key": qq_key,
@@ -2168,39 +2168,19 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 写回 karma_records 配置失败: {e}")
 
-    def bindings_snapshot(self) -> dict:
-        """绑定表的只读快照。工具在协程里读它，不直接读可变属性。"""
-        return dict(self._binding_table)
-
-    def _commit_binding_table(self, new_table: dict, old_table: dict) -> bool:
-        """把新绑定表**整体替换**进运行期那份并落盘；落盘失败则**回滚内存**。
-
-        ⚠️ 必须整体替换 `self._binding_table`（不是就地改）——`bindings.upsert` /
-        `bindings.remove` 都返回新表，而运行期那份是**唯一真源**，两处必须同步换掉。
-        ⚠️ 落盘失败时**把内存也退回去**：内存改了、文件没改，等于面板显示改好了、
-        重启后回到旧值——那是最难查的一种「成功」。退回去之后内存与磁盘始终一致，
-        调用方只需据返回值如实报错。
-        """
-        self._binding_table = new_table
-        try:
-            bindings.save(self._bindings_path, self._binding_table)
-            return True
-        except Exception as e:
-            self._binding_table = old_table
-            logger.error(
-                f"NetherLink: 绑定表落盘失败（已回滚内存，两边保持一致）: {e}"
-            )
-            return False
+    # ⚠️ 绑定表的只读快照与「整体替换 + 落盘」2026-10-13 已随绑定域移入
+    #    `BindingService`：`self.bindings.snapshot()` / `.commit_table(new, old)`。
 
     def _karma_identity_key(self, source: str, initiator: str, qq: str) -> str:
         """好感身份键的唯一入口——把绑定表填进 `karma.karma_identity_key`。
 
-        ⚠️ 全项目只此一处知道「绑定表在哪」；四个调用点都走它。
+        ⚠️ 绑定表由 `BindingService` 持有（`self.bindings.table`）；
+        四个调用点都走本方法，别处不再直接读表。
         ⚠️ 名字**必须**含子串 `identity_key`：`tests/test_contracts.py` 有两条
         AST 断言，要求 `exec_command_for` / `_dispatch_mc_event` 的函数体里出现
         这个子串。改成 `_karma_key` 会让那两条以「未找到」失败。
         """
-        return karma_identity_key(source, initiator, qq, self._binding_table)
+        return karma_identity_key(source, initiator, qq, self.bindings.table)
 
     def _write_audit(self, event: str, **fields) -> None:
         """写一条审计记录。**旁路功能，绝不抛异常**——写不进去也不能连累指令执行。
@@ -2583,7 +2563,7 @@ class NetherLinkPlugin(Star):
                 #    （2026-10-07 拆分）：总开关开着就**发提示**；
                 #    子开关 `binding_join_gate` 只在门禁**内部**决定踢不踢。
                 if binding_flow.is_unbound(
-                    self._binding_table, player,
+                    self.bindings.table, player,
                     ignored=self.mc_ignored_players,
                     enabled=self.enable_binding,
                     exempt=self.binding_exempt_players,
@@ -2595,7 +2575,7 @@ class NetherLinkPlugin(Star):
                     # （`_fmt` 只兜 KeyError/IndexError，用户把模板写成 `{code:d}`
                     #   这类格式错误会抛 ValueError，是真实可达的。）
                     try:
-                        gated = await self._gate_unbound_player(player, server_id)
+                        gated = await self.bindings.gate_unbound_player(player, server_id)
                     except Exception as e:
                         logger.error(f"NetherLink: 进服门禁执行失败，按未拦截处理: {e}")
                         gated = False
@@ -2611,12 +2591,12 @@ class NetherLinkPlugin(Star):
                 # ⚠️ 只在**真新增**一台服时才落盘——进服是高频道，
                 # 每次都写盘既慢又没意义（规范 §3.1：「只在见到新的服务器时才追加」）。
                 updated, changed = bindings.note_server(
-                    self._binding_table, player, server_id
+                    self.bindings.table, player, server_id
                 )
                 if changed:
-                    self._binding_table = updated
+                    self.bindings.table = updated
                     try:
-                        bindings.save(self._bindings_path, self._binding_table)
+                        bindings.save(self.bindings.path, self.bindings.table)
                     except Exception as e:
                         logger.warning(f"NetherLink: 记录玩家服务器失败（忽略）: {e}")
                 text = self._fmt(self.templates["join"], server=srv, bot=self.mc_bot_name,
@@ -2896,13 +2876,13 @@ class NetherLinkPlugin(Star):
             # 顺序 = 绑定表的插入顺序；多个 ID 之间用中文顿号列举。
             players = [
                 str(player)
-                for player, rec in self._binding_table.items()
+                for player, rec in self.bindings.table.items()
                 if isinstance(rec, dict) and str(rec.get("qq") or "") == target
             ]
             if not players:
                 return ""
             return "，已绑定游戏账号：%s" % "、".join(players)
-        rec = self._binding_table.get(identity)
+        rec = self.bindings.table.get(identity)
         if isinstance(rec, dict) and str(rec.get("qq") or ""):
             qq = str(rec["qq"])
             name = str(rec.get("qq_name") or "")
@@ -3385,7 +3365,7 @@ class NetherLinkPlugin(Star):
     async def _api_bindings(self):
         """GET QQ ↔ 游戏账号绑定表（可选 `?q=`）。
 
-        ⚠️ 读的是**运行期那一份** `self._binding_table`（第二轮定的：全项目只有
+        ⚠️ 读的是**运行期那一份** `self.bindings.table`（第二轮定的：全项目只有
         这一份，绑定成功时整体替换）。不要在这里重新 `bindings.load` 一遍——
         那会造出第二个真源，面板显示的可能与实际生效的不是同一份。
         """
@@ -3393,7 +3373,7 @@ class NetherLinkPlugin(Star):
             return _panel_unavailable()
         try:
             return json_response(
-                panel.bindings_view(self._binding_table, _panel_query("q"))
+                panel.bindings_view(self.bindings.table, _panel_query("q"))
             )
         except Exception as e:
             logger.error(f"NetherLink: 面板读取绑定表失败: {e}")
@@ -3432,12 +3412,12 @@ class NetherLinkPlugin(Star):
                 return error_response("qq_name 必须是字符串")
             qq_name = qq_name.strip()
 
-            old_table = self._binding_table
+            old_table = self.bindings.table
             new_table = bindings.upsert(
                 old_table, player, qq, qq_name, "", "manual",
                 datetime.now().isoformat(timespec="seconds"),
             )
-            if not self._commit_binding_table(new_table, old_table):
+            if not self.bindings.commit_table(new_table, old_table):
                 return error_response(
                     "绑定表写入失败（数据目录不可写？），改动未生效"
                 )
@@ -3473,7 +3453,7 @@ class NetherLinkPlugin(Star):
             if not player:
                 return error_response("player 必须是非空字符串")
 
-            old_table = self._binding_table
+            old_table = self.bindings.table
             new_table, removed = bindings.remove(old_table, player)
             if removed is None:
                 return json_response({
@@ -3481,7 +3461,7 @@ class NetherLinkPlugin(Star):
                     "removed": False,
                     "message": "该游戏 ID 本来就没有绑定，未做任何改动",
                 })
-            if not self._commit_binding_table(new_table, old_table):
+            if not self.bindings.commit_table(new_table, old_table):
                 return error_response(
                     "绑定表写入失败（数据目录不可写？），改动未生效"
                 )
@@ -4400,164 +4380,9 @@ class NetherLinkPlugin(Star):
             logger.error(f"NetherLink: 发送到 MC [{target}] 失败: {e}")
             return False
 
-    async def _gate_unbound_player(self, player: str, server_id: str) -> bool:
-        """未绑定玩家进服：发码 + 公屏提示，**并按 `binding_join_gate` 决定踢不踢**。
-
-        🔴 **两个开关的分工**（2026-10-07 用户要求）：
-          · `enable_binding`（**总开关**）—— 关掉 = 没有绑定功能：不发码、不提示、
-            不踢（调用方根本不会走到这里）。
-          · `binding_join_gate`（**子开关**）—— **只管踢不踢**。关掉时玩家
-            **照常收到提示与验证码**、照常进服，只是**不被踢出**。
-        ⚠️ 拆分前两者是**串联**的（`enabled = enable_binding and binding_join_gate`），
-        于是「只想提醒、不想踢人」这种合理配置**做不到**——关掉子开关会把提示
-        也一起关掉。现在可以了。
-
-        **返回值**：`True` = 已把他踢出去（调用方必须 `return`，别再推群）；
-        `False` = 没踢（子开关关着、拿不到可用群号、或执行出错），
-        调用方照常走后面的推群逻辑。
-        ⚠️ **返回 `False` 绝不该把玩家丢掉**：他收了提示、进了服，就该照常出现在群里。
-
-        ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
-        1. **只走游戏内**——不额外 `_broadcast`，否则一条 join 会推两次群
-        2. **私聊发码，不广播**（2026-10-09 用户要求）：走 `command` 帧执行
-           `/tell <玩家> <提示>`，只发给本人。此前用 `bot_reply` 广播到公屏，
-           同服任何玩家都能看到别人的验证码，可以抢先绑定。
-        3. **踢出用 `command` 帧**（`kick`）：与 `/tell` 同一条控制台通道，
-           四个 MC 端通用，且踢出界面上显示的原因就是那份说明
-        4. **仍然落服务端日志**（用户要求保留）：实测真 Paper 26.3，`/tell` 从
-           控制台发出时走 `CommandSourceStack.sendChatMessage` →
-           `MinecraftServer.sendSystemMessage` → `LOGGER.info("System chat: ...")`，
-           所以「码写进日志」这条特性不变，不必改任何 MC 端
-
-        **返回值**：`True` = 已经把他拦下了，调用方应当 `return`（不要再推群）；
-        `False` = 门禁**没有生效**（拿不到可用群号，或执行出错），
-        调用方要照常走后面的推群逻辑——**静默把玩家丢掉是最糟的结局**。
-
-        ⚠️ **拿不到一个「能被插件处理的」群号，就放行（fail-open）：不踢、不发码**。
-        两种情形：
-          1. 压根没有群号——没配 `binding_group`，且 `group_names` 为空或多于一个；
-          2. `binding_group` 填了一个**不在 `group_names` 里**的群号。
-        后果完全一样，而且很重：`on_group_message` 与 `on_decorating_result` 都以
-        「群号 ∈ `group_names`」为门槛，**那个群的消息插件根本不处理**——玩家拿到的
-        是一张永远兑换不了的码。若还把他踢了，他连进来喊一声都做不到。
-        所以这里必须放行：**一个字段打错，不该让全服新人被挡在门外**。
-
-        ⚠️ 这条判据放在**本方法里**而不是 `_binding_groups()` 里：那个函数的契约
-        就是「配了 `binding_group` 就原样返回它，否则返回全部绑定群」，它**不做**
-        成员校验；「群号可不可用、该不该因此放行」是**门禁的策略**。
-        ⚠️ **「留空 = 全部绑定群都可用」是用户 2026-10-07 的要求**：改动前那种
-        「多个群却留空 → 只记一条 warning、门禁不生效」的行为已废除。
-        ⚠️ 发码**本来**就已在所有绑定群里生效（`on_group_message` 的门槛是
-        「群号 ∈ `group_names`」），本函数只决定**提示玩家去哪些群**。
-
-        ⚠️ 这里**不额外记 warning**：配置问题应该报**一次**，而进服是高频事件，
-        逐次刷只会把别的东西淹掉。提示改在 `__init__` 的启动检查里报
-        （搜「binding_group 不在绑定群名单里」），那里才是运维会看的地方。
-        """
-        groups = self._binding_groups()
-        # ⚠️ 除了「一个群都没配」，「群号不在绑定群名单里」同样要放行——见 docstring。
-        usable = [g for g in groups if str(g).strip() and g in self.group_names]
-        if not usable:
-            return False
-        # ⚠️ `binding_code_length` / `binding_code_ttl` 必须**真的传下去**：
-        # 它们曾被读进 self 却没有任何调用点使用（`binding_flow` 内部只认自己的
-        # 模块常量），于是「配了 60 秒 TTL、结果还是 5 分钟」静默发生。
-        # ⚠️ 位数也要传给 `match`（下一处），否则发 8 位码、按 6 位判形状 =
-        # 码永远兑不上 = 全体锁死。
-        code = binding_flow.new_code(random.randrange, self.binding_code_length)
-        async with self._bind_code_lock:
-            self._bind_codes = binding_flow.issue(
-                binding_flow.prune(self._bind_codes, time.monotonic(),
-                                   self.binding_code_ttl),
-                player, code, time.monotonic(),
-            )
-        # 走到这里 `usable` 必非空、且每个成员都在 `group_names` 里。
-        # `{group}` 是**群名**（顿号分隔）；留空配置下就是全部绑定群的名字。
-        group_names = self._binding_group_names(usable)
-        # ---- 渲染：JSON 模式与纯文本模式各走各的渲染器 ----
-        # 值里的双引号会提前闭合 `/tellraw` 的 JSON，先换成单引号。
-        values = {
-            "server": self._mc_server_display(server_id),
-            "player": player,
-            "code": code,
-            "group": group_names,
-            "ttl": binding_flow.describe_ttl(self.binding_code_ttl),
-        }
-        safe_values = {k: _tellraw_json_escape(str(v)) for k, v in values.items()}
-        hint_tpl = self.templates["bind_hint"]
-        if _bind_hint_is_json(hint_tpl):
-            # ✅ JSON 模式：显式替换（不碰 JSON 结构）→ 私聊发 tellraw
-            #    踢出原因从同一份 JSON 的 `text` 节点推导，两边不会漂移。
-            rendered = _fill_placeholders(hint_tpl, safe_values)
-            plain = _strip_section_codes(_bind_hint_plain_text(rendered))
-            hint_cmd = f"tellraw {player} {rendered}"
-        else:
-            # 纯文本模式（存量配置）：照旧走 `_fmt`。
-            # ⚠️ `_fmt` 的 ValueError 语义**必须保留**：
-            #    `test_gate_failure_degrades_to_not_gated` 用它验证「渲染炸了也要 fail-open」。
-            plain = _strip_section_codes(self._fmt(hint_tpl, **values))
-            hint_cmd = f"tell {player} {plain}"
-        # 提示**始终私聊发**（走到这里说明总开关开着、且拿得到可用群号）。
-        # ⚠️ 不广播：码只该给本人，广播会让同服其他玩家抢绑。
-        await self._send_to_mc(
-            {"type": "command", "id": uuid.uuid4().hex, "cmd": hint_cmd},
-            server_id,
-        )
-        # ⚠️🔴 **插件自己记一条**（2026-10-10 用户要求）：
-        # `/tellraw` 走 `ServerPlayer.sendSystemMessage` 只发 packet，**不落服务端日志**；
-        # 而原来的 `/tell` 会走 `MinecraftServer.sendSystemMessage`
-        # = `LOGGER.info("System chat: ...")`。换成 tellraw 后那条留痕会消失，
-        # 所以由插件自己补上（与其他日志同样单行、竖线分隔）。
-        logger.info(
-            f"NetherLink: 绑定验证码已下发 | "
-            f"服务器={values['server']} 玩家={player} "
-            f"验证码={code} 有效期={values['ttl']}"
-        )
-        if not self.binding_join_gate:
-            # 子开关关着 = 只提醒、不踢。玩家照常进服，调用方继续推群。
-            return False
-        # 踢出原因必须是**纯文本**：`KickCommand` 的 reason 走
-        # `MessageArgument` → `Component.literal(text)`，不解析 JSON，且上限 256 字符。
-        await self._send_to_mc(
-            {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {plain}"},
-            server_id,
-        )
-        return True
-
-    def _binding_groups(self) -> list:
-        """哪些群可以接受验证码，按 `group_names` 的插入顺序返回**群号**列表。
-
-        契约（改动前先读完）：
-          · 配了 `binding_group` → 只返回它（成员校验**不在这里**做）；
-          · 留空 → 返回**全部**绑定群（用户 2026-10-07 要求：留空 = 所有
-            消息互通的群都能发码）；
-          · `group_names` 为空 → 空列表。
-
-        ⚠️ **本函数不做成员校验**：`binding_group` 配了一个不在 `group_names` 里的
-        群号时照样原样返回——「这个群号能不能用、该不该因此放行」是**门禁的策略**。
-        这是改动前就定下的分工，别合并进来。
-
-        ⚠️ **返回群号、不是群名**：门禁要拿它跟 `group_names` 的键比对；而 `{group}`
-        占位符要的是**群名**，由 `_binding_group_names` 映射。两者形态不同，
-        别为了少一个函数而混用——混用会让门禁那句成员校验直接判假、门禁静默失效。
-
-        ❌ 这里以前叫 `_binding_group_id`，且在「配了多个群却留空」时记一条 warning
-        并返回空串——后果是**门禁整个不生效**（fail-open 放行）。用户明确要求改成
-        「留空 = 所有互通群都可用」，所以那条 warning 一并删除：现在不再存在
-        「拿不到群号」这个状态，只剩「一个群都没配」。
-        """
-        if self.binding_group:
-            return [self.binding_group]
-        return list(self.group_names.keys())
-
-    def _binding_group_names(self, groups: list) -> str:
-        """把群号列表渲染成给玩家看的**群名**串（顿号分隔）。
-
-        `{group}` 占位符用它。查不到群名时回退群号本身——`group_names` 的既有口径
-        就是「只填群号时值等于键」。配了 `binding_group` 时列表只有一个，
-        行为与改动前完全一致。
-        """
-        return "、".join(self.group_names.get(g, g) for g in groups)
+    # ⚠️ 进服门禁与「哪些群可以发码」两个辅助 2026-10-13 已随绑定域移入
+    #    `BindingService`：`self.bindings.gate_unbound_player(...)` /
+    #    `.groups()` / `.group_names(...)`。
 
     async def _broadcast_to_mc(self, payload: dict) -> int:
         """把一条下行消息发给**所有**在线的 MC 服务器，返回发成功的台数。
@@ -4630,72 +4455,8 @@ class NetherLinkPlugin(Star):
             {"type": "bot_reply", "line": self._render_bot_reply(text)}
         )
 
-    async def _try_bind_with_code(self, event, group_id: str, text: str) -> bool:
-        """把一条群消息当作绑定码试试。**吞下即返回 True**（调用方 return，不再转发）。
-
-        ⚠️ 形状判据在 `binding_flow.match` 内部（它先 `is_code_shaped` 再遍历码簿，
-        非码形状一律返回 `("", "")`）——所以普通群聊原样落到本方法返回 False 那条路，
-        照旧被转发进游戏。**先判形状再查码簿**的顺序也在那里，几百人的群下这不是
-        白白的遍历开销。
-
-        ⚠️ `servers` 传空串（`upsert` 的第 5 个参数）是**已知取舍**：这条路径只拿到
-        一个群消息，**不知道玩家在哪台服**（码簿里只存 code/issued_at，见
-        `binding_flow.issue`）。不影响绑定本身（键是游戏 ID），他下次进服时
-        `_dispatch_mc_event` 的 `note_server` 会把当时那台服补进 `servers`。
-
-        ⚠️ 落盘失败**必须让用户知道**：内存里的表已经改了，重启后却会没掉——不回话
-        的话他会以为绑好了。这条路上 `return True`（吞掉这条消息）也是刻意的：
-        码不该因为一次写盘失败而被原样转发进游戏公屏。
-        """
-        now = time.monotonic()
-        already_bound = False
-        async with self._bind_code_lock:
-            player, already = binding_flow.match(
-                self._bind_codes, self._binding_table, text, now,
-                self.binding_code_length, self.binding_code_ttl,
-            )
-            if not player:
-                return False
-            if already:
-                # 已经绑过了：不覆盖。这里**只置标记**，回话挪到锁外（见下）。
-                already_bound = True
-            else:
-                self._bind_codes.pop(player, None)
-
-        if already_bound:
-            # ⚠️ **回话必须在锁外**：`_reply_to_group` 是一次 QQ 网络发送，而
-            #    `_gate_unbound_player` 需要**同一把锁**——在锁里 await 会把并发的
-            #    进服门禁一起拖住（适配器卡住时尤其明显）。回话不碰任何共享状态，
-            #    没有理由占着锁。
-            await self._reply_to_group(
-                group_id, "你已经绑定过游戏账号了；如需换绑请在管理面板操作"
-            )
-            return True
-
-        qq = str(event.get_sender_id() or "")
-        qq_name = str(event.get_sender_name() or "")
-        self._binding_table = bindings.upsert(
-            self._binding_table, player, qq, qq_name, "", "code",
-            datetime.now().isoformat(timespec="seconds"),
-        )
-        try:
-            bindings.save(self._bindings_path, self._binding_table)
-        except Exception as e:
-            # ⚠️ 落盘失败要让用户知道——否则重启后绑定就没了，而他以为成功了
-            logger.error(f"NetherLink: 绑定表落盘失败: {e}")
-            await self._reply_to_group(group_id, "绑定写入失败，请稍后重试或联系管理员")
-            return True
-
-        await self._broadcast_to_game(
-            self._fmt(self.templates["bind_success_game"], player=player,
-                      qq=qq, qq_name=qq_name)
-        )
-        await self._reply_to_group(
-            group_id,
-            self._fmt(self.templates["bind_success_qq"], player=player,
-                      qq=qq, qq_name=qq_name),
-        )
-        return True
+    # ⚠️ 群内发码兑换（绑定域）2026-10-13 已移入 `BindingService`：
+    #    `self.bindings.try_bind_with_code(...)`。
 
     # ------------------------------------------------------------------
     # QQ 群消息 -> MC
@@ -5193,10 +4954,12 @@ class NetherLinkPlugin(Star):
             #   ② 必须在**群白名单判据之后**（上面那行 `group_id not in
             #      self.group_names`）——否则任意群里的随机 6 位文本都会被当码处理。
             #      绑定群 ⊆ 群名单，门禁也只会把码发到「能被插件处理的」群里
-            #      （见 _gate_unbound_player 的 fail-open）。
+            #      （见 bindings.gate_unbound_player 的 fail-open）。
             # ⚠️ 这里**刻意不再加一道群判据**：`binding_group` 允许与 `group_names`
             #    不同（用户选了独立配置项），两条判据叠起来会把合法的绑定群挡掉。
-            if self.enable_binding and await self._try_bind_with_code(event, group_id, text):
+            if self.enable_binding and await self.bindings.try_bind_with_code(
+                event, group_id, text
+            ):
                 return
             # 群名：配置里优先，未配置退回群号；QQ 消息里的 § 码剥离防止伪造染色
             group_name = self.group_names.get(group_id, group_id)
