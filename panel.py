@@ -103,7 +103,7 @@ def bindings_view(table: dict, query: str = "") -> list:
     """绑定表 → `[{"player", "qq", "qq_name", "servers", "bound_at", "method"}]`。
 
     ⚠️ 字段归一化口径**与 `bindings.load` 一致**（缺字段按空值补、`servers` 不是
-    列表就当空表）——运行期的 `_binding_table` 本来就是 `load` 的产物，两边口径
+    列表就当空表）——运行期的 `self.bindings.table` 本来就是 `load` 的产物，两边口径
     不同会让「面板看到的」与「实际生效的」悄悄分叉。
     ⚠️ **非字典的值直接跳过**（`bindings.load` 同样逐条丢弃），不让一条脏数据
     把整张表打成 500。
@@ -262,7 +262,7 @@ def players_view(output) -> dict:
 # B3：快捷指令（面板按钮）
 # ---------------------------------------------------------------------------
 #
-# 🔴 安全边界**只此一份**：`main.py` 的 `_api_commands` 把它原样放进 GET 的返回体，
+# 🔴 安全边界**只此一份**：`nl_panel_api.py` 的 `PanelApi.api_commands` 把它原样放进 GET 的返回体，
 # 前端因此没有理由不显示它。
 # 依据：AstrBot 的 `dashboard/api/plugins.py` 里，`/plugins/extensions/` 的**每一个**
 # 端点都声明了 `auth: AuthContext = Depends(require_plugin_scope)`，而

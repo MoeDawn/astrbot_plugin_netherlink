@@ -178,14 +178,14 @@ class BindingService:
             )
         # 走到这里 `usable` 必非空、且每个成员都在 `group_names` 里。
         # `{group}` 是**群名**（顿号分隔）；留空配置下就是全部绑定群的名字。
-        group_names = self.group_names(usable)
+        group_label = self.group_names(usable)
         # ---- 渲染：JSON 模式与纯文本模式各走各的渲染器 ----
         # 值里的双引号会提前闭合 `/tellraw` 的 JSON，先换成单引号。
         values = {
             "server": self.plugin._mc_server_display(server_id),
             "player": player,
             "code": code,
-            "group": group_names,
+            "group": group_label,
             "ttl": binding_flow.describe_ttl(self.plugin.binding_code_ttl),
         }
         safe_values = {k: _tellraw_json_escape(str(v)) for k, v in values.items()}

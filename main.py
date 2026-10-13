@@ -868,7 +868,7 @@ class NetherLinkPlugin(Star):
         # `_karma_dir` 已经含 `netherlink/` 那一层，所以取它的 `.parent`；
         # 直接传 `_karma_dir` 会得到 .../netherlink/netherlink/audit.jsonl。
         self._audit_path: Path = audit.audit_path(self._karma_dir.parent)
-        _karma_lock = asyncio.Lock()
+        karma_lock = asyncio.Lock()
         # 配置项是唯一权威来源（管理员在 WebUI 手改的 karma_records
         # 优先级最高）；磁盘文件只写不读，降级为镜像。
         # 加载失败必须让插件照常加载——好感度是软约束。各分支的实际保证：
@@ -877,12 +877,12 @@ class NetherLinkPlugin(Star):
         #     日后可人工取用）；但只要还能解析配置项，就继续用
         #     配置项里的记录播种，于是后续写回的是「配置原有记录 + 本次改动」，
         #     不会把管理员手填的条目清空。
-        #   播种也失败：退化为空表且置 _karma_degraded，此时禁止写回配置项——
+        #   播种也失败：退化为空表且置 karma_degraded，此时禁止写回配置项——
         #     内存里没有配置项的记录，写回等于把它们全部清掉。
         # 这里兜的是「配置项读不出来」：`_parse_config_records` 对坏 JSON 抛异常，
         # 于是降级分支生效、`karma.degraded` 置起，写回路径全部拒绝。
         # 也兜意外（如 RecursionError、数据目录不可读）。
-        _karma_degraded: bool = False
+        karma_degraded: bool = False
         try:
             # ⚠️ 2026-09-30 起**只读配置项**（`karma_records` 是唯一权威来源）。
             # 此前是「文件 ∪ 配置」并集（配置同键覆盖、两边独有都留），后果是
@@ -899,7 +899,7 @@ class NetherLinkPlugin(Star):
             # 「内存里只有合法值」也会失真。它同时**返回新 dict**——
             # `_parse_config_records` 在配置项已是 dict 时返回的是 AstrBot 那个
             # 对象本身，直接交给 store 会绕开 save_config 就地改内存配置。
-            _karma_store: KarmaStore = KarmaStore(
+            karma_store: KarmaStore = KarmaStore(
                 merge_records(
                     {}, self._parse_config_records(), self.karma_min, self.karma_max
                 ),
@@ -910,10 +910,10 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.error(f"NetherLink: 好感度记录加载失败（配置项不可读或存储初始化失败）: {e}")
             # 降级：path=None 的纯内存 store，磁盘文件因此不会被覆写。
-            # 但仍要用配置项里的记录播种——否则下一次 delta!=0 的 _karma_add 会把
+            # 但仍要用配置项里的记录播种——否则下一次 delta!=0 的 KarmaService.add 会把
             # 只含本次改动这一条的快照写回 karma_records，把管理员手改的条目全清掉。
             try:
-                _karma_store = KarmaStore(
+                karma_store = KarmaStore(
                     merge_records(
                         {}, self._parse_config_records(), self.karma_min, self.karma_max
                     ),
@@ -921,8 +921,8 @@ class NetherLinkPlugin(Star):
                 )
             except Exception as e2:
                 logger.error(f"NetherLink: 降级加载好感记录失败（按空表继续）: {e2}")
-                _karma_store = KarmaStore({}, None)  # path=None：纯内存，不再落盘
-                _karma_degraded = True
+                karma_store = KarmaStore({}, None)  # path=None：纯内存，不再落盘
+                karma_degraded = True
 
         # 好感域服务（2026-10-13 阶段二外移）：好感读写 / 降级 / 迁移 / 配置镜像
         # 同步全归它（`self.karma`）。⚠️ **store 的构造刻意留在本函数**（不是让
@@ -930,7 +930,7 @@ class NetherLinkPlugin(Star):
         # `_parse_config_records`——它留在插件上（本函数与面板两处都用，测试还
         # 直接 patch 插件类）。域状态归服务、加载策略归插件，两边不重叠。
         self.karma = KarmaService(
-            self, _karma_store, lock=_karma_lock, degraded=_karma_degraded
+            self, karma_store, lock=karma_lock, degraded=karma_degraded
         )
 
         # 配置解析全是**静默**的：admin_mc 打错一个字、分隔符用了全角逗号，
@@ -1055,11 +1055,11 @@ class NetherLinkPlugin(Star):
                     "插件其余功能（QQ↔MC 消息互通、好感度、指令执行）不受影响。"
                 )
             else:
-                # ⚠️ 逐条注册并**记数**：这 13 条此前是一个 try 包住的一串裸调用，
+                # ⚠️ 逐条注册并**记数**：这 15 条此前是一个 try 包住的一串裸调用，
                 #    第 7 条抛异常时前 6 条**已经注册成功**——面板处在「半活」状态，
                 #    后面几条永远 404。只报「面板将不可用」是把故障说小了：运维会
                 #    照着「全没了」去查，而真正该看的是「从哪一条开始失败」。
-                #    用「列表 + 循环」而不是给 13 条各加一行计数，是为了让计数与
+                #    用「列表 + 循环」而不是给 15 条各加一行计数，是为了让计数与
                 #    注册**同处一行**，谁也不会漏加。
                 registered = 0
                 try:
@@ -1131,7 +1131,7 @@ class NetherLinkPlugin(Star):
         混为一谈的后果不是显示问题：坏 JSON 被当成空表播种进内存，随后任何一次
         好感变化都以为「配置项本来就是空的」，把管理员手填的原文**覆写掉**——
         数据静默丢失，而面板照报成功。抛异常让调用方那两个 `try` 生效，把插件
-        打成 `_karma_degraded` 态，所有写回路径一律拒绝（fail-safe 方向：
+        打成 `karma.degraded` 态，所有写回路径一律拒绝（fail-safe 方向：
         宁可少写一次，不可清空）。
 
         ⚠️ 插件加载**不会**因此中断：两处调用点都在 try 里，降级后插件照常运行。
@@ -2216,7 +2216,7 @@ class NetherLinkPlugin(Star):
                 player = str(data.get("player") or "?")
                 # 玩家死亡时 AI 不在场（死亡走 WS 事件、不走对话，没有它那一轮判断），
                 # 只能由插件自己扣好感。扣减放在广播之前——广播失败（推送异常）绝不能
-                # 连累这笔游戏事实，而 _karma_add 自己吞写盘异常、有外层 try 兜底，
+                # 连累这笔游戏事实，而 KarmaService.add 自己吞写盘异常、有外层 try 兜底，
                 # 反过来也不会连累广播。
                 # 也放在 _fmt 之前：_fmt 只兜 KeyError/IndexError，模板里写错格式说明符
                 # （如 {message:d}）会抛 ValueError 逃到外层 except，从而连同扣减一起跳过
@@ -2895,7 +2895,7 @@ class NetherLinkPlugin(Star):
     ) -> bool:
         """回滚一次好感扣减，返回是否真正复原。异常绝不外抛。
 
-        `_karma_add` 会吞掉写盘异常（磁盘满/权限）而只记一条通用日志，因此
+        `KarmaService.add` 会吞掉写盘异常（磁盘满/权限）而只记一条通用日志，因此
         「回滚失败」不能靠异常捕获来判断，必须事后验证两件事：
           1. 内存水位回到扣减前（baseline）；
           2. 这次复原真的落到了盘上——`KarmaStore.add` 是先改内存再 `_save()`，
@@ -2907,7 +2907,7 @@ class NetherLinkPlugin(Star):
         try:
             await self.karma.add(key, spend)
             # 水位校验与落盘校验都必须留在 try 内：本方法承诺「异常绝不外抛」，
-            # 而 _karma_get 与 _path 访问理论上仍可能抛。真抛了就会冒泡到
+            # 而 self.karma.get 与 _path 访问理论上仍可能抛。真抛了就会冒泡到
             # exec_command_for 的通用 except，只剩一条无归因的日志，
             # 「玩家被白扣」就失去了唯一可追查的痕迹。
             if await self.karma.get(key) != baseline:
@@ -2918,7 +2918,7 @@ class NetherLinkPlugin(Star):
                 return False
             if self.karma.store._path is not None:
                 try:
-                    # 补一次显式落盘：_karma_add 内部那次写盘失败已被它自己吞掉，
+                    # 补一次显式落盘：KarmaService.add 内部那次写盘失败已被它自己吞掉，
                     # 这里让同一个错误浮出来，回滚是否真的持久化才可判定。
                     self.karma.store._save()
                 except Exception as e:
@@ -4143,7 +4143,7 @@ class NetherLinkPlugin(Star):
             ctx_game = self._game_identity_from(event)
             if ctx_game is not None:
                 # 游戏侧：已绑定者与其 QQ 共享一份好感（键 qq:<QQ号>），
-                # 未绑定者仍用 mc:{玩家名}。见 _karma_identity_key。
+                # 未绑定者仍用 mc:{玩家名}。见 KarmaService.identity_key。
                 key = self.karma.identity_key("game", ctx_game["player"], "")
                 origin = "游戏内对话"
             else:
@@ -4239,7 +4239,7 @@ class NetherLinkPlugin(Star):
             if not fut.done():
                 fut.cancel()
         self._pending_inspects.clear()
-        # 好感度落盘：_karma_add 每次改动已经写过盘，这里兜的是「写盘失败/
+        # 好感度落盘：KarmaService.add 每次改动已经写过盘，这里兜的是「写盘失败/
         # 降级态下 path=None」的情形——path 为 None 时 _save 本就是空操作，
         # 这里再判一次是为了不依赖 store 的内部实现。失败只记日志，不阻断卸载。
         try:

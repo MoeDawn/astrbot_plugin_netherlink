@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """管理面板域服务（2026-10-13 重构阶段二，Task 3）。
 
-从 `main.py` 的 `NetherLinkPlugin` 抽出：16 个 `_api_*` 路由 handler
+从 `main.py` 的 `NetherLinkPlugin` 抽出：15 个 `_api_*` 路由 handler
 （→ `api_*`）+ `_query_players_one` + `_quick_commands`（→ `query_players_one` /
 `quick_commands`），以及它们共用的入参归一函数。插件上留 `self.panel` 作为入口，
 且在 `__init__` 里 **Eager 构造**（路由注册点要拿 `self.panel.api_*` 当 handler）。
@@ -160,11 +160,18 @@ def _panel_qq_number(raw) -> str:
 
 
 class PanelApi:
-    """管理面板 Web API：16 条路由的 handler + 2 个面板内部解析方法。
+    """管理面板 Web API：15 条路由的 handler + 2 个面板内部解析方法。
 
     ⚠️ 构造顺序要求：插件的 `__init__` 要**在 `self.karma` 设好之后**构造本服务
     （面板 handler 依赖 `plugin.karma.*` / `plugin.bindings.*`）。本服务只存引用、
     不缓存那些状态，所以真正的约束是「路由注册点之前必须已经构造好」。
+
+    ⚠️ **构造期快照（语义与旧代码不同）**：`PANEL_AVAILABLE` / `json_response` /
+    `error_response` / `request` 在 `__init__` 里**取一次**就缓存到实例。旧代码是
+    **调用期**读 `main` 模块的模块级名字；测试下两者等价，但这里语义收窄了：构造
+    之后再 monkeypatch `main` 模块的这四个名字**将不再生效**——要改它们必须在
+    构造本服务**之前**打桩。这样做是为避开跨测试文件 `sys.modules` 缓存污染
+    （见模块 docstring）。
     """
 
     def __init__(self, plugin) -> None:
@@ -293,7 +300,7 @@ class PanelApi:
         ⚠️ 目标值恰好等于 `karma_initial` 且原本没有记录时**不会新建记录**
         （见 `KarmaService.set`）：值本来就等于 initial，语义上没有变化。
         🔴 **降级态必须返回 `error_response`**：那一态下 `_save()`（`path=None`）
-        与 `_sync_karma_to_config` **都不写**，照常回 `{"old": …, "value": …}`
+        与 `KarmaService.sync_to_config` **都不写**，照常回 `{"old": …, "value": …}`
         就是**假成功**——管理员被告知改成了 30，而重启后一个字节都不剩。
         理由与 `api_karma_delete` 的同名分支完全一样：内存表不完整，
         写回会清掉管理员手填的记录。

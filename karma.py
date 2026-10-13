@@ -32,7 +32,7 @@ def clamp_value(v: object, lo: int = KARMA_MIN, hi: int = KARMA_MAX) -> int:
     真的传入倒置区间时，max(lo, min(hi, n)) 会返回 lo，不会崩。
     任何输入都不得抛异常——本函数在插件初始化路径（merge_records 归一化配置项）上
     被调用。⚠️ 该加载块**有** try/except（两条 `logger.error` + 降级分支），
-    所以异常不会崩掉插件加载；代价是**降级为空表**（`_karma_degraded`，
+    所以异常不会崩掉插件加载；代价是**降级为空表**（`karma.degraded`，
     记录全丢）。正因如此，本函数仍然一个异常都不该抛。
 
     非数字归 0。溢出按方向夹到边界：JSON 里的 1e400 会被解析成 inf，而
@@ -127,7 +127,7 @@ def merge_records(file_records: dict, config_records: dict,
        即 `merge_records({}, config_records, lo, hi)`。此时它就是「把配置项
        过一遍筛子」——丢损坏条目、拆旧形态、夹范围，并**返回一个全新的 dict**。
        最后这点很关键：`_parse_config_records()` 在配置项已是 dict 时返回的是
-       AstrBot 那个对象本身，直接交给 `KarmaStore` 会让一次 `_karma_add`
+       AstrBot 那个对象本身，直接交给 `KarmaStore` 会让一次 `KarmaService.add`
        绕开 `save_config` 就地改内存配置。
     2. **并集**（`KarmaStore.read` 用，读镜像 / 从镜像恢复）：配置优先，
        文件只在配置没有该键时兜底。⚠️ **当前没有任何调用点两侧都非空**——
@@ -245,7 +245,7 @@ class KarmaStore:
         与 `add` 同风格：先改内存、再 `_save()`（镜像）。
 
         ⚠️ **本方法不碰配置项**——配置项的唯一写入口在插件层
-        （`main.py` 的 `_karma_delete` 显式写回）。理由：`_sync_karma_to_config`
+        （`KarmaService.delete` 显式写回）。理由：`KarmaService.sync_to_config`
         带一条「空快照不许覆盖非空配置」的守卫，删掉**最后一个**键时恰好会被它
         挡下，于是删除静默失效（配置项留着旧记录，下次启动把它带回来）。
         ⚠️ 键不在内存表里时返回 `(False, None)`，**且不写盘**——没有变化就不该
@@ -269,7 +269,7 @@ class KarmaStore:
 
         不做过滤：非数字条目早已被 merge_records 挡在门外，内存里只有合法值。
         本方法在任何输入下都不抛异常（插件初始化路径会调用它——迁移探测
-        与 `_sync_karma_to_config`，两处都在 try/except 里，但仍然一个异常都不该抛）。
+        与 `KarmaService.sync_to_config`，两处都在 try/except 里，但仍然一个异常都不该抛）。
         """
         return dict(self._records)
 
