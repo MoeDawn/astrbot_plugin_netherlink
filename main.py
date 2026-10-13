@@ -15,16 +15,16 @@
          AI 报出的 cost 由插件原子执行（先扣后执行、失败回滚）
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import random
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import aiohttp
 from aiohttp import web
@@ -159,7 +159,7 @@ def _panel_karma_key(raw) -> str:
     return raw.strip()
 
 
-def _panel_karma_value(raw, lo: int, hi: int) -> Optional[int]:
+def _panel_karma_value(raw, lo: int, hi: int) -> int | None:
     """把面板给的 value 归一成 `[lo, hi]` 内的整数。非法返回 None。
 
     🔴 **`bool` 必须显式拒绝**：`isinstance(True, int)` 为真、`int(True) == 1`
@@ -906,11 +906,11 @@ class NetherLinkPlugin(Star):
         }
 
         # ---- 运行时状态 ----
-        self._runner: Optional[web.AppRunner] = None
+        self._runner: web.AppRunner | None = None
         # `_start_ws_server` 那个 task。**必须存引用**：卸载时要等它跑完，
         # 否则 `_runner` 可能还没被赋值（task 尚未执行到那一行），
         # runner 就漏了 cleanup —— 端口不释放，重装时报 address already in use。
-        self._ws_task: Optional[asyncio.Task] = None
+        self._ws_task: asyncio.Task | None = None
         # **所有还活着的 ws**（含尚未握手的）。`_mc_conns` 只装握过手的，
         # 而卸载时要关的是一切还在跑的连接 —— 否则 aiohttp 的
         # `runner.cleanup()` 会为那条连接等满它的 shutdown_timeout。
@@ -3841,7 +3841,7 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     async def _run_console_cmd(
         self, cmd: str, timeout: float = 8.0, server_id: str = ""
-    ) -> Optional[CmdResult]:
+    ) -> CmdResult | None:
         """以控制台身份执行一条指令。
 
         返回 None 表示**没有拿到回执**（未连接 / 发送失败 / 超时）；
@@ -4928,7 +4928,7 @@ class NetherLinkPlugin(Star):
         except Exception:
             return None
 
-    def _game_platform_entry(self) -> Optional[dict]:
+    def _game_platform_entry(self) -> dict | None:
         """取配置里那条游戏侧平台记录（没有则 None）。"""
         try:
             platforms = self.context.get_config().get("platform")

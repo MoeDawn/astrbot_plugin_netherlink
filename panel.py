@@ -282,7 +282,7 @@ QUICK_COMMAND_SECURITY_NOTE = (
 def quick_commands_view(entries) -> list:
     """`quick_commands` 配置项 → `[{"index", "name", "cmd", "server"}]`。
 
-    ⚠️ 入参是 `NetherLinkPlugin._quick_command_entries` 归一后的字符串列表——
+    ⚠️ 入参是 `nl_config._quick_command_entries` 归一后的字符串列表——
     **一条条目一个字符串**（列表形态**不按逗号切**：这里每一条是任意指令文本，
     逗号在指令里有意义；理由与取舍都写在那个函数上）。本模块不重复实现那套
     归一，免得两处漂移。
