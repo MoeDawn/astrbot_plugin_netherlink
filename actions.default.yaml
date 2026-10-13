@@ -187,11 +187,7 @@ actions:
           你不知道那一格是什么,猜出来的物品与组件对不上,插件会拒绝执行.
           可用槽位:weapon.mainhand / weapon.offhand / armor.head / armor.chest /
           armor.legs / armor.feet / hotbar.0~8 / inventory.9~35.
-          ⚠️ **先查再决定**(26.3 的指令,你没有它的训练数据,照抄即可):
-            · 手上与身上的装备:`data get entity <玩家ID> equipment`
-            · 背包某一格:`data get entity <玩家ID> Inventory[{Slot:5b}]`(Slot 从 0 数)
-          ⚠️ 26.3 的 `/data get` 读列表会**省略元素**(4 个以上就写成 `...`),
-          所以**逐个槽位查**,别指望一次读出整背包.
+          ⚠️ **先查再决定**:不知道他有几件,是哪一件,就调 `inspect_items` 查(只读,不消耗好感) —— **别猜,也别让他去改参数**.
       gain:
         type: item_list
         required: true
@@ -242,10 +238,8 @@ actions:
       要交材料才能给的改,用 swap_items;要一件新东西,用 give_item.
       ✅ 只写你要改的那几项就行 —— 其余组件(原有附魔/说明/名字/不可破坏)
       由服务器自动原样保留,不用你抄,你也读不到.
-      ⚠️ 玩家只说"改我背包里那个"而没说第几格时,**先去查**,别猜也别让他改参数
-        · 手上与身上的:`data get entity <玩家ID> equipment`
-        · 背包某一格:`data get entity <玩家ID> Inventory[{Slot:5b}]`
-      ⚠️ 唯一例外:附魔是整套替换 —— 要"再加一条"就得把原有的都写上,所以先去查那一格.
+      ⚠️ 玩家只说"改我背包里那个"而没说第几格时,**先调 `inspect_items` 查**(只读,不消耗好感),别猜也别让他改参数
+      ⚠️ 唯一例外:附魔是整套替换 —— 要"再加一条"就得把原有的都写上,所以**先调 `inspect_items` 查那一格**,把原有附魔照抄进去.
     params:
       player:
         type: player
@@ -262,12 +256,7 @@ actions:
           例:单件用 `weapon.mainhand=绝影`;
               全套装备用 `armor.head=神级头盔; armor.chest=神级胸甲; armor.legs=神级护腿; armor.feet=神级靴子`
           ⚠️ 玩家只说"改我背包里那个 x""改我的武器"而没说具体第几格时,
-          **先去查,别猜,也别让他改参数** —— 他未必记得在第几格.
-          (26.3 的指令,照抄即可 —— 你没有它的训练数据)
-            · 手上与身上的装备:`data get entity <玩家ID> equipment`
-            · 背包某一格:`data get entity <玩家ID> Inventory[{Slot:5b}]`(Slot 从 0 数)
-          ⚠️ 26.3 的 `/data get` 读列表会**省略元素**(4 个以上就写成 `...`),
-          所以要**逐个槽位查**,别指望一次读出整背包.
+          **先调 `inspect_items` 查**(只读,不消耗好感),别猜,也别让他改参数 —— 他未必记得在第几格.
           查到他有**多件**同名同类的,也要按查到的**槽位**说清是哪一件.
       components:
         type: components
@@ -421,10 +410,7 @@ actions:
         desc: >-
           物品 ID,如 diamond 或 minecraft:diamond.
           ⚠️ 玩家没说清是什么,或只说"我手上这个""这个给你"时,
-          **先去查他那一格**(26.3 的指令,照抄即可)
-            · 手上与身上的装备:`data get entity <玩家ID> equipment`
-            · 背包某一格:`data get entity <玩家ID> Inventory[{Slot:5b}]`(Slot 从 0 数)
-          别瞎填一个 id,也别让他去查自己.查出来再填这里.
+          **先调 `inspect_items` 查**(只读,不消耗好感),别瞎填一个 id,也别让他去查自己.查出来再填这里.
       count:
         type: int
         min: 1

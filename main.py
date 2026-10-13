@@ -1295,6 +1295,9 @@ class NetherLinkPlugin(Star):
         self._action_token_seq: int = actions.TOKEN_BASE - 1
 
         self._pending_cmds: dict[str, asyncio.Future] = {}
+        # 查背包（`inspect_items`）的待回执表，键是帧 id。
+        # ⚠️ 与 `_pending_cmds` 分开：那个存 CmdResult，这个存纯文本。
+        self._pending_inspects: dict[str, asyncio.Future] = {}
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
         self._player_llm_locks: dict[str, asyncio.Lock] = {}
         # 最近一条**真实**进站群消息的 unified_msg_origin。_broadcast 需要主动
@@ -2996,6 +2999,11 @@ class NetherLinkPlugin(Star):
                                 output=str(data.get("output", "")),
                             )
                         )
+                elif mtype == "inspect_result":
+                    # 查背包的回复（用户 2026-10-12）。纯文本，直接交给等着的 Future。
+                    fut = self._pending_inspects.pop(data.get("id"), None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(str(data.get("text") or ""))
                 elif mtype == "heartbeat":
                     pass
                 elif mtype == "bot_chat":
@@ -4366,6 +4374,35 @@ class NetherLinkPlugin(Star):
             self._pending_cmds.pop(cmd_id, None)
             return None
 
+    async def _inspect_items(self, player: str, slot: str, match: str,
+                             limit: int, server_id: str) -> str:
+        """让 MC 端查玩家背包，返回**给 AI 看的文本**。
+
+        返回的文本直接可读（含每件物品的槽位、显示名、ID、组件）——
+        AI 拿它去填 `swap_items.pay` / `modify_item.targets` / `offer_karma.item`。
+
+        ⚠️ **离线必须如实说**（不能返回空串或「没查到」—— 那会让 AI
+        以为玩家身上真没有，从而去做错的判断）。与 `_run_console_cmd`
+        同一口径：拿不到回执就是拿不到，如实交代。
+        """
+        if not self._mc_connected(server_id):
+            return "MC 服务器当前不在线，查不到背包。"
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_inspects[req_id] = fut
+        if not await self._send_to_mc(
+            {"type": "inspect", "id": req_id, "player": player,
+             "slot": slot, "match": match, "limit": int(limit or 10)},
+            server_id,
+        ):
+            self._pending_inspects.pop(req_id, None)
+            return "发给 MC 服务器的请求没送出去（连接刚断？），查不到背包。"
+        try:
+            return await asyncio.wait_for(fut, timeout=8.0)
+        except asyncio.TimeoutError:
+            self._pending_inspects.pop(req_id, None)
+            return "MC 服务器 8 秒没回应，查不到背包。"
+
     async def _rollback_karma(
         self, key: str, spend: int, baseline: int, reason: str, cmd: str
     ) -> bool:
@@ -5715,6 +5752,55 @@ class NetherLinkPlugin(Star):
     # ------------------------------------------------------------------
     # LLM 函数工具：QQ 群聊自然语言 -> MC 指令（AstrBot 自动注册给群聊 LLM）
     # ------------------------------------------------------------------
+    @filter.llm_tool(name="inspect_items")
+    async def inspect_items(self, event, player: str, slot: str = "",
+                            match: str = "", limit: int = 10,
+                            server: str = "") -> str:
+        """查玩家背包里有什么.不要猜他有什么 —— 先查.
+
+        改/换/收他的东西之前(modify_item / swap_items / offer_karma),只要不确定他身上
+        那件是什么,就先调它.它返回每件物品所在槽位,显示名,物品 ID,数量,以及附魔/属性/说明.
+        player 必填;slot 与 match 至少给一个(都给 = 那一格里名字像 X 的);都不给会扫全部并只列前 limit 件.
+        ⚠️ 它只读:不动任何东西,也不消耗好感.
+
+        Args:
+            player(string): 要查谁的游戏 ID
+            slot(string): 只看某一个槽位,如 weapon.mainhand / armor.head / hotbar.3 / inventory.13.留空 = 扫全身与背包
+            match(string): 名字或物品 ID 的片段,如 剑 / diamond / 绝影.留空 = 不限名字
+            limit(number): 最多返回几件,默认 10
+            server(string): 查哪台 MC 服务器(填上报名或显示名).只有一台在线时可省略
+        """
+        try:
+            server_id = str(server or "").strip()
+            if server_id:
+                resolved = self._resolve_target_server(server_id)
+                if not resolved:
+                    online = self._online_servers()
+                    names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
+                    return f"没有名为「{server}」的服务器在线。在线的是：{names}"
+                server_id = resolved
+            else:
+                # 游戏侧：来源服由连接唯一确定
+                ident = self._game_identity_from(event) if event is not None else None
+                server_id = str((ident or {}).get("server_id") or "")
+                if not server_id and len(self._online_servers()) > 1:
+                    online = self._online_servers()
+                    names = "、".join(f"{d}（上报名: {s}）" for s, d in online)
+                    return (f"当前有 {len(online)} 台 MC 服务器在线，必须用 server 参数"
+                            f"指明查哪一台（填上报名或显示名都可）。在线的是：{names}")
+            # ⚠️ 与 mc_command 一致：先做基本校验，把明显错的参数挡在发帧之前
+            if not str(player or "").strip():
+                return "参数有误：必须给 player。"
+            if not str(slot or "").strip() and not str(match or "").strip():
+                return ("参数有误：slot 与 match 至少给一个 —— 要不全扫一遍会很啰嗦。"
+                        "只知道大概叫什么就给 match，知道在哪一格就给 slot。")
+            return await self._inspect_items(
+                str(player).strip(), str(slot or "").strip(),
+                str(match or "").strip(), int(limit or 10), server_id)
+        except Exception as e:
+            logger.error(f"NetherLink: inspect_items 失败: {e}")
+            return f"查询出错：{e}"
+
     @filter.llm_tool(name="mc_command")
     async def mc_command(self, event, cmd: str, cost: int, server: str = "") -> str:
         """在 Minecraft 服务器上以控制台身份执行一条指令,并返回服务器真实输出.执行前先判断:
@@ -5878,6 +5964,11 @@ class NetherLinkPlugin(Star):
             if not fut.done():
                 fut.cancel()
         self._pending_cmds.clear()
+        # 查背包的待回执同理：不取消会留下悬挂 Future
+        for fut in self._pending_inspects.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending_inspects.clear()
         # 好感度落盘：_karma_add 每次改动已经写过盘，这里兜的是「写盘失败/
         # 降级态下 path=None」的情形——path 为 None 时 _save 本就是空操作，
         # 这里再判一次是为了不依赖 store 的内部实现。失败只记日志，不阻断卸载。
