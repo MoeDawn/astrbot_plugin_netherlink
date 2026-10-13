@@ -337,6 +337,11 @@ try:
 except ImportError:  # 插件以顶层模块方式加载时
     import panel
 
+try:
+    from .nl_protocol import CmdResult, McConn
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_protocol import CmdResult, McConn
+
 # 游戏内一次 LLM 对话回复的最大长度（超出截断，MC 聊天框放不下太长的文本）
 MC_REPLY_MAX_LEN = 1500
 
@@ -363,46 +368,6 @@ def _game_umo(server_id: str) -> str:
     """
     return f"{GAME_PLATFORM_ID}:GroupMessage:{server_id}"
 
-
-@dataclass(frozen=True)
-class CmdResult:
-    """一次控制台指令执行的结局。
-
-    `ok=False` 表示**服务器明确回了失败**（Paper 侧捕获到异常，或 dispatchCommand
-    返回 false），与 ok=True 但输出为空是两回事：
-
-      ok=True  + output=""   -> 执行成功，只是没输出（照常收费）
-      ok=True  + output=文本 -> 执行成功（照常收费）
-      ok=False               -> 明确失败，**必须退费**
-      （没有回执）            -> 超时，由 _run_console_cmd 返回 None 表示，同样退费
-
-    早先 `_run_console_cmd` 只返回 Optional[str]，把「明确失败」和「执行成功」一起
-    塞进带输出的字符串里，调用点无从分辨，于是失败也照扣好感。
-    """
-
-    ok: bool
-    output: str
-
-
-@dataclass
-class McConn:
-    """一台已握手 MC 服务器的连接。
-
-    多服并存的核心数据结构：以前只有一个 `self._mc_ws` 字段，第二台服务器
-    一连入就会把第一台踢掉（且两端各自重连，形成永久互踢）。现在按 server_id
-    分别保存，同 id 才是「重连替换」，不同 id 并存。
-    """
-
-    ws: object          # aiohttp.web.WebSocketResponse
-    port: int           # 它连入的本地端口（路线 A 里端口即身份来源）
-    reported_name: str  # 握手上报的 server-name（仅作标识，不作显示名）
-
-    @property
-    def closed(self) -> bool:
-        try:
-            return bool(getattr(self.ws, "closed", True))
-        except Exception:
-            return True
 
 # 好感度规则提示词默认值（AI 据此自主决定好感增减；指令的执行尺度见 mc_command 相关项）
 DEFAULT_KARMA_RULES = """\
