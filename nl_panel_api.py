@@ -245,7 +245,7 @@ class PanelApi:
             return _panel_unavailable()
         try:
             return self.json_response(panel.servers_view(
-                self.plugin._mc_conns, self.plugin._mc_server_display,
+                self.plugin._mc_conns, self.plugin.transport.server_display,
                 time.monotonic()
             ))
         except Exception as e:
@@ -656,7 +656,7 @@ class PanelApi:
         """
         row = {
             "id": str(server_id),
-            "display": self.plugin._mc_server_display(server_id),
+            "display": self.plugin.transport.server_display(server_id),
             "ok": None,
             "count": None,
             "max": None,

@@ -182,7 +182,7 @@ class BindingService:
         # ---- 渲染：JSON 模式与纯文本模式各走各的渲染器 ----
         # 值里的双引号会提前闭合 `/tellraw` 的 JSON，先换成单引号。
         values = {
-            "server": self.plugin._mc_server_display(server_id),
+            "server": self.plugin.transport.server_display(server_id),
             "player": player,
             "code": code,
             "group": group_label,
@@ -200,11 +200,11 @@ class BindingService:
             # 纯文本模式（存量配置）：照旧走 `_fmt`。
             # ⚠️ `_fmt` 的 ValueError 语义**必须保留**：
             #    `test_gate_failure_degrades_to_not_gated` 用它验证「渲染炸了也要 fail-open」。
-            plain = _strip_section_codes(self.plugin._fmt(hint_tpl, **values))
+            plain = _strip_section_codes(self.plugin.transport.fmt(hint_tpl, **values))
             hint_cmd = f"tell {player} {plain}"
         # 提示**始终私聊发**（走到这里说明总开关开着、且拿得到可用群号）。
         # ⚠️ 不广播：码只该给本人，广播会让同服其他玩家抢绑。
-        await self.plugin._send_to_mc(
+        await self.plugin.transport.send_to_mc(
             {"type": "command", "id": uuid.uuid4().hex, "cmd": hint_cmd},
             server_id,
         )
@@ -223,7 +223,7 @@ class BindingService:
             return False
         # 踢出原因必须是**纯文本**：`KickCommand` 的 reason 走
         # `MessageArgument` → `Component.literal(text)`，不解析 JSON，且上限 256 字符。
-        await self.plugin._send_to_mc(
+        await self.plugin.transport.send_to_mc(
             {"type": "command", "id": uuid.uuid4().hex, "cmd": f"kick {player} {plain}"},
             server_id,
         )
@@ -320,15 +320,15 @@ class BindingService:
             await self.plugin._reply_to_group(group_id, "绑定写入失败，请稍后重试或联系管理员")
             return True
 
-        await self.plugin._broadcast_to_game(
-            self.plugin._fmt(
+        await self.plugin.transport.broadcast_to_game(
+            self.plugin.transport.fmt(
                 self.plugin.templates["bind_success_game"],
                 player=player, qq=qq, qq_name=qq_name,
             )
         )
         await self.plugin._reply_to_group(
             group_id,
-            self.plugin._fmt(
+            self.plugin.transport.fmt(
                 self.plugin.templates["bind_success_qq"],
                 player=player, qq=qq, qq_name=qq_name,
             ),
