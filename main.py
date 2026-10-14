@@ -26,6 +26,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+# aiohttp / web：WS 域已移入 nl_ws.py，这里的绑定只剩 `_runner` 的类型
+# 注解还在用 web.AppRunner；保留 import 还有一个理由——测试经
+# `main_module.aiohttp` / `main_module.web` 取 WSMsgType 与打桩
+# WebSocketResponse（与本模块、nl_ws 拿到的是同一个模块对象，打桩照常生效）。
 import aiohttp
 from aiohttp import web
 
@@ -79,10 +83,8 @@ PANEL_AVAILABLE = (
     json_response is not None and error_response is not None and request is not None
 )
 
-# 卸载时等 WS 相关清理的上限（秒）。**远小于 aiohttp 默认的 60** ——
-# 详见 `terminate` 的 docstring：反顺序之后本不该真正用到，给短值是兜底，
-# 保证保存/卸载不会因为某条连接卡住而拖到一分钟。
-_WS_SHUTDOWN_TIMEOUT = 3.0
+# （`_WS_SHUTDOWN_TIMEOUT` 2026-10-14 已随 WS 域移入 nl_ws.py，经下方双路
+#  导入保留同名绑定；`terminate()` 仍用它限等待上限。）
 
 # 服务器断开后**延迟多久确认**再播报（秒）——2026-10-14 已随事件分发域移入
 # `nl_dispatcher.py`（下方双路导入保留了同名绑定）；理由（避开指数退避重连
@@ -144,6 +146,8 @@ try:
 except ImportError:  # 插件以顶层模块方式加载时
     import panel
 
+# CmdResult / McConn 的使用点已随 WS 域移入 nl_ws.py（帧路由里构造回执与
+# 连接登记）；保留同名绑定——测试仍经 main_module.CmdResult / McConn 造替身。
 try:
     from .nl_protocol import CmdResult, McConn
 except ImportError:  # 插件以顶层模块方式加载时
@@ -233,6 +237,23 @@ try:
     from .nl_command import CommandRunner
 except ImportError:  # 插件以顶层模块方式加载时
     from nl_command import CommandRunner
+
+# WS 服务器服务（2026-10-14 阶段三从 main.py 外移）：多端口监听 / 握手鉴权 /
+# 心跳 / 帧路由与 `_live_ws` 登记注销全归它。与 nl_transport.py 同一个双路
+# 导入写法。`_WS_SHUTDOWN_TIMEOUT` 随该域定义在那个模块——这里的同名绑定
+# 只是保留（`terminate()` 仍用它限等待上限）。
+try:
+    from .nl_ws import WsServer, _WS_SHUTDOWN_TIMEOUT
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_ws import WsServer, _WS_SHUTDOWN_TIMEOUT
+
+# 平台适配器服务（2026-10-14 阶段三从 main.py 外移）：平台配置补写、适配器
+# 解析（运行实例优先）、陈旧实例检测全归它。与 nl_transport.py 同一个双路
+# 导入写法。两个 `@filter` 钩子留在本文件，方法体转发 `self.platform.*`。
+try:
+    from .nl_platform_svc import GamePlatform
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_platform_svc import GamePlatform
 
 # 配置解析纯函数（2026-10-13 外移到 nl_config.py；与 nl_protocol.py
 # 同一个双路导入写法，名字仍在 main 上可见）。
@@ -1069,8 +1090,13 @@ class NetherLinkPlugin(Star):
         except Exception as e:
             logger.debug(f"NetherLink: 配置差异检查失败（忽略）: {e}")
 
+        # WS 服务器服务（2026-10-14 阶段三外移）：多端口监听 / 握手鉴权 / 帧
+        # 路由与 `_live_ws` 登记注销全归它（`self.ws`）。与 `self.transport`
+        # 同模式：无状态、只持本插件引用——连接表 / 端口占用 / runner 与本
+        # task 仍留在本插件上（`terminate()` 要直接撤销它们）。
+        self.ws = WsServer(self)
         # 存引用而不是裸 create_task：卸载时要 await 它（见 terminate）。
-        self._ws_task = asyncio.create_task(self._start_ws_server())
+        self._ws_task = asyncio.create_task(self.ws.start())
         # 工具描述回填必须在 @filter.llm_tool 注册完成之后（即本类定义已被插件加载器
         # 扫描过），因此放在 __init__ 末尾；失败不影响工具可用性
         self._apply_configured_tool_descs()
@@ -1078,7 +1104,10 @@ class NetherLinkPlugin(Star):
         self.actions.register_tools()
         # 游戏侧平台适配器：补写配置项 + 把适配器重新绑到本实例。
         # 放在最后：它依赖上面的配置解析结果（端口与显示名等）。
-        self._init_game_platform()
+        # （平台适配器域 2026-10-14 已外移到 GamePlatform（nl_platform_svc.py），
+        #   经 `self.platform` 调用；两个 @filter 绑定钩子留在本类。）
+        self.platform = GamePlatform(self)
+        self.platform.init()
         # 面板域服务（2026-10-13 阶段二外移）：16 条路由 handler + 面板内部
         # 解析全归它。⚠️ **Eager 构造**（不是 lazy）：下面的路由注册点要把
         # `self.panel.api_*` 当 handler 拿，而注册就发生在本函数末尾。
@@ -1297,45 +1326,15 @@ class NetherLinkPlugin(Star):
     #    `self.transport.fmt(...)`（原 `_fmt`，占位符写错时原样输出）。
 
     # ------------------------------------------------------------------
-    # WebSocket 服务端
+    # WS 服务器域 2026-10-14 已随阶段三 Task 5 移入 `WsServer`（nl_ws.py）：
+    #    `self.ws.start()`（原 `_start_ws_server`，多端口监听）、
+    #    `self.ws.handle(request)`（原 `_ws_handler`，连接入口与 `_live_ws`
+    #    登记/注销）、`self.ws.session(ws, request)`（原 `_ws_session`，握手 /
+    #    冲突检测 / 心跳 / 帧路由 / 断开清理；`_is_current_conn` 一并移入）。
+    #    连接表 `_mc_conns` / 端口占用 `_port_owner` / live 连接集合 `_live_ws` /
+    #    runner 与 `_ws_task` 仍留在本插件上（`terminate()` 直接撤销它们；
+    #    test_contracts 的 terminate 顺序守卫钉在本文件源码上）。
     # ------------------------------------------------------------------
-    async def _start_ws_server(self):
-        """启动 WS 服务端，监听 MC 端连入。
-
-        **可监听多个端口**（见 ws_ports）：一台 MC 服务器占一个端口，单服就配一个。
-        共用同一个 `app` 与 `_ws_handler`，用本地端口区分来源（路线 A「端口即身份」）。
-
-        `ws_bindings` 为空（ws_ports 留空或全非法）时**不监听任何端口**——
-        以前会退回那个单值配置 `ws_port`（已删除），现在刻意选择响亮地失败：
-        配错端口却不自知的代价，比启动时看到一条 ERROR 大得多。
-        """
-        if not self.ws_bindings:
-            logger.error(
-                "NetherLink: 未配置任何监听端口，WS 服务端没有启动——"
-                "请在 ws_ports 里填写，格式「显示名:端口」或只写「端口」，"
-                "单台服务器也只需填一个。"
-            )
-            return
-
-        app = web.Application()
-        app.router.add_get("/ws", self._ws_handler)
-        # ⚠️ 显式给短 `shutdown_timeout`：默认是 **60 秒**（aiohttp
-        # web_runner.py），只要还有挂起的 WS handler 就会等满它。
-        # 正常情况下 terminate 已经**先**主动关了连接，这里不会真正用到；
-        # 给短值是兜底——万一还有别的挂起请求，也不该把保存/卸载拖 60 秒。
-        self._runner = web.AppRunner(app, shutdown_timeout=_WS_SHUTDOWN_TIMEOUT)
-        await self._runner.setup()
-        for label, port in self.ws_bindings:
-            tag = f"[{label}] " if label else ""
-            try:
-                site = web.TCPSite(self._runner, self.ws_host, port)
-                await site.start()
-                logger.info(
-                    f"NetherLink WS 服务端已启动 {tag}ws://{self.ws_host}:{port}/ws"
-                )
-            except OSError as e:
-                logger.error(f"NetherLink WS 端口 {port} 启动失败: {e}")
-
     def _online_servers(self) -> list:
         """在线服务器的 (上报名, 显示名) 列表，供 QQ 侧 AI 选择指令目标。
 
@@ -1413,202 +1412,6 @@ class NetherLinkPlugin(Star):
             if want == sid or want == disp:
                 return sid
         return ""
-
-    def _is_current_conn(self, server_id: str, ws) -> bool:
-        """这条 ws 是否仍是该 server_id 的当前连接（未被重连替换掉）。"""
-        conn = self._mc_conns.get(server_id)
-        return conn is not None and conn.ws is ws
-
-    async def _ws_handler(self, request):
-        """WS 入口：登记连接 → 交给 `_ws_session` → **保证注销**。
-
-        🔴 **为什么拆成两层**：`_ws_session` 里有 4 个提前 `return`（token 失败、
-        端口冲突、重连替换…）。在这 4 处各写一遍注销，漏一个就等于没做；
-        `try/finally` 一处就够。
-
-        ⚠️ 登记的是**所有**活连接（含尚未握手的）——`_mc_conns` 里只有握过手的，
-        而卸载时要关的是一切还在跑的：漏掉未握手的，aiohttp 会为它等满
-        `shutdown_timeout`（2026-10-10 实测 6 秒）。
-        """
-        ws = web.WebSocketResponse(heartbeat=30)
-        await ws.prepare(request)
-        self._live_ws.add(ws)
-        try:
-            return await self._ws_session(ws, request)
-        finally:
-            self._live_ws.discard(ws)
-
-    async def _ws_session(self, ws, request):
-        """一条 WS 连接的实际处理（握手 / 事件循环 / 断开清理）。"""
-        # 本连接的本地端口——路线 A 里它就是身份的来源
-        try:
-            port = int(request.transport.get_extra_info("sockname")[1])
-        except Exception:
-            port = 0
-        # 🔴 **身份就是上报名**（2026-10-07 起）。端口不再影响身份——它只用来
-        #    决定「哪台服务器连的是哪个口」（端口冲突检测仍需要它）。
-        #    以前这里还有一条「端口绑定的 id 优先」，已删除。
-        # debug：紧接着就有一条「握手成功（端口 X，上报名 Y）」，信息更全
-        logger.debug(f"NetherLink: MC 端已连入（本地端口 {port}），等待握手")
-
-        server_id = ""
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    continue
-
-                mtype = data.get("type")
-
-                if mtype == "hello":
-                    # 握手鉴权：token 不匹配直接断开
-                    if data.get("token") != self.auth_token:
-                        logger.warning("NetherLink: MC 端 token 校验失败，断开连接")
-                        await ws.close(code=4001, message=b"auth failed")
-                        return ws
-                    reported = str(data.get("server_name") or "mc")
-                    server_id = reported
-                    # 显示名按**端口**查（ws_ports 的 `显示名:端口`），
-                    # 只在首次见到这台时记一次。
-                    _label = self.port_display_names.get(port)
-                    if _label and not self._display_by_server.get(server_id):
-                        self._display_by_server[server_id] = _label
-
-                    # ---- 阶段 0：同端口不同服务器的冲突，必须报错而不是静默踢掉 ----
-                    # 以前是「新连接一律踢掉旧连接」，于是两台服务器互相踢、各自重连，
-                    # 形成永不停止的抖动（两端退避都会重置回 3 秒），且日志里看不出。
-                    owner = self._port_owner.get(port)
-                    if owner and owner != server_id and not self.dispatcher.conn_closed(owner):
-                        logger.error(
-                            f"NetherLink: 端口 {port} 已被服务器 [{owner}] 占用，"
-                            f"拒绝新连接 [{server_id}]。"
-                            f"若这是另一台服务器，请在 ws_ports 里为它单独指定一个端口——"
-                            f"两台服务器连同一个端口会互相踢下线，消息会随机丢失。"
-                        )
-                        try:
-                            await ws.close(
-                                code=4003, message=b"port in use by another server"
-                            )
-                        except Exception:
-                            pass
-                        return ws
-
-                    # 同 id 再连 = 断线重连，关掉**这台服务器自己**的旧连接；
-                    # 绝不能动别的服务器（以前那个「一律踢掉」正是多服抖动的根源）
-                    old = self._mc_conns.get(server_id)
-                    # 🔴 **同一个上报名、却来自不同端口 ⇒ 这是两台不同的服务器。**
-                    #    新模型下身份只认上报名，于是两台都叫 "mc"（MC 端默认值）
-                    #    会撞成同一台：后来的把先来的顶掉，两端各自重连，形成
-                    #    **永不停止的互踢**——正是本项目多服改造要消灭的那个 bug。
-                    #    旧模型里「端口绑定 id」顺带把它们分开了，现在没有了，
-                    #    所以必须在这里显式识别并**拒绝**，而不是静默顶掉。
-                    if (
-                        old is not None
-                        and old.ws is not ws
-                        and not old.closed
-                        and getattr(old, "port", None) not in (None, port)
-                    ):
-                        logger.error(
-                            f"NetherLink: 服务器上报名冲突——[{server_id}] 已由"
-                            f"端口 {old.port} 的连接占用，端口 {port} 又来了一个"
-                            f"同名连接。身份用的是 MC 端上报的 server-name，"
-                            f"两台服务器**必须填不同的 server-name**，否则会互相"
-                            f"顶掉、消息随机丢失。已拒绝新连接。"
-                        )
-                        try:
-                            await ws.close(
-                                code=4004, message=b"duplicate server_name"
-                            )
-                        except Exception:
-                            pass
-                        return ws
-                    if old is not None and old.ws is not ws and not old.closed:
-                        logger.warning(
-                            f"NetherLink: 服务器 [{server_id}] 重复连入，关闭其旧连接"
-                        )
-                        try:
-                            await old.ws.close(code=4002, message=b"replaced by new connection")
-                        except Exception:
-                            pass
-                    self._mc_conns[server_id] = McConn(
-                        ws=ws, port=port, reported_name=reported
-                    )
-                    self._port_owner[port] = server_id
-                    logger.info(
-                        f"NetherLink: MC 服务器 [{server_id}] 握手成功"
-                        f"（端口 {port}，上报名 {reported}）"
-                    )
-                    # 上线立即播；顺带撤销可能还挂着的下线播报（重连）
-                    await self.dispatcher.broadcast_server_status(server_id, online=True)
-                elif not self._is_current_conn(server_id, ws):
-                    continue  # 未握手、或已被重连替换的连接不发事件
-
-                elif mtype == "command_result":
-                    fut = self._pending_cmds.pop(data.get("id"), None)
-                    if fut and not fut.done():
-                        # ok 是**必需**契约：Paper 端执行异常时回 ok=false。
-                        # 早先 Java 端无条件写 ok=true、这里也只取 output，两边
-                        # 一起把「显式失败」伪装成了成功——玩家被扣费且被告知
-                        # 「指令已执行」，与「执行失败则退费」的承诺直接冲突。
-                        # 缺字段一律当失败处理（fail-closed）：宁可退费，也不
-                        # 让一次可疑的执行白扣好感。
-                        fut.set_result(
-                            CmdResult(
-                                ok=bool(data.get("ok", False)),
-                                output=str(data.get("output", "")),
-                            )
-                        )
-                elif mtype == "inspect_result":
-                    # 查背包的回复（用户 2026-10-12）。纯文本，直接交给等着的 Future。
-                    fut = self._pending_inspects.pop(data.get("id"), None)
-                    if fut is not None and not fut.done():
-                        fut.set_result(str(data.get("text") or ""))
-                elif mtype == "heartbeat":
-                    pass
-                elif mtype == "bot_chat":
-                    # 游戏内唤醒词消息：走 LLM，回复只发回游戏，QQ 不可见
-                    if self._is_ignored_player(data.get("player")):
-                        continue
-                    asyncio.create_task(self._handle_bot_chat(data, server_id))
-                elif mtype == "action_result":
-                    # MC 端执行完确认卡的 steps 后回报（**点击回调**触发）。
-                    # 这边只记结果 + 扣好感 —— **执行早已在 MC 端发生**。
-                    # ⚠️ 单独起 task：要写好感（磁盘 IO），不压在事件路径上。
-                    asyncio.create_task(
-                        self.actions.handle_action_result(
-                            str(data.get("player") or ""),
-                            data.get("token"),
-                            bool(data.get("ok", False)),
-                            str(data.get("detail") or ""),
-                        )
-                    )
-                elif mtype == "action_confirm":
-                    # ⚠️ **旧路径**（计分板轮询上报）。2026-10-11 起确认卡改走
-                    #    `action_result` + 点击回调，这条路只为**回退**保留。
-                    asyncio.create_task(
-                        self.actions.handle_action_confirm(
-                            str(data.get("player") or ""),
-                            data.get("token"),
-                            server_id,
-                        )
-                    )
-                else:
-                    await self.dispatcher.dispatch_mc_event(mtype, data, server_id)
-
-            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
-                break
-
-        # 只摘掉属于这条连接的登记。绝不能整个清空——多服并存时那会误伤别人，
-        # 而且 _port_owner 也会跟着丢，后续重连会被误判成端口冲突。
-        if server_id and self._is_current_conn(server_id, ws):
-            self._mc_conns.pop(server_id, None)
-            if self._port_owner.get(port) == server_id:
-                self._port_owner.pop(port, None)
-            logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
-            # 下线**延迟确认**：抖动重连不该刷屏（见 _schedule_offline_broadcast）
-            self.dispatcher.schedule_offline_broadcast(server_id)
-        return ws
 
     def _is_ignored_player(self, name) -> bool:
         """这个名字是否在忽略名单里？（是则它产生的 MC 事件全部丢弃）
@@ -1873,7 +1676,7 @@ class NetherLinkPlugin(Star):
             return
 
         try:
-            adapter = self._resolve_game_adapter()
+            adapter = self.platform.resolve_adapter()
             if adapter is None or adapter._plugin is None:
                 logger.warning(
                     "NetherLink: 平台适配器不可用，本次成就通知跳过"
@@ -1931,7 +1734,7 @@ class NetherLinkPlugin(Star):
             except Exception as e:
                 logger.error(f"NetherLink: 推送游戏内唤醒消息到群失败: {e}")
 
-        adapter = self._resolve_game_adapter()
+        adapter = self.platform.resolve_adapter()
         if adapter is None or adapter._plugin is None:
             # 自建 agent 已删除，没有可回退的第二条路，如实告知别让玩家干等。
             logger.error(
@@ -1999,73 +1802,16 @@ class NetherLinkPlugin(Star):
             f"NetherLink: Ai 回复已同步到 {len(self.group_names)} 个绑定群"
         )
 
-    def _init_game_platform(self) -> None:
-        """补写平台配置项 + 把适配器重新绑到本插件实例。
-
-        **为什么只是补配置项、不自己造实例**：AstrBot 在 core_lifecycle 里
-        「先加载插件（plugin_manager.reload）后初始化平台
-        （platform_manager.initialize）」，所以只要 config["platform"]
-        里已有这条记录，重启后框架就会自己把适配器实例化。
-        自己 new 一个再塞进 platform_insts 也能跑，但那样会绕过框架的
-        生命周期管理（terminate/reload 都管不到它），得不偿失。
-
-        **幂等按 id 判**：不判的话每次插件重载都会往配置里追加一条，
-        越积越多；而且 `send_message` 只匹配**第一个**命中的实例，
-        旧实例会继续吃消息。
-        """
-        if self.context is None:
-            # 无上下文（测试替身、或框架尚未注入）时不存在平台管理器，
-            # 也没有可写的配置——静默跳过。口径与 _apply_configured_tool_descs
-            # 一致：这不是错误，刷一条 warning 只会污染日志。
-            return
-        try:
-            cfg = self.context.get_config()
-            platforms = cfg.get("platform")
-            if not isinstance(platforms, list):
-                logger.warning(
-                    "NetherLink: 配置里 platform 不是列表，跳过游戏侧平台注册"
-                )
-                return
-            # ⚠️ 只能 append 到**已存在的那个 list**，不能整体重新赋值：
-            # PlatformManager 在 __init__ 时就把 config["platform"] 存成了
-            # 活引用，重新赋值会让它继续指向旧 list。
-            wanted = {
-                "type": GAME_PLATFORM_ID,
-                "id": GAME_PLATFORM_ID,
-                "enable": True,
-                "netherlink_managed": True,
-            }
-            existing = None
-            for item in platforms:
-                if isinstance(item, dict) and str(item.get("id")) == GAME_PLATFORM_ID:
-                    existing = item
-                    break
-            if existing is None:
-                platforms.append(dict(wanted))
-                try:
-                    cfg.save_config()
-                except Exception as e:
-                    logger.error(f"NetherLink: 写入平台配置失败（重启后需手动添加）: {e}")
-                logger.info(
-                    "NetherLink: 已在配置里登记游戏侧平台 "
-                    f"（id={GAME_PLATFORM_ID}）。**需要重启 AstrBot 一次**，"
-                    "框架才会实例化它（也可在 WebUI 的平台列表里手动启用）。"
-                )
-            elif not existing.get("enable"):
-                # 用户手动关掉了这个平台——尊重它，不偷偷改回去
-                logger.warning(
-                    f"NetherLink: 平台 {GAME_PLATFORM_ID} 在配置里是 disabled，"
-                    "游戏内对话将无法工作。请在 WebUI 里启用它。"
-                )
-
-            # 绑定**不在这里做**：本方法跑在插件加载期，而框架要到
-            # `platform_manager.initialize()` 才实例化适配器——此处去看
-            # 必然「尚未实例化」，绑不上（2026-09-22 实测踩到）。
-            # 真正的绑定在 on_astrbot_loaded 钩子里（那个钩子按设计排在
-            # 平台初始化之后），见 _bind_game_platform。
-        except Exception as e:
-            # 平台注册失败不能让插件加载失败——其余功能（QQ 侧、好感度）照常
-            logger.error(f"NetherLink: 初始化游戏侧平台失败: {e}")
+    # ⚠️ 平台适配器域 2026-10-14 已随阶段三 Task 5 移入 `GamePlatform`
+    #    （nl_platform_svc.py）：配置补写与登记（`self.platform.init()`，原
+    #    `_init_game_platform`）、适配器解析（`resolve_adapter` /
+    #    `find_live_adapter` / `lookup_adapter`，原 `_resolve_game_adapter` /
+    #    `_find_live_adapter` / `_lookup_game_adapter`）、陈旧实例检测
+    #    （`current_adapter_class`，原 `_current_adapter_class`）、配置记录
+    #    定位（`entry`，原 `_game_platform_entry`）、可用性（`have_adapter`）、
+    #    热重载丢模块（`drop_module_for_reload`）。两个 `@filter` 钩子
+    #    （`_bind_game_platform` / `_rebind_game_platform_after_reload`）留在
+    #    本类，方法体转发 `self.platform.*`。
 
     # ------------------------------------------------------------------
     # 管理面板 Web API 的**实现**已外移到 `nl_panel_api.PanelApi`（2026-10-13
@@ -2410,16 +2156,19 @@ class NetherLinkPlugin(Star):
             # 类型，`have_adapter` 报 False → 需要重启。
             # 与 `_init_game_platform` 里那句「框架自动重新导入」的假设正相反，
             # 2026-09-22 用户实测到的重载报错就是这么来的。
-            self._drop_platform_module_for_reload()
-            adapter = self._resolve_game_adapter()
+            self.platform.drop_module_for_reload()
+            adapter = self.platform.resolve_adapter()
             if adapter is None:
-                entry = self._game_platform_entry()
+                entry = self.platform.entry()
                 if entry is not None and entry.get("enable"):
                     logger.info(
                         f"NetherLink: 平台 {GAME_PLATFORM_ID} 尚未实例化，正在补加载"
                     )
                     await self.context.platform_manager.load_platform(entry)
-                    adapter = get_adapter(GAME_PLATFORM_ID)
+                    # （2026-10-14 修：原句 get_adapter(GAME_PLATFORM_ID) 在本
+                    #  模块从未 import，走到这条分支必 NameError 且被外层
+                    #  except 吞掉；lookup_adapter 与其语义一致，改走服务。）
+                    adapter = self.platform.lookup_adapter()
             if adapter is None:
                 logger.error(
                     f"NetherLink: 平台 {GAME_PLATFORM_ID} 仍未能实例化——"
@@ -2429,18 +2178,18 @@ class NetherLinkPlugin(Star):
                 return
             # 与重载钩子同口径：实例可能是上次进程留下的旧类（改装后重启
             # 尤其常见），只 bind_plugin 换不掉它的方法代码，得重建。
-            if type(adapter) is not self._current_adapter_class():
+            if type(adapter) is not self.platform.current_adapter_class():
                 logger.warning(
                     "NetherLink: 检测到陈旧的平台适配器实例（仍在运行旧代码），"
                     "正在重建它"
                 )
-                entry = self._game_platform_entry()
+                entry = self.platform.entry()
                 if entry is not None:
                     try:
                         await self.context.platform_manager.reload(entry)
                     except Exception as e:
                         logger.error(f"NetherLink: 重建平台适配器失败: {e}")
-                    adapter = self._find_live_adapter()
+                    adapter = self.platform.find_live_adapter()
             if adapter is None:
                 logger.error(
                     "NetherLink: 平台适配器重建后仍不可用，游戏内对话将回退。"
@@ -2453,73 +2202,6 @@ class NetherLinkPlugin(Star):
             self._warn_about_display_flags()
         except Exception as e:
             logger.error(f"NetherLink: 绑定游戏侧平台适配器失败: {e}")
-
-    @staticmethod
-    def _drop_platform_module_for_reload() -> None:
-        """热重载时主动丢弃 `mc_platform` 模块，让下次导入重新执行注册。
-
-        为什么需要它：平台类型是靠 `@register_platform_adapter` 在**导入期**
-        登记进 `platform_cls_map` 的。而插件重载时框架只清理
-        `data.plugins.<插件名>.*` 前缀下的模块；`mc_platform` 是以**顶层名**
-        进 `sys.modules` 的（main.py 的双形态导入兜底分支），不在清理范围内。
-        它留在缓存里 → 装饰器不重跑 → 注册表空 → 插件以为「适配器没实例化」，
-        提示用户重启（2026-09-22 实测）。
-
-        注意：框架的 `unregister_platform_adapters_by_module` 已经把旧的
-        类型从注册表摘掉了，所以这里只需让它**重新导入**一次即可补回来。
-        """
-        try:
-            import sys as _sys
-
-            _sys.modules.pop("mc_platform", None)
-        except Exception:
-            pass
-
-    def _find_live_adapter(self):
-        """在 `platform_insts` 里找**正在运行**的游戏侧适配器实例。
-
-        这是比模块级 `_ADAPTERS` 字典更权威的来源：热重载时 `mc_platform`
-        会被重新导入，那个字典是**新的、空的**，而实例是**老的**——只查字典
-        会以为「没有实例」，进而错误地再 `load_platform` 一个，
-        于是两个实例并存（`send_message` 只匹配第一个，回复可能走旧实例）。
-        """
-        try:
-            insts = getattr(self.context.platform_manager, "platform_insts", None)
-        except Exception:
-            return None
-        for inst in insts or []:
-            try:
-                if inst.meta().id == GAME_PLATFORM_ID:
-                    return inst
-            except Exception:
-                continue
-        return None
-
-    @staticmethod
-    def _lookup_game_adapter():
-        """按模块级注册表取适配器（两种导入形态都试一次）。"""
-        for attempt in (0, 1):
-            try:
-                if attempt == 0:
-                    from mc_platform import get_adapter
-                else:
-                    from .mc_platform import get_adapter
-                return get_adapter(GAME_PLATFORM_ID)
-            except ImportError:
-                continue
-        return None
-
-    def _resolve_game_adapter(self):
-        """取游戏侧适配器：**先用运行中的实例**，其次才查模块注册表。"""
-        return self._find_live_adapter() or self._lookup_game_adapter()
-
-    def have_adapter(self) -> bool:
-        """平台路径此刻是否真的可用（适配器在、且已绑到本插件实例）。"""
-        try:
-            adapter = self._resolve_game_adapter()
-        except Exception:
-            return False
-        return adapter is not None and adapter._plugin is not None
 
     @filter.on_plugin_loaded()
     async def _rebind_game_platform_after_reload(self, metadata) -> None:
@@ -2540,7 +2222,7 @@ class NetherLinkPlugin(Star):
             # 钩子对**每个**插件加载都触发，必须只认自己
             if name and name != PLUGIN_NAME:
                 return
-            inst = self._find_live_adapter()
+            inst = self.platform.find_live_adapter()
             if inst is None:
                 return  # 实例不存在（首次启用还没重启过），交给启动钩子处理
 
@@ -2552,18 +2234,18 @@ class NetherLinkPlugin(Star):
             # 插件这边改多少遍、跑在游戏里的都还是老逻辑（2026-09-22 实测：
             # 三轮修复全无效果，因为线上的实例根本没有那些代码）。
             # 只 bind_plugin 换不掉实例的方法代码，必须**重建**。
-            if type(inst) is not self._current_adapter_class():
+            if type(inst) is not self.platform.current_adapter_class():
                 logger.warning(
                     "NetherLink: 检测到陈旧的平台适配器实例（仍在运行旧代码），"
                     "正在重建它"
                 )
-                entry = self._game_platform_entry()
+                entry = self.platform.entry()
                 if entry is not None:
                     try:
                         await self.context.platform_manager.reload(entry)
                     except Exception as e:
                         logger.error(f"NetherLink: 重建平台适配器失败: {e}")
-                    inst = self._find_live_adapter()
+                    inst = self.platform.find_live_adapter()
             if inst is None:
                 return
             inst.bind_plugin(self)
@@ -2572,38 +2254,6 @@ class NetherLinkPlugin(Star):
             )
         except Exception as e:
             logger.error(f"NetherLink: 重载后重绑平台适配器失败: {e}")
-
-    @staticmethod
-    def _current_adapter_class():
-        """取**当前**模块里的适配器类，用于识别陈旧实例。
-
-        导入前先丢弃缓存的模块，确保拿到的是刚加载进来的那份定义。
-        """
-        try:
-            import sys as _sys
-
-            for attempt in (0, 1):
-                if attempt == 0:
-                    import mc_platform as _mod
-                else:
-                    from . import mc_platform as _mod
-                _sys.modules.setdefault("mc_platform", _mod)
-                return getattr(_mod, "NetherLinkMcAdapter", None)
-        except Exception:
-            return None
-
-    def _game_platform_entry(self) -> dict | None:
-        """取配置里那条游戏侧平台记录（没有则 None）。"""
-        try:
-            platforms = self.context.get_config().get("platform")
-        except Exception:
-            return None
-        if not isinstance(platforms, list):
-            return None
-        for item in platforms:
-            if isinstance(item, dict) and str(item.get("id")) == GAME_PLATFORM_ID:
-                return item
-        return None
 
     def _warn_about_display_flags(self) -> None:
         """提示用户打开 AstrBot 的三个展示开关。
