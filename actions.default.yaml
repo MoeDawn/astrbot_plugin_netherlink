@@ -43,7 +43,9 @@
 #    1 → 2:confirm 动作现在必须有 apply(展开成 check/clear/give).
 #    2 → 3:give_item 不再限"纯物品"—— 支持 components(改名/附魔/属性…);
 #           新增 modify_item(改玩家**已有**物品).
-version: 4
+#    4 → 5:新增 upgrade_item(交材料 + **原地合并**升级已有装备);
+#           swap_items 收敛为**纯以物换物**(它只换不并,原来被误用于升级 → 会丢附魔).
+version: 5
 
 actions:
   # -------------------------------------------------------------------------
@@ -163,13 +165,15 @@ actions:
   - name: swap_items
     label: 交换物品
     desc: >-
-      涉及到交换物品,或同时提交两个及以上的物品换取其他物品,比如消耗材料升级装备时用这个.
+      涉及到交换物品,或同时提交两个及以上的物品换取其他物品时用这个.
       交出的与换回的都可以不止一种.
-      他只想要一件新东西,不交出任何东西的,用 give_item;
-      只改已有东西,不交材料的,用 modify_item.
+      ⚠️ 它**只换不并** —— 换回来的是一件**新的**,原来那件的组件**不会**自动带过来.
+      要"交出材料,把他身上**已有**那件原地升级(保留原有附魔与名字)"的,用 upgrade_item;
+      只改已有东西,不交材料的,用 modify_item;
+      他只想要一件新东西,不交出任何东西的,用 give_item.
       ⚠️ 交出物必须真在他背包里:数量不够就整体拒绝,一件都不动,也不加好感.
-      升级已有装备时用槽位寻址把那件写进 pay(如 weapon.mainhand=旧剑),
-      服务器会去读那一格真实的物品,你不用猜;他同种物品有好几件时也必须这样写清.
+      交出的东西在他身上有好几件,分不清是哪一件时,用槽位寻址说清
+      (如 `weapon.mainhand=旧剑`),服务器会去读那一格真实的物品,你不用猜.
     params:
       player:
         type: player
@@ -184,8 +188,7 @@ actions:
           数量省略为 1;显示名只用于给玩家看的卡片.
           要交出的东西**带组件**时(少见,如把附魔剑当材料交出去),用 `|` 接,写法同 gain.
           **另一种写法是槽位寻址**:直接写槽位名代替物品 ID,表示"他身上那一格的东西",
-          如 `weapon.mainhand=旧剑`.升级他**已有**的装备时**必须用这种写法** ——
-          你不知道那一格是什么,猜出来的物品与组件对不上,插件会拒绝执行.
+          如 `weapon.mainhand=旧剑` —— 猜出来的物品与组件对不上,插件会拒绝执行.
           可用槽位:weapon.mainhand / weapon.offhand / armor.head / armor.chest /
           armor.legs / armor.feet / hotbar.0~8 / inventory.9~35.
           ⚠️ **先查再决定**:不知道他有几件,是哪一件,就调 `inspect_items` 查(只读,不消耗好感) —— **别猜,也别让他去改参数**.
@@ -195,10 +198,11 @@ actions:
         desc: >-
           玩家获得的物品,格式同 pay.例:`minecraft:iron_ingot*3=铁锭`
           ⚠️ 这里**不能**用槽位写法 —— 槽位是"从他身上取",而这里是"给他".
-          **要换回带附魔或改名的成品**(如"用材料升级装备"换回的那把新剑),
-          在条目末尾用 `|` 接组件:`minecraft:diamond_sword*1=钻石剑|enchantments={"minecraft:sharpness":5,"minecraft:mending":1}`
-          `|` 后面的写法与 give_item 的 components 参数**完全一样**(见那里的例子),
-          改名的也照那样写:`minecraft:diamond_sword*1=钻石剑|custom_name={text:"龙鳞",color:"gold"}`
+          **要换回带附魔或改名的成品**时,在条目末尾用 `|` 接组件 ——
+          ⚠️ 一条里 `|` **只能出现一次**(再写一个会被当成组件内容,MC 直接报错);
+          要挂**多个**组件,它们之间用**逗号**连:
+          `minecraft:diamond_sword*1=钻石剑|enchantments={"minecraft:sharpness":5},custom_name={text:"龙鳞",color:"gold"}`
+          `|` 后面的写法与 give_item 的 components 参数**完全一样**(见那里的例子).
       cost:
         type: int
         required: false
@@ -226,6 +230,82 @@ actions:
       cancel_hover: "否决,无消耗"
     confirm: true
     done: "{player} 交换获得 {items}"
+
+  # -------------------------------------------------------------------------
+  # 交材料 + **原地升级已有装备**(合并组件,原有附魔保留)
+  # -------------------------------------------------------------------------
+  # 🔴 为什么要有它(2026-10-14 真机事故):玩家说「用一组钻石升级身上的剑」,
+  #    AI 判断该用 swap_items,但 swap_items 是**只换不并**(clear 旧的 + give 新的)
+  #    —— 它只要漏写一个组件,那件装备就残了。实测:原有 sharpness5/looting3/…
+  #    被一次「升级」全清掉,换回来一把白板。
+  #    ⇒ 升级已有装备必须走 **modify**(原地合并,没点名的组件保留)。
+  #    材料收走用 clear,但**所有 check 必须排在 clear 之前**(否则材料不够会扣半截)。
+  - name: upgrade_item
+    label: 升级已有装备
+    desc: >-
+      玩家**交出材料**,把他身上**已有**那件装备原地升级(加附魔/改名/加属性)时用这个.
+      东西本身不换,所在格子不变,他**没点名**的组件(原有附魔/名字/说明)一律自动保留.
+      要换成一件**不一样的**东西(形状/ID 都变)的,用 swap_items;
+      不需要材料或只想改一下的,用 modify_item.
+      ⚠️ 材料必须真在他背包里:不够就整条拒绝,一件都不动,也不加好感.
+      ⚠️ 调用后只发一张私聊确认卡,此刻什么都没发生.
+    params:
+      player:
+        type: player
+        required: true
+        desc: 玩家游戏 ID
+      targets:
+        type: slot_list
+        required: true
+        desc: >-
+          要升级他身上**哪一格**,格式 `槽位=卡片上显示的名字`,多个用 `;` 隔开.
+          可用槽位:weapon.mainhand / weapon.offhand / armor.head / armor.chest /
+          armor.legs / armor.feet / hotbar.0~8 / inventory.9~35
+          ⚠️ 不知道在哪一格,先调 `inspect_items` 查(只读,不消耗好感) —— 别猜,
+          也别让他去改参数.
+      components:
+        type: components
+        required: true
+        desc: >-
+          **要改的那几项**,只写要改的,其余自动保留(写法与 modify_item 完全相同):
+            改名: custom_name={text:"龙鳞",color:"gold"}
+            说明: lore=[{text:"第一行",color:"red"}]
+            附魔: enchantments={"minecraft:sharpness":7,"minecraft:mending":1}
+            属性: attribute_modifiers=[{type:"attack_damage",amount:20,operation:"add_value",slot:"mainhand",id:"x"}]
+          ⚠️ 多个组件用**逗号**连接(不是分号也不是竖线).
+          ⚠️ **附魔是整套替换** —— 想"再加一条"就得把原有的附魔都写上,
+             所以**先调 `inspect_items` 查那一格**,把原有附魔照抄进来.
+      pay:
+        type: item_list
+        required: true
+        desc: >-
+          交出的**材料**,格式 `物品ID*数量=显示名`,多项用 `;` 隔开.
+          例:`minecraft:diamond*64=钻石`
+          ⚠️ **只写材料** —— 不要把要升级的那件写进来(那件由 `targets` 指名).
+      cost:
+        type: int
+        required: false
+        min: 0
+        desc: 净好感消耗.自己判断(0 = 不收).
+    # 🔴 必须有 karma 块,否则 AI 报价被静默忽略(见 swap_items 处的说明)
+    karma: {model: table_then_ai, max_cost: 30}
+    # 播报取 **pay**(他交出的材料),不是 targets(那是要升级的装备名)
+    done_items_from: [pay]
+    template: ""
+    # ⚠️ 步骤顺序是硬要求:**所有 check 排在 clear 之前**
+    #    —— 否则材料不够时 clear 已经扣了而 modify 才失败 = 半成品.
+    #    `runSteps` 的预校验也依赖这个顺序(它逐条干跑,遇到问题整体中止).
+    apply:
+      - {op: check,  from: pay}
+      - {op: clear,  from: pay}
+      - {op: modify, from: targets, components_from: components}
+    card:
+      title: "升级装备"
+      pay_label: "上交材料"
+      confirm_hover: "同意,扣除 {cost} 好感"
+      cancel_hover: "否决,无消耗"
+    confirm: true
+    done: "{player} 花费 {cost} 好感,用 {items} 升级了装备"
 
   # -------------------------------------------------------------------------
   # 修改玩家**已有**物品(改名 / 附魔 / 属性 / 说明)
