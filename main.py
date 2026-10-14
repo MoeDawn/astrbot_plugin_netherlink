@@ -84,9 +84,9 @@ PANEL_AVAILABLE = (
 # 保证保存/卸载不会因为某条连接卡住而拖到一分钟。
 _WS_SHUTDOWN_TIMEOUT = 3.0
 
-# 服务器断开后**延迟多久确认**再播报（秒）。
-# 理由见 `_server_offline_tasks` 的注释：避开指数退避重连的抖动。
-_SERVER_OFFLINE_CONFIRM_DELAY = 5.0
+# 服务器断开后**延迟多久确认**再播报（秒）——2026-10-14 已随事件分发域移入
+# `nl_dispatcher.py`（下方双路导入保留了同名绑定）；理由（避开指数退避重连
+# 的抖动）见 `_server_offline_tasks` 的注释。
 # 单独关一条 MC 连接的上限；超时只记日志（不强行中断 socket，不做私有 attr hack），
 # 整体卸载仍由 runner.cleanup() 的短超时兜底。
 _WS_CLOSE_TIMEOUT = 2.0
@@ -208,6 +208,15 @@ try:
     from .nl_transport import DEFAULT_SERVER_DISPLAY, Transport
 except ImportError:  # 插件以顶层模块方式加载时
     from nl_transport import DEFAULT_SERVER_DISPLAY, Transport
+
+# 事件分发 / 跨服服务（2026-10-14 阶段三从 main.py 外移）：MC 事件渲染推群 /
+# 服务器上下线播报（含下线延迟确认）/ 跨服转发。与 nl_protocol.py 同一个双路
+# 导入写法。`_SERVER_OFFLINE_CONFIRM_DELAY` 随该域定义在那个模块——这里的
+# 同名绑定只是保留（测试经 `sys.modules["nl_dispatcher"]` 打桩改短它）。
+try:
+    from .nl_dispatcher import _SERVER_OFFLINE_CONFIRM_DELAY, Dispatcher
+except ImportError:  # 插件以顶层模块方式加载时
+    from nl_dispatcher import _SERVER_OFFLINE_CONFIRM_DELAY, Dispatcher
 
 # 配置解析纯函数（2026-10-13 外移到 nl_config.py；与 nl_protocol.py
 # 同一个双路导入写法，名字仍在 main 上可见）。
@@ -834,6 +843,12 @@ class NetherLinkPlugin(Star):
         # 卸载中标志：置真后 `_schedule_offline_broadcast` 不再挂新任务。
         # 见 `terminate()` 的说明（重启时误报离线的根因）。
         self._terminating: bool = False
+        # 事件分发 / 跨服服务（2026-10-14 阶段三外移）：MC 事件渲染推群、服务器
+        # 上下线播报（含下线延迟确认）与跨服转发全归它（`self.dispatcher`）。
+        # 与 `self.transport` 同模式：无状态、只持本插件引用——下线任务表
+        # `_server_offline_tasks` 与卸载标志 `_terminating` 仍留在本插件上
+        # （`terminate()` 要直接撤销它们）。
+        self.dispatcher = Dispatcher(self)
         # 本插件注册的动作名（用于卸载 / 重载时清掉上一轮的，含已从目录删掉的）
         self._action_tool_names: set = set()
         # 动作目录读不出来时的原因（空串 = 没出错）。面板要显示它 ——
@@ -1993,7 +2008,7 @@ class NetherLinkPlugin(Star):
                     # 以前是「新连接一律踢掉旧连接」，于是两台服务器互相踢、各自重连，
                     # 形成永不停止的抖动（两端退避都会重置回 3 秒），且日志里看不出。
                     owner = self._port_owner.get(port)
-                    if owner and owner != server_id and not self._conn_closed(owner):
+                    if owner and owner != server_id and not self.dispatcher.conn_closed(owner):
                         logger.error(
                             f"NetherLink: 端口 {port} 已被服务器 [{owner}] 占用，"
                             f"拒绝新连接 [{server_id}]。"
@@ -2054,7 +2069,7 @@ class NetherLinkPlugin(Star):
                         f"（端口 {port}，上报名 {reported}）"
                     )
                     # 上线立即播；顺带撤销可能还挂着的下线播报（重连）
-                    await self._broadcast_server_status(server_id, online=True)
+                    await self.dispatcher.broadcast_server_status(server_id, online=True)
                 elif not self._is_current_conn(server_id, ws):
                     continue  # 未握手、或已被重连替换的连接不发事件
 
@@ -2108,7 +2123,7 @@ class NetherLinkPlugin(Star):
                         )
                     )
                 else:
-                    await self._dispatch_mc_event(mtype, data, server_id)
+                    await self.dispatcher.dispatch_mc_event(mtype, data, server_id)
 
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
@@ -2121,7 +2136,7 @@ class NetherLinkPlugin(Star):
                 self._port_owner.pop(port, None)
             logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
             # 下线**延迟确认**：抖动重连不该刷屏（见 _schedule_offline_broadcast）
-            self._schedule_offline_broadcast(server_id)
+            self.dispatcher.schedule_offline_broadcast(server_id)
         return ws
 
     def _is_ignored_player(self, name) -> bool:
@@ -2135,210 +2150,14 @@ class NetherLinkPlugin(Star):
             return False
         return str(name) in self.mc_ignored_players
 
-    def _conn_closed(self, server_id: str) -> bool:
-        conn = self._mc_conns.get(server_id)
-        return conn is None or conn.closed
-
-    async def _dispatch_mc_event(self, mtype: str, data: dict, server_id: str = ""):
-        """把 MC 事件按模板渲染后推送到所有绑定群。
-
-        `server_id` **就是 MC 上报的 server-name**（2026-10-07 起；此前端口绑定可覆盖它）。
-        `{server}` 展开成的是**显示名**（`ws_ports` 里按端口配的那个），与身份是两回事。
-        """
-        # 忽略名单里的名字：所有事件直接丢弃（见 _is_ignored_player）
-        if self._is_ignored_player(data.get("player")):
-            return
-        try:
-            srv = self.transport.server_display(server_id)
-            if mtype == "chat" and self.config.get("enable_chat", True):
-                text = self.transport.fmt(self.templates["chat"], server=srv, bot=self.mc_bot_name,
-                                 player=data.get("player", "?"), text=data.get("text", ""))
-            elif mtype == "join" and self.config.get("enable_join_leave", True):
-                player = str(data.get("player") or "")
-                # ⚠️ `enabled` 传的是**总开关**，不是它与子开关的与
-                #    （2026-10-07 拆分）：总开关开着就**发提示**；
-                #    子开关 `binding_join_gate` 只在门禁**内部**决定踢不踢。
-                if binding_flow.is_unbound(
-                    self.bindings.table, player,
-                    ignored=self.mc_ignored_players,
-                    enabled=self.enable_binding,
-                    exempt=self.binding_exempt_players,
-                ):
-                    # ⚠️ 门禁整体包在 try 里，**一旦出错一律降级成「未拦截」**：
-                    # 让它抛出去会落到本方法末尾那个 `except Exception`，而那条路
-                    # 会跳过下面的推群——玩家进了服却在群里查无此人，正是 fail-open
-                    # 要防的「凭空消失」，只不过是从错误路径到达的。
-                    # （`_fmt` 只兜 KeyError/IndexError，用户把模板写成 `{code:d}`
-                    #   这类格式错误会抛 ValueError，是真实可达的。）
-                    try:
-                        gated = await self.bindings.gate_unbound_player(player, server_id)
-                    except Exception as e:
-                        logger.error(f"NetherLink: 进服门禁执行失败，按未拦截处理: {e}")
-                        gated = False
-                    if gated:
-                        # ⚠️ **continue 的逻辑**：门禁已把这个人踢了，就不再走下面的
-                        # 推群/公屏——否则群里会看到一条「Steve 进入了服务器」，
-                        # 紧接着又看到他被踢，纯噪声。
-                        return
-                    # 门禁**没有生效**（拿不到可用群号，或执行出错）：放行。
-                    # 这里刻意**不** `return`——静默把玩家丢掉是最糟的结局
-                    # （他既没被踢、也没在任何群里出现过，等于凭空消失）。
-                # 已绑定（或门禁关闭）：顺手记下他出现过的服务器。
-                # ⚠️ 只在**真新增**一台服时才落盘——进服是高频道，
-                # 每次都写盘既慢又没意义（规范 §3.1：「只在见到新的服务器时才追加」）。
-                updated, changed = bindings.note_server(
-                    self.bindings.table, player, server_id
-                )
-                if changed:
-                    self.bindings.table = updated
-                    try:
-                        bindings.save(self.bindings.path, self.bindings.table)
-                    except Exception as e:
-                        logger.warning(f"NetherLink: 记录玩家服务器失败（忽略）: {e}")
-                text = self.transport.fmt(self.templates["join"], server=srv, bot=self.mc_bot_name,
-                                 player=data.get("player", "?"))
-            elif mtype == "leave" and self.config.get("enable_join_leave", True):
-                text = self.transport.fmt(self.templates["leave"], server=srv, bot=self.mc_bot_name,
-                                 player=data.get("player", "?"))
-            elif mtype == "death" and self.config.get("enable_death", True):
-                # 注意：本开关同时控制死亡消息同步与死亡扣好感，是死亡惩罚**唯一**
-                # 的门槛（好感度是强制机制，没有别的开关）。关掉它等于同时关闭死亡
-                # 惩罚——这是刻意的（不想看到死亡播报的人多半也不想要静默扣好感），
-                # schema 的 enable_death 说明里写明了这一点。
-                # `or "?"` 与下面的 player != "?" 是同一个门：JSON null / 空串同样
-                # 代表"这条事件没带玩家"，一律并到显示回退值 "?" 上，
-                # 否则会建出 mc:None / mc: 这种假记录
-                player = str(data.get("player") or "?")
-                # 玩家死亡时 AI 不在场（死亡走 WS 事件、不走对话，没有它那一轮判断），
-                # 只能由插件自己扣好感。扣减放在广播之前——广播失败（推送异常）绝不能
-                # 连累这笔游戏事实，而 KarmaService.add 自己吞写盘异常、有外层 try 兜底，
-                # 反过来也不会连累广播。
-                # 也放在 _fmt 之前：_fmt 只兜 KeyError/IndexError，模板里写错格式说明符
-                # （如 {message:d}）会抛 ValueError 逃到外层 except，从而连同扣减一起跳过
-                # player 未知时回退值是 "?"，扣它会造出 mc:? 这条假记录，因此排除
-                if self.karma_death_penalty and player != "?":
-                    await self.karma.add(
-                        self.karma.identity_key("game", player, ""), -self.karma_death_penalty
-                    )
-                text = self.transport.fmt(self.templates["death"], server=srv, bot=self.mc_bot_name,
-                                 player=player, message=data.get("message", ""))
-            elif mtype == "advancement":
-                # 成就走**独立管线**：要起 AI 让它更新好感并回话，不是套模板广播。
-                # 单独 create_task，避免把 LLM 往返（可能数秒）压在这条 WS 事件
-                # 处理路径上、连累后续事件。
-                asyncio.create_task(self._handle_advancement(data, server_id))
-                return
-            else:
-                return
-            await self.transport.broadcast(text)
-            # 跨服转发（`enable_cross_server` 控）。接在这里的两个理由：
-            #   · 在 `_is_ignored_player` 之后 ⇒ 忽略名单自然生效
-            #   · 在门禁的提前 `return` 之后 ⇒ 被踢的玩家不转发到别的服
-            # ⚠️ 它与推群的开关**耦合**：某类事件的推群开关关着时，它也不会跨服
-            #    转发（那段 if/elif 是同一个分支）。要独立得重构那串分支。
-            await self._cross_forward(mtype, data, server_id)
-        except Exception as e:
-            logger.error(f"NetherLink: 处理 MC 事件 {mtype} 失败: {e}")
-
-    # ------------------------------------------------------------------
-    # 跨服互通
-    # ------------------------------------------------------------------
-    async def _broadcast_server_status(self, server_id: str, online: bool) -> None:
-        """服务器上线/下线时推送到所有绑定群（`enable_server_status` 控）。
-
-        🔴 **下线走延迟确认**（用户 2026-10-10 要求）：MC 端重连是指数退避
-        （3 秒起），网络抖一下就是「断开 → 3 秒后重连」，立即播报群里会看到
-        「已断开」紧跟「已连接」。所以断开时**先挂一个 task**，等
-        `_SERVER_OFFLINE_CONFIRM_DELAY` 秒；窗口内该 `server_id` 若重新握上手，
-        `_cancel_offline_broadcast` 把它取消。**上线立即播**。
-
-        ⚠️ 确认期结束时判的是「这个 server_id **现在**在不在线」，不是
-        「有没有收到过新的 join」——重连可能换了新的 ws 对象。
-        """
-        if not self.enable_server_status:
-            return
-        key = "server_online" if online else "server_offline"
-        try:
-            text = self.transport.fmt(self.templates[key],
-                             server=self.transport.server_display(server_id))
-        except Exception as e:
-            logger.warning(f"NetherLink: 服务器状态播报渲染失败（忽略）: {e}")
-            return
-        await self.transport.broadcast(text)
-
-    def _schedule_offline_broadcast(self, server_id: str) -> None:
-        """断开时挂一个「延迟确认」任务（见 `_broadcast_server_status`）。"""
-        # !!! 卸载中不挂新任务：terminate() 关连接会让 `_ws_session` 走到这里
-        #     并挂出一个延迟确认任务；它会在新实例已播完「已连接」之后才触发「已断开」。
-        if self._terminating:
-            return
-        if not self.enable_server_status:
-            return
-        self._cancel_offline_broadcast(server_id)
-        task = asyncio.create_task(self._confirm_offline(server_id))
-        self._server_offline_tasks[server_id] = task
-
-    def _cancel_offline_broadcast(self, server_id: str) -> None:
-        """取消某个 server_id 待确认的下线播报（重连成功 / 重复断开时）。"""
-        task = self._server_offline_tasks.pop(server_id, None)
-        if task is not None and not task.done():
-            task.cancel()
-
-    async def _confirm_offline(self, server_id: str) -> None:
-        """等够确认窗口，若那台**仍不在线**就播报下线。"""
-        try:
-            await asyncio.sleep(_SERVER_OFFLINE_CONFIRM_DELAY)
-            if self._conn_closed(server_id):
-                await self._broadcast_server_status(server_id, online=False)
-        except asyncio.CancelledError:
-            # 重连成功时会被取消 —— **预期路径**，不进日志（CLAUDE.md 禁止吞取消）
-            raise
-        except Exception as e:
-            logger.warning(f"NetherLink: 下线播报失败（忽略）: {e}")
-        finally:
-            self._server_offline_tasks.pop(server_id, None)
-
-    async def _cross_forward(self, mtype: str, data: dict, server_id: str) -> None:
-        """把一条 MC 事件转发到**其余**在线服务器（`enable_cross_server` 控）。
-
-        只转 chat / join / leave / death。**不转** bot_chat / advancement：
-          · `bot_chat` 是唤醒词对话，转过去会成为**跨服 LLM 循环**的入口
-          · `advancement` 已有 AI 好感播报，再转一遍是噪声
-
-        🔴 **复用现有的 `chat` 下行帧**，不新增帧类型：下行 `chat` 在四端都不是
-        聊天事件（Paper 走 `getServer().broadcast`，Fabric / NeoForge 走
-        `broadcastSystemMessage`），**广播不触发 `AsyncChatEvent` /
-        `ServerChatEvent`**，所以 MC 端不会把跨服行再上报 —— 防循环天然成立。
-        代价是三个 MC 端**零改动**、不必重新编译。
-
-        ⚠️ 调用点在 `_dispatch_mc_event` 里、`_is_ignored_player` **之后**，
-        忽略名单自然生效。
-        """
-        if not self.enable_cross_server:
-            return
-        key = {"chat": "cross_chat", "join": "cross_join",
-               "leave": "cross_leave", "death": "cross_death"}.get(mtype)
-        if key is None:
-            return
-        try:
-            line = self.transport.fmt(
-                self.templates[key],
-                server=self.transport.server_display(server_id),
-                player=data.get("player", "?"),
-                text=data.get("text", ""),
-                message=data.get("message", ""),
-            )
-        except Exception as e:
-            logger.warning(f"NetherLink: 跨服转发渲染失败（忽略）: {e}")
-            return
-        # ⚠️ **不发回来源服**（不回声）：三台在线时另外两台各收到一次。
-        for sid, conn in list(self._mc_conns.items()):
-            if sid == server_id or conn.closed:
-                continue
-            try:
-                await self.transport.send_to_mc({"type": "chat", "line": line}, sid)
-            except Exception as e:
-                logger.warning(f"NetherLink: 跨服转发到 [{sid}] 失败（忽略）: {e}")
+    # ⚠️ 事件分发 / 跨服 2026-10-14 已移入 `nl_dispatcher.Dispatcher`：
+    #    `self.dispatcher.dispatch_mc_event(...)`（原 `_dispatch_mc_event`，MC 事件
+    #    按模板渲染后推群，含死亡扣好感与进服门禁挂接）、
+    #    `self.dispatcher.cross_forward(...)`（原 `_cross_forward`，跨服转发）、
+    #    `self.dispatcher.broadcast_server_status(...)`（原 `_broadcast_server_status`）、
+    #    `self.dispatcher.schedule_offline_broadcast(...)` / `.cancel_offline_broadcast(...)`
+    #    （下线延迟确认；任务表仍是本插件的 `_server_offline_tasks`，`terminate()`
+    #    直接撤它）、`.confirm_offline(...)`、`.conn_closed(...)`（原 `_conn_closed`）。
     # ⚠️ 服务器显示名 2026-10-14 已移入 `nl_transport.Transport`：
     #    `self.transport.server_display(...)`（原 `_mc_server_display`，
     #    只影响展示、不影响身份；显示名缓存在插件侧 `_display_by_server`）。
@@ -4108,7 +3927,7 @@ class NetherLinkPlugin(Star):
         #     不取消的话，它们的 `_confirm_offline` 会在 5 秒后醒来、
         #     查出「已不在线」（本实例的 `_mc_conns` 刚清空）并播一条下线。
         for _sid in list(self._server_offline_tasks):
-            self._cancel_offline_broadcast(_sid)
+            self.dispatcher.cancel_offline_broadcast(_sid)
         self._live_ws.clear()
         self._mc_conns.clear()
         self._port_owner.clear()
