@@ -138,7 +138,7 @@ class ActionTool(FunctionTool):
         那样「工具怎么被调」与「动作怎么执行」分开，后者可以在没有 AstrBot
         的环境里单测。
         """
-        return await self.plugin._run_action_tool(self.action, event, kwargs)
+        return await self.plugin.actions.run_action_tool(self.action, event, kwargs)
 
 
 def make_tool(action: A.Action, plugin) -> ActionTool:

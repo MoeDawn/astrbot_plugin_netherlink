@@ -587,13 +587,13 @@ class PanelApi:
             acts = []
             if self.plugin.enable_actions:
                 try:
-                    acts = actions.load_actions(str(self.plugin._actions_path()))
+                    acts = actions.load_actions(str(self.plugin.actions.actions_path()))
                 except Exception as e:
                     # 面板这条路径自己读一遍：可能比注册时更糟（用户刚改坏）
                     self.plugin._actions_error = str(e)
             return self.json_response(panel.actions_view(
                 acts, self.plugin.enable_actions,
-                str(self.plugin._actions_path()),
+                str(self.plugin.actions.actions_path()),
                 self.plugin._actions_error,
             ))
         except Exception as e:
@@ -618,7 +618,7 @@ class PanelApi:
             src = Path(__file__).resolve().parent / "actions.default.yaml"
             if not src.is_file():
                 return self.error_response("找不到插件自带的默认动作目录")
-            dst = self.plugin._actions_path()
+            dst = self.plugin.actions.actions_path()
             backup = ""
             if dst.exists():
                 backup = str(dst) + ".bak"
