@@ -81,7 +81,7 @@ class CommandRunner:
         ):
             # 发送失败必须把登记撤掉，否则这里就是一份永不回执的僵尸 Future——
             # 只有 terminate() 才清得掉，其间 _pending_cmds 一直虚高。
-            # 注意 _send_to_mc 返回 False 有两个来源：真的没连上/发送抛异常，
+            # 注意 transport.send_to_mc 返回 False 有两个来源：真的没连上/发送抛异常，
             # 以及"刚判断完就断线"的并发写竞态。竞态下这条 warning 属于误报，
             # 但方向是**多报**（宁可多留一条痕迹，也不放过真实的发送失败），
             # 这是刻意保留的：静默丢掉一条真实失败比多一条无用的 warning 贵得多。
@@ -101,7 +101,7 @@ class CommandRunner:
         AI 拿它去填 `swap_items.pay` / `modify_item.targets` / `offer_karma.item`。
 
         ⚠️ **离线必须如实说**（不能返回空串或「没查到」—— 那会让 AI
-        以为玩家身上真没有，从而去做错的判断）。与 `_run_console_cmd`
+        以为玩家身上真没有，从而去做错的判断）。与 `run_console_cmd`
         同一口径：拿不到回执就是拿不到，如实交代。
         """
         if not self.plugin.transport.connected(server_id):
@@ -188,7 +188,7 @@ class CommandRunner:
         source="qq"  : initiator 为发起人显示名（QQ 群昵称），qq 为发起人 QQ
         source="game": initiator 为游戏内玩家名
         server_id    : 指令发往哪台 MC 服务器。游戏侧由连接直接得出（连接即身份）；
-                       QQ 侧由 AI 依上下文选定。为空时交由 _send_to_mc 判定：
+                       QQ 侧由 AI 依上下文选定。为空时交由 transport.send_to_mc 判定：
                        只有恰好一台在线才发送，多台则拒发（宁丢不发错）。
         cost         : AI 为本次执行报出的好感消耗。报价是外部输入，必经
                        clamp_cost 裁剪（非数字/负数归 0，超过 max_command_cost 按上限）。
@@ -236,7 +236,7 @@ class CommandRunner:
                 await self.plugin.karma.add(key, -spend)
 
             # 扣减之后的所有 await 点都可能被取消：terminate() 取消 _pending_cmds 里的
-            # Future（_run_console_cmd 里那个 await 直接吃到 CancelledError），卸载时
+            # Future（run_console_cmd 里那个 await 直接吃到 CancelledError），卸载时
             # 框架也会取消本任务。CancelledError 自 3.8 起是 BaseException，下面那个
             # `except Exception` 接不住它——不接管的话，这笔已扣的好感既没换来执行、
             # 也不留任何痕迹，是唯一一条「扣了钱且无迹可查」的路径。
@@ -324,9 +324,9 @@ class CommandRunner:
         """取消路径的退费；异常绝不外抛（调用方紧接着要 re-raise，不能被挡住）。
 
         幂等：只在好感水位仍停在「扣减后」（cur - spend）时才退。取消可能落在
-        `_rollback_karma` 内部的任意 await 点上（比如已经改完内存、正要去校验水位），
+        `rollback_karma` 内部的任意 await 点上（比如已经改完内存、正要去校验水位），
         此时再退一次就是白送好感；反过来，水位对不上也说明这笔钱压根没扣成。
-        退费失败由 `_rollback_karma` 自己留痕，这里只负责不让它把异常带出去。
+        退费失败由 `rollback_karma` 自己留痕，这里只负责不让它把异常带出去。
         """
         if not spend:
             return

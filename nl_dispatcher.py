@@ -171,7 +171,7 @@ class Dispatcher:
         （3 秒起），网络抖一下就是「断开 → 3 秒后重连」，立即播报群里会看到
         「已断开」紧跟「已连接」。所以断开时**先挂一个 task**，等
         `_SERVER_OFFLINE_CONFIRM_DELAY` 秒；窗口内该 `server_id` 若重新握上手，
-        `_cancel_offline_broadcast` 把它取消。**上线立即播**。
+        `cancel_offline_broadcast` 把它取消。**上线立即播**。
 
         ⚠️ 确认期结束时判的是「这个 server_id **现在**在不在线」，不是
         「有没有收到过新的 join」——重连可能换了新的 ws 对象。
@@ -188,8 +188,8 @@ class Dispatcher:
         await self.plugin.transport.broadcast(text)
 
     def schedule_offline_broadcast(self, server_id: str) -> None:
-        """断开时挂一个「延迟确认」任务（见 `_broadcast_server_status`）。"""
-        # !!! 卸载中不挂新任务：terminate() 关连接会让 `_ws_session` 走到这里
+        """断开时挂一个「延迟确认」任务（见 `broadcast_server_status`）。"""
+        # !!! 卸载中不挂新任务：terminate() 关连接会让 `ws.session` 走到这里
         #     并挂出一个延迟确认任务；它会在新实例已播完「已连接」之后才触发「已断开」。
         if self.plugin._terminating:
             return
@@ -232,7 +232,7 @@ class Dispatcher:
         `ServerChatEvent`**，所以 MC 端不会把跨服行再上报 —— 防循环天然成立。
         代价是三个 MC 端**零改动**、不必重新编译。
 
-        ⚠️ 调用点在 `_dispatch_mc_event` 里、`_is_ignored_player` **之后**，
+        ⚠️ 调用点在 `dispatch_mc_event` 里、`_is_ignored_player` **之后**，
         忽略名单自然生效。
         """
         if not self.plugin.enable_cross_server:

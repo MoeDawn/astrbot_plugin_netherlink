@@ -8,7 +8,7 @@
 
 与 `BindingService(self)` / `KarmaService(self)` 同模式：**持有 plugin 引用**做跨域
 操作（`plugin.karma.*` / `plugin.bindings.*` / `plugin._mc_conns` /
-`plugin._run_console_cmd` / `plugin._actions_path()` …），自己只拥有「面板」这一层：
+`plugin.commands.run_console_cmd` / `plugin.actions.actions_path()` …），自己只拥有「面板」这一层：
 入参校验 + 整形调用。整形逻辑全在 `panel.py`（那部分脱离 AstrBot 可单测）。
 
 🔴 **本模块刻意不 import `astrbot.api.web`**：`json_response` / `error_response` /
@@ -24,7 +24,7 @@
 `self.plugin._command_payload(...)` 调，仍留在插件上。
 
 ⚠️ **数据根不从本模块取**（与 `nl_binding_svc` 同一条教训）：本模块不调
-`get_astrbot_plugin_data_path()`，只经 `plugin._audit_path` / `plugin._actions_path()`
+`get_astrbot_plugin_data_path()`，只经 `plugin._audit_path` / `plugin.actions.actions_path()`
 拿路径——测试重定向的是 **main 模块的名字绑定**，本模块自己 import 一份再调用，
 在真机上会写进真实数据目录。
 """
@@ -575,7 +575,7 @@ class PanelApi:
     async def api_actions(self):
         """GET 结构化动作列表（含目录错误）。
 
-        🔴 **目录错误必须能看见**：`_register_action_tools` 在目录有坏条目时
+        🔴 **目录错误必须能看见**：`actions.register_tools` 在目录有坏条目时
         **一个动作都不注册**（宁可全不注册，也不要半套规则）。只记一条 ERROR 的话，
         症状是「AI 说没这个工具」，与「压根没配」一模一样 —— 2026-10-11 真机
         就栽在这：落地的 `actions.yaml` 是旧版（缺 `apply`），新校验判它坏，
@@ -603,7 +603,7 @@ class PanelApi:
     async def api_actions_reset(self):
         """POST 把动作目录重置为**插件自带默认**（先备份原文件）。
 
-        🔴 **为什么要有这个按钮**：`_ensure_actions_file` **从不覆盖**已存在的
+        🔴 **为什么要有这个按钮**：`actions.ensure_actions_file` **从不覆盖**已存在的
         文件（那是给人改的），所以升级插件后用户目录还是旧版。2026-10-11 真机
         就栽在这：旧版 `give_item` 有 `confirm` 无 `apply`，新校验判它坏 ⇒
         **一个动作都不注册**，而界面上什么都看不见。
@@ -646,9 +646,9 @@ class PanelApi:
     async def query_players_one(self, server_id: str) -> dict:
         """对**一台**服务器下发 `list` 并整形出一行结果。
 
-        ⚠️ **逐台问，绝不「随便挑一台」**：`_send_to_mc` 在多台在线且未指定目标时
+        ⚠️ **逐台问，绝不「随便挑一台」**：`transport.send_to_mc` 在多台在线且未指定目标时
         会拒发（那是刻意的），所以面板必须自己指定 server_id。
-        ⚠️ **不扣好感**：`_run_console_cmd` 只管执行与等回执，扣费在
+        ⚠️ **不扣好感**：`commands.run_console_cmd` 只管执行与等回执，扣费在
         `exec_command_for` 里。面板是管理员功能（规范 §5.3）。
         ⚠️ **拿不到回执不是错误**（超时 / 发送失败）：照常返回一行、`ok` 与
         解析结果都是 `None`，`message` 说明原因——用 `error_response` 会让前端
@@ -686,7 +686,7 @@ class PanelApi:
         """GET 在线玩家——对**每一台**在线服务器各下发一次 `list`，逐台列出。
 
         ⚠️ 本插件**不追踪在线玩家**：join/leave 事件只按模板广播出去，从不累加
-        （见 `_dispatch_mc_event`）。所以这份数据只能现场问。
+        （见 `dispatcher.dispatch_mc_event`）。所以这份数据只能现场问。
         ⚠️ **并发问**（`asyncio.gather`），不是逐台串行：串行时 N 台里只要有一台
         不回话，面板就要卡满 N × 8 秒；并发下总耗时约等于最慢的那一台。
         ⚠️ **没有服务器在线时返回空列表**，不是错误——那是最常见的状态，
@@ -783,7 +783,7 @@ class PanelApi:
         ⚠️ `ok` 的三种结局必须分清（既有约定，见 claude.md 坑 4）：`True` /
         `False`（服务端明确回了失败）/ `None`（没拿到回执：未连接、多台在线被拒发、
         或超时）。把 `False` 报成成功正是第一轮修的那个跨端 bug 的形状。
-        ⚠️ 指令**不经 AI、不扣好感度**：面板走的是 `_run_console_cmd`（只管执行与
+        ⚠️ 指令**不经 AI、不扣好感度**：面板走的是 `commands.run_console_cmd`（只管执行与
         等回执），计价的 `exec_command_for` 那条路这里一步都不碰。
         """
         if not self.available:

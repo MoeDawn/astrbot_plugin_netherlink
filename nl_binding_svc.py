@@ -119,7 +119,7 @@ class BindingService:
         ⚠️ **返回 `False` 绝不该把玩家丢掉**：他收了提示、进了服，就该照常出现在群里。
 
         ⚠️ 三条刻意的设计（都有守卫盯着，改动前先想清楚）：
-        1. **只走游戏内**——不额外 `_broadcast`，否则一条 join 会推两次群
+        1. **只走游戏内**——不额外 `transport.broadcast`，否则一条 join 会推两次群
         2. **私聊发码，不广播**（2026-10-09 用户要求）：走 `command` 帧执行
            `/tell <玩家> <提示>`，只发给本人。此前用 `bot_reply` 广播到公屏，
            同服任何玩家都能看到别人的验证码，可以抢先绑定。
@@ -275,7 +275,7 @@ class BindingService:
         ⚠️ `servers` 传空串（`upsert` 的第 5 个参数）是**已知取舍**：这条路径只拿到
         一个群消息，**不知道玩家在哪台服**（码簿里只存 code/issued_at，见
         `binding_flow.issue`）。不影响绑定本身（键是游戏 ID），他下次进服时
-        `_dispatch_mc_event` 的 `note_server` 会把当时那台服补进 `servers`。
+        `dispatcher.dispatch_mc_event` 的 `note_server` 会把当时那台服补进 `servers`。
 
         ⚠️ 落盘失败**必须让用户知道**：内存里的表已经改了，重启后却会没掉——不回话
         的话他会以为绑好了。这条路上 `return True`（吞掉这条消息）也是刻意的：

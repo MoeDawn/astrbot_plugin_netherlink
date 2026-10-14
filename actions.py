@@ -74,7 +74,7 @@ class PendingAction:
     cmd: str
     deadline: float
     # 这次动作对好感的**带符号**变化：普通动作是 -cost，送礼（`model: param`）是
-    # 玩家该加的值。`_handle_action_result` 用它，不再写死 `-cost`。
+    # 玩家该加的值。`actions.handle_action_result` 用它，不再写死 `-cost`。
     karma_delta: int = 0
 
 
@@ -707,7 +707,7 @@ def expand_steps(action: "Action", values: dict) -> list:
         # ---- command：不引用参数，展开成**动作自己的 template** ----
         # 🔴 **为什么必须有这个 op**：`template` 与 `confirm` 共存在旧写法下会
         #    **静默失灵** —— `apply` 默认成空列表 ⇒ steps 为空 ⇒
-        #    `_offer_action_confirm` 走「空 steps 立即结算」的分支，
+        #    `actions.offer_action_confirm` 走「空 steps 立即结算」的分支，
         #    命令永远不执行。有了这个 op，模板才走得进确认卡那条路。
         #    `from` 必须指向**某个已声明参数**（规则统一的形状），
         #    约定填 `player`；真正的文本来自 `template`。
@@ -1014,7 +1014,7 @@ def render_command(action: Action, values: dict, extra: Optional[dict] = None) -
     text = action.template or ""
     if not text:
         # 新形态（apply 展开成 steps）没有模板命令 —— 这不是错误。
-        # 调用方（_run_action_tool）把空 cmd 当「无需回执的命令」处理。
+        # 调用方（actions.run_action_tool）把空 cmd 当「无需回执的命令」处理。
         return ""
     for k, v in vals.items():
         text = text.replace("{" + str(k) + "}", str(v))

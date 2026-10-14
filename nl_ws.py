@@ -289,6 +289,6 @@ class WsServer:
             if self.plugin._port_owner.get(port) == server_id:
                 self.plugin._port_owner.pop(port, None)
             logger.warning(f"NetherLink: MC 服务器 [{server_id}] 连接断开")
-            # 下线**延迟确认**：抖动重连不该刷屏（见 _schedule_offline_broadcast）
+            # 下线**延迟确认**：抖动重连不该刷屏（见 dispatcher.schedule_offline_broadcast）
             self.plugin.dispatcher.schedule_offline_broadcast(server_id)
         return ws

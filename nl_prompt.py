@@ -231,7 +231,7 @@ def _bind_hint_is_json(tpl: str) -> bool:
     """`template_bind_hint` 是 tellraw 的 JSON 数组吗？
 
     **自动识别**（2026-10-10）：以 `[` 开头**且**能 `json.loads` 成 list
-    ⇒ JSON 模式；否则按老规矩当纯文本模板走 `_fmt`。
+    ⇒ JSON 模式；否则按老规矩当纯文本模板走 `transport.fmt`。
     这样**存量配置（纯文本）不用迁移**，行为一字不变。
 
     ⚠️ 只认 `[` 开头：MC 的组件 JSON 几乎都是数组形式（`["", {...}, ...]`）。
@@ -250,8 +250,8 @@ def _bind_hint_is_json(tpl: str) -> bool:
 def _fill_placeholders(tpl: str, values: dict) -> str:
     """显式逐个替换**已知**占位符，其余 `{...}` 原样保留。
 
-    🔴 JSON 模式**必须**用它、不能用 `_fmt`：`str.format` 会把 `{"text":`
-    当成占位符并抛 `KeyError: 'text'`，然后 `_fmt` 兜底成**原样返回**——
+    🔴 JSON 模式**必须**用它、不能用 `transport.fmt`：`str.format` 会把 `{"text":`
+    当成占位符并抛 `KeyError: 'text'`，然后 `transport.fmt` 兜底成**原样返回**——
     玩家收到的就是字面量 `{group}` `{code}`。这与 `_render_template` 当年
     踩的「NBT 花括号」是同一课。
     """

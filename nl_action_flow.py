@@ -102,11 +102,11 @@ class ActionFlow:
     def warn_if_actions_stale(self, path) -> None:
         """落盘的动作目录比插件自带的默认版**旧** ⇒ 记一条 warning。
 
-        🔴 **为什么需要它**：`_ensure_actions_file` **从不覆盖**已存在的文件
+        🔴 **为什么需要它**：`ensure_actions_file` **从不覆盖**已存在的文件
         （那是给人改的，覆盖等于删用户配置）。于是升级插件后，用户机器上
         还是**旧版**的 `actions.yaml`。2026-10-11 真机就栽在这：旧版
         `give_item` 有 `confirm` 而无 `apply`，新校验判它坏 ⇒
-        `_register_action_tools` **一个动作都不注册**，而界面上什么都看不见。
+        `register_tools` **一个动作都不注册**，而界面上什么都看不见。
 
         ⚠️ **只告警，不自动改**。用户可能正拿着自己改过的目录 —— 悄悄换掉
         比不换更糟。要给他「知道该看一眼」的机会，而不是替他做决定。
@@ -236,12 +236,12 @@ class ActionFlow:
         """这次动作该发往哪台 MC 服务器。
 
         🔴 **必须取来源服**（`netherlink_ctx.server_id`），不能留空 ——
-        留空时 `_send_to_mc` 在多台在线时会**拒发**（那是刻意的保护：
+        留空时 `transport.send_to_mc` 在多台在线时会**拒发**（那是刻意的保护：
         宁可丢一条也不要把指令发到错的服务器上）。用户实测两台服在线时
         就是这个症状：确认卡发不出去、AI 如实回「服务器不可用」。
 
         QQ 侧发起时没有来源服（`event` 为 None 或不是游戏侧）——
-        那正是 `_send_to_mc` 空串语义该生效的场合。
+        那正是 `transport.send_to_mc` 空串语义该生效的场合。
         """
         try:
             ident = self.plugin._game_identity_from(event) if event is not None else None
@@ -253,7 +253,7 @@ class ActionFlow:
                                     karma_delta: int = None) -> str:
         """私聊发确认卡 + 登记待确认。**本函数绝不执行指令。**
 
-        执行发生在玩家点击之后（`_handle_action_confirm`）—— 这正是
+        执行发生在玩家点击之后（`handle_action_confirm`）—— 这正是
         「给物品要确认」的全部意义。
         """
         player = str(values.get("player") or "")
@@ -396,11 +396,11 @@ class ActionFlow:
         """动作结算落一条审计（与指令审计同一个开关、同一份 audit.jsonl）。
 
         🔴 **为什么单独一个 helper**：动作不产生「指令原文」，但
-        `_apply_action_karma` 在 `delta == 0` 时**提前返回**
+        `apply_action_karma` 在 `delta == 0` 时**提前返回**
         ⇒ 免费动作（`model: none`）在那里面记就漏了。所以审计必须挂在
         **结算点**上，而不是挂在扣好感那一步。四个结算点：
-        `_offer_action_confirm` 的空 steps 分支 / `_handle_action_result` 的
-        成功与失败分支 / `_execute_action`。
+        `offer_action_confirm` 的空 steps 分支 / `handle_action_result` 的
+        成功与失败分支 / `execute_action`。
         ⚠️ 2026-10-11 之前**一个都没有** —— 面板审计页对动作零记录（静默）。
 
         `initiator` / `cmd` / `event` 三个字段要齐 —— 面板的过滤只认它们
@@ -573,21 +573,21 @@ class ActionFlow:
         """执行一个动作：改好感 + 下发指令 + 播报（`confirm: false` 的动作走这里）。
 
         🔴 **两条结算路径必须同口径**（2026-10-11：`refuse_gift` 三条全部踩中）：
-          · `confirm: true`  → `_offer_action_confirm` 只发卡；玩家点确认后
-            MC 回报，由 `_handle_action_result` → `_apply_action_karma`
-            + `_announce_action_done` 结算
+          · `confirm: true`  → `offer_action_confirm` 只发卡；玩家点确认后
+            MC 回报，由 `handle_action_result` → `apply_action_karma`
+            + `announce_action_done` 结算
           · `confirm: false` → **本函数**当场结算
         原先本函数**自己另写了一套**减价与播报，于是两处立刻分叉：
           ① 只认 `cost`，而 `model: param`（如 `refuse_gift`）的
              `resolve_karma` 恒返回 0 ⇒ **delta 永远不生效**
-          ② 播报只喂 player/cost/item/count/server，且只 `_broadcast`
-             —— `{display_name}` 不在其中，`_fmt` 兜底**原样输出**；
+          ② 播报只喂 player/cost/item/count/server，且只 `transport.broadcast`
+             —— `{display_name}` 不在其中，`transport.fmt` 兜底**原样输出**；
              也漏了推 MC 公屏那一步
           ③ `template: ""` 的动作仍调 `exec_command_for("")`，它返回
              「错误：指令为空。」⇒ AI 把这条当动作失败
         ⇒ 现在统一复用上面那对函数，本函数不再碰 `_fmt`。
         """
-        # ⚠️ 留空会走 `_send_to_mc` 的「未指定目标」保护（多台在线时拒发）。
+        # ⚠️ 留空会走 `transport.send_to_mc` 的「未指定目标」保护（多台在线时拒发）。
         #    先从事件取来源服，仍为空才交给空串语义（QQ 侧发起的场合）。
         if not server_id:
             server_id = self._action_server_id(event)
@@ -610,7 +610,7 @@ class ActionFlow:
         item = actions.PendingAction(
             token=0,
             action_name=action.name,
-            # 与 `_offer_action_confirm` 登记的形状一致（`_announce_action_done`
+            # 与 `offer_action_confirm` 登记的形状一致（`announce_action_done`
             # 只读 `values["values"]`，steps 是空列表）
             values={"steps": [], "values": dict(values)},
             player=player,

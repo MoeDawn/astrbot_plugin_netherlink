@@ -366,7 +366,7 @@ class KarmaService:
         ⚠️ 绑定表由 `BindingService` 持有（`self.plugin.bindings.table`）；
         四个调用点都走本方法，别处不再直接读表。
         ⚠️ 名字**必须**含子串 `identity_key`：`tests/test_contracts.py` 有两条
-        AST 断言，要求 `exec_command_for` / `_dispatch_mc_event` 的函数体里出现
+        AST 断言，要求 `exec_command_for` / `dispatch_mc_event` 的函数体里出现
         这个子串。改成 `_karma_key` 会让那两条以「未找到」失败。
         """
         return karma_identity_key(source, initiator, qq, self.plugin.bindings.table)

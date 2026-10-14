@@ -134,7 +134,7 @@ class ActionTool(FunctionTool):
     async def run(self, event, **kwargs):
         """AstrBot 会把 AI 给的参数按 schema 过滤后传进来（`event` 在最前）。
 
-        ⚠️ **不在这里做业务** —— 全部委托给插件的 `_run_action_tool`，
+        ⚠️ **不在这里做业务** —— 全部委托给插件的 `actions.run_action_tool`，
         那样「工具怎么被调」与「动作怎么执行」分开，后者可以在没有 AstrBot
         的环境里单测。
         """

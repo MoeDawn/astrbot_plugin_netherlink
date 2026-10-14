@@ -38,7 +38,7 @@ def servers_view(conns: dict, display_of, now: float) -> list:
     ⚠️ `id` **就是 MC 上报的 server-name**（2026-10-07 身份改版后
     `server_id = reported`），不是「配置里的名字」——所以**不再单独回一份
     `reported_name`**：那两列会是同一个值，纯重复。
-    ⚠️ `display` 走 `_mc_server_display`（`ws_ports` 里按端口配的显示名），
+    ⚠️ `display` 走 `transport.server_display`（`ws_ports` 里按端口配的显示名），
     与身份是两回事。
     ⚠️ `now` 目前未使用，见模块 docstring（没有连接时间戳，算不出在线时长）。
     """
@@ -330,7 +330,7 @@ def actions_view(actions: list, enabled: bool, path: str,
                  error: str = "") -> dict:
     """结构化动作列表 → 面板展示用。
 
-    🔴 **为什么要把 `error` 也带上**：目录有坏条目时 `_register_action_tools`
+    🔴 **为什么要把 `error` 也带上**：目录有坏条目时 `actions.register_tools`
     会**一个动作都不注册**（宁可全不注册，也不要半套规则）。症状是
     「AI 说没有这个工具」——与「压根没配」长得一样，**静默**。
     2026-10-11 真机就栽在这：用户机器上落地的 `actions.yaml` 是旧版（缺 `apply`），

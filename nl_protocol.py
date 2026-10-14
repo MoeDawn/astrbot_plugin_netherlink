@@ -19,7 +19,7 @@ class CmdResult:
       ok=True  + output=""   -> 执行成功，只是没输出（照常收费）
       ok=True  + output=文本 -> 执行成功（照常收费）
       ok=False               -> 明确失败，**必须退费**
-      （没有回执）            -> 超时，由 _run_console_cmd 返回 None 表示，同样退费
+      （没有回执）            -> 超时，由 run_console_cmd 返回 None 表示，同样退费
 
     早先 `_run_console_cmd` 只返回 Optional[str]，把「明确失败」和「执行成功」一起
     塞进带输出的字符串里，调用点无从分辨，于是失败也照扣好感。

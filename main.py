@@ -109,7 +109,6 @@ try:
     from .karma import (
         KARMA_MAX_RECORDS,
         KarmaStore,
-        clamp_cost,
         clamp_value,
         identity_key,
         karma_identity_key,
@@ -119,7 +118,6 @@ except ImportError:  # 插件以顶层模块方式加载时
     from karma import (
         KARMA_MAX_RECORDS,
         KarmaStore,
-        clamp_cost,
         clamp_value,
         identity_key,
         karma_identity_key,
@@ -543,9 +541,6 @@ DEFAULT_SERVER_OFFLINE = '[{server}] 服务器已断开'
 DEFAULT_ACTION_DONE = '{player} 花费 {cost} 好感获得 {items}'
 
 
-# 键名 → 模式里的字段名（对不上的直接跳过，不臆造）
-_SCHEMA_KEY_ALIASES: dict = {}
-
 
 class NetherLinkPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -851,7 +846,7 @@ class NetherLinkPlugin(Star):
 
         # ---- 运行时状态 ----
         self._runner: web.AppRunner | None = None
-        # `_start_ws_server` 那个 task。**必须存引用**：卸载时要等它跑完，
+        # `ws.start()` 那个 task。**必须存引用**：卸载时要等它跑完，
         # 否则 `_runner` 可能还没被赋值（task 尚未执行到那一行），
         # runner 就漏了 cleanup —— 端口不释放，重装时报 address already in use。
         self._ws_task: asyncio.Task | None = None
@@ -877,7 +872,7 @@ class NetherLinkPlugin(Star):
         #    重连」。立即播报会让群里看到「已断开」紧跟「已连接」。延迟窗口内
         #    该 server_id 若重新握手成功就取消这条播报。
         self._server_offline_tasks: dict = {}
-        # 卸载中标志：置真后 `_schedule_offline_broadcast` 不再挂新任务。
+        # 卸载中标志：置真后 `dispatcher.schedule_offline_broadcast` 不再挂新任务。
         # 见 `terminate()` 的说明（重启时误报离线的根因）。
         self._terminating: bool = False
         # 事件分发 / 跨服服务（2026-10-14 阶段三外移）：MC 事件渲染推群、服务器
@@ -919,7 +914,7 @@ class NetherLinkPlugin(Star):
 
         # 游戏内对话进行中的玩家 -> asyncio.Lock，防止同玩家并发请求 LLM
         self._player_llm_locks: dict[str, asyncio.Lock] = {}
-        # 最近一条**真实**进站群消息的 unified_msg_origin。_broadcast 需要主动
+        # 最近一条**真实**进站群消息的 unified_msg_origin。transport.broadcast 需要主动
         # 发消息时必须自己拼 umo，而只有真实事件上的 umo 才一定正确（首段是
         # 平台标识、会话号是平台自己的写法）。学到它之后优先复用，见
         # _resolve_qq_platform_id。
@@ -1120,7 +1115,7 @@ class NetherLinkPlugin(Star):
         #    **改完要重启**（热重载不会重新注册）。
         # ⚠️ handler 写成**绑定方法**、闭包在 self 上——官方文档给的唯一写法
         #    （handler 只收路径参数，没有 request 形参；request 是 ContextVar 代理）。
-        # ⚠️ 无上下文时静默跳过，口径同 _init_game_platform：测试替身不算错误。
+        # ⚠️ 无上下文时静默跳过，口径同 platform.init()：测试替身不算错误。
         #    try/except 另有用处——旧版 AstrBot 可能没有 register_web_api，
         #    缺了它只是面板不可用，不该连累插件加载。
         # ⚠️ 先判 `PANEL_AVAILABLE`（模块在不在）、再 try/except（方法在不在）：
@@ -1760,7 +1755,7 @@ class NetherLinkPlugin(Star):
     def _render_bot_reply(self, text: str) -> str:
         """把一段文本按 `template_bot_reply_game` 渲染成**整行**（含 § 染色码）。
 
-        ⚠️ **唯一的渲染点**：`send_game_line`（定向）、`_broadcast_to_game`（广播）
+        ⚠️ **唯一的渲染点**：`send_game_line`（定向）、`transport.broadcast_to_game`（广播）
         与 `_handle_bot_chat` 的「适配器不可用」回退分支都调它。此前这三处各自抄了
         一份替换链（回退分支那份还漏了 `§ -> &` 净化），而本项目的 docstring 只写了
         「逐字一致」——代码里没有任何东西保证它一致。本项目已经被「同一条规则存成
@@ -2075,11 +2070,11 @@ class NetherLinkPlugin(Star):
     async def _reply_to_group(self, group_id: str, text: str) -> None:
         """向**单个**群推送一段文本（绑定流程的回话用）。
 
-        与 `_broadcast` 的分工：那个是「推给所有绑定群」（死亡/进退服这类天然
+        与 `transport.broadcast` 的分工：那个是「推给所有绑定群」（死亡/进退服这类天然
         属于全体的消息），本方法只推一个指定的群——绑定码只在某一个群里兑换，
         回话跟着发到那个群即可。
 
-        ⚠️ 三件事逐条照抄 `_broadcast`（见「坑 2」），一件都不能省：
+        ⚠️ 三件事逐条照抄 `transport.broadcast`（见「坑 2」），一件都不能省：
         ① 平台标识必须 `_resolve_qq_platform_id()` 解析，**不能写死 `aiocqhttp`**
            ——umo 首段是用户在 WebUI 里填的「机器人名称」，写死只在恰好那么命名的
            部署上成立，其余部署下全部主动推送静默失效；
@@ -2154,7 +2149,7 @@ class NetherLinkPlugin(Star):
             # 模块名，而本模块是以**顶层名** `mc_platform` 进缓存的）。
             # 后果：`@register_platform_adapter` 不会重跑，注册表里没有我们的
             # 类型，`have_adapter` 报 False → 需要重启。
-            # 与 `_init_game_platform` 里那句「框架自动重新导入」的假设正相反，
+            # 与 `platform.init()` 里那句「框架自动重新导入」的假设正相反，
             # 2026-09-22 用户实测到的重载报错就是这么来的。
             self.platform.drop_module_for_reload()
             adapter = self.platform.resolve_adapter()
@@ -2481,7 +2476,7 @@ class NetherLinkPlugin(Star):
             group_id = str(event.get_group_id() or "")
             if group_id not in self.group_names:
                 return
-            # 记下这条真实会话的 umo，供 _broadcast 主动推送时取首段（平台标识）。
+            # 记下这条真实会话的 umo，供 transport.broadcast 主动推送时取首段（平台标识）。
             # 放在开关校验之前：即便 QQ->MC 转发关着，这条信息依然有效且有用。
             self._qq_umo_seen = event.unified_msg_origin
             if not self.config.get("enable_qq_to_mc", True):
@@ -2524,7 +2519,7 @@ class NetherLinkPlugin(Star):
                 .replace("{sender}", str(event.get_sender_name() or "?"))
                 .replace("{text}", clean_text)
             )
-            # 群消息天然属于全体：广播给所有在线服务器（见 _broadcast_to_mc）
+            # 群消息天然属于全体：广播给所有在线服务器（见 transport.broadcast_to_mc）
             await self.transport.broadcast_to_mc({"type": "chat", "line": line})
         except Exception as e:
             logger.error(f"NetherLink: QQ->MC 转发失败: {e}")
@@ -2646,14 +2641,14 @@ class NetherLinkPlugin(Star):
             # 代价是少一层复核，收益是每次指令由 2 次 LLM 往返降到 1 次。
             target = self._resolve_target_server(server)
             # 填了名字却不在线时**不执行**：宁可如实告知，也不让消息落到
-            # _send_to_mc 的「多台在线时拒发」分支——那会让 AI 收到一个
+            # transport.send_to_mc 的「多台在线时拒发」分支——那会让 AI 收到一个
             # 与它的意图无关的失败。
             if server and not target:
                 online = self._online_servers()
                 names = "、".join(f"{d}（{s}）" for s, d in online) or "（当前无在线服务器）"
                 return f"没有名为「{server}」的服务器在线。在线的是：{names}"
             # 对称的那条：**没填 server 且多台在线**时同样提前拦下。
-            # 不拦的话消息会落到 _send_to_mc 的「拒发」分支，而它只返回 False、
+            # 不拦的话消息会落到 transport.send_to_mc 的「拒发」分支，而它只返回 False、
             # 不带原因，最终被翻译成「未收到服务器回执（可能仍在执行）」——
             # 一句**事实上错误**的话（根本没发送），AI 据此判断「服务器掉线了」，
             # 给用户的答复是「两台服务器都没回执，去问问管理员」（2026-09-22 实测）。
@@ -2718,7 +2713,7 @@ class NetherLinkPlugin(Star):
         ⚠️ **先等 `_ws_task`**：`_runner` 由那个 task 赋值，不等它可能还是 None，
         于是 runner 漏了 cleanup、**端口不释放**（重装时 address already in use）。
         """
-        # ⚠️ **先置卸载标志**：下面关连接会让 `_ws_session` 走到断开分支，
+        # ⚠️ **先置卸载标志**：下面关连接会让 `ws.session` 走到断开分支，
         #    那条路会去挂一个 5 秒后触发的下线播报。不挡住它，新实例已播完
         #    「已连接」之后，这个孤儿任务还会再播一条「已断开」（跨实例，新实例管不到）。
         self._terminating = True
