@@ -599,7 +599,7 @@ class ActionFlow:
         out = ""
         if cmd:
             try:
-                out = await self.plugin.exec_command_for(
+                out = await self.plugin.commands.exec_command_for(
                     initiator=player, cmd=cmd, source="game",
                     cost=cost, server_id=server_id,
                 )

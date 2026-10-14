@@ -665,7 +665,7 @@ class PanelApi:
             "message": "",
         }
         try:
-            result = await self.plugin._run_console_cmd(
+            result = await self.plugin.commands.run_console_cmd(
                 "list", timeout=8.0, server_id=server_id
             )
         except Exception as e:
@@ -818,7 +818,7 @@ class PanelApi:
                         "配置里的目标服务器 %s 不在线" % item["server"],
                     ))
 
-            result = await self.plugin._run_console_cmd(
+            result = await self.plugin.commands.run_console_cmd(
                 item["cmd"], timeout=8.0, server_id=server_id
             )
             if result is None:
