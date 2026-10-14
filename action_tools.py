@@ -106,6 +106,12 @@ def build_description(action: A.Action) -> str:
     rules = action.pricing_rules.strip()
     if rules:
         parts.append(rules)
+    # Top-level universal pricing framework (since version 6) appended **after** this action's rules:
+    # this action first explains "how C is computed", the framework then explains "how L/I/R/exceed-tier/discount turn C into T";
+    # if reversed, the references won't match up. Also provide the framework even when this action has no rules.
+    common = (getattr(action, "pricing_common", "") or "").strip()
+    if common:
+        parts.append(common)
     return "\n".join(parts)
 
 

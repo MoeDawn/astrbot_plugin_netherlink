@@ -158,6 +158,9 @@ class Action:
     # `done` 播报里 `{items}` 从哪些参数取物品（默认只取 `item`）。
     # `swap_items` 要设成 `[gain]` —— 播报该说「获得」的那侧，不是他上交的。
     done_items_from: list = field(default_factory=lambda: ["item"])
+    # 顶层 `pricing_common` 的文本(version 6 起):通用计价框架(L/I/R/超标三档/
+    # 折扣),构建工具描述时拼在本动作 pricing_rules 之后 —— 改一处即全部动作生效.
+    pricing_common: str = ""
 
     @property
     def pricing_rules(self) -> str:
@@ -213,6 +216,8 @@ def parse_actions(doc) -> list:
         raise ActionError("actions 必须是列表，实际是 %s" % type(raw).__name__)
 
     out = []
+    # 顶层通用计价框架(version 6):所有动作共用,构建工具描述时拼接
+    _common = str(doc.get("pricing_common") or "").strip()
     seen = set()
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
@@ -324,6 +329,7 @@ def parse_actions(doc) -> list:
             apply=item.get("apply") or [],
             card=item.get("card") or {},
             done_items_from=item.get("done_items_from") or ["item"],
+            pricing_common=_common,
         ))
     return out
 
